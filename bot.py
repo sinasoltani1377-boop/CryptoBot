@@ -2,8 +2,9 @@ import requests
 from analysis import generate_signal
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, JobQueue
-with open("token.txt", "r") as f:
-    TOKEN = f.read().strip()
+import os
+TOKEN = os.getenv("BOT_TOKEN")
+    
 
 
 def get_price(symbol):
