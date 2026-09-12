@@ -792,7 +792,7 @@ def calculate_signal_score(market_data, direction):
 
     return {
         "score": score,
-        "max_score": 12,
+        "max_score": 11,
         "details": details
     }
 
