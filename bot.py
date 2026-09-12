@@ -59,27 +59,30 @@ async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         btc_signal = generate_signal(btc_data)
         sol_signal = generate_signal(sol_data)
 
-        message = (
-    "🤖 CryptoBot Signal\n\n"
-    f"₿ BTC:\n"
-    f"📅 Daily: {btc_signal['daily']}\n"
-    f"⏱ 4H: {btc_signal['4h']}\n"
-    f"🕐 1H: {btc_signal['1h']}\n"
-    f"🔀 BOS: {btc_signal['bos']}\n"
-    f"↩️ Pullback: {btc_signal['pullback']}\n"
-    f"🕯 Confirmation: {btc_signal['confirmation']}\n"
-    f"🎯 Signal: {btc_signal['signal']}\n"
-    f"⚠️ Reason: {btc_signal['reason']}\n\n"
-    f"◎ SOL:\n"
-    f"📅 Daily: {sol_signal['daily']}\n"
-    f"⏱ 4H: {sol_signal['4h']}\n"
-    f"🕐 1H: {sol_signal['1h']}\n"
-    f"🔀 BOS: {sol_signal['bos']}\n"
-    f"↩️ Pullback: {sol_signal['pullback']}\n"
-    f"🕯 Confirmation: {sol_signal['confirmation']}\n"
-    f"🎯 Signal: {sol_signal['signal']}\n"
-    f"⚠️ Reason: {sol_signal['reason']}"
-)
+              message = (
+            "🤖 CryptoBot Signal\n\n"
+
+            f"₿ BTC:\n"
+            f"📅 Daily: {btc_signal.get('daily', 'UNKNOWN')}\n"
+            f"⏱ 4H: {btc_signal.get('4h', 'UNKNOWN')}\n"
+            f"🕐 1H: {btc_signal.get('1h', 'UNKNOWN')}\n"
+            f"📊 Score: {btc_signal.get('score', 0)}\n"
+            f"⭐ Quality: {btc_signal.get('quality', 'LOW')}\n"
+            f"🎯 Signal: {btc_signal.get('signal', 'NO_TRADE')}\n"
+            f"⚠️ Reason: {btc_signal.get('reason', 'UNKNOWN')}\n"
+            f"🧠 Strategies: {', '.join(btc_signal.get('strategy_matches', []))}\n\n"
+
+            f"◎ SOL:\n"
+            f"📅 Daily: {sol_signal.get('daily', 'UNKNOWN')}\n"
+            f"⏱ 4H: {sol_signal.get('4h', 'UNKNOWN')}\n"
+            f"🕐 1H: {sol_signal.get('1h', 'UNKNOWN')}\n"
+            f"📊 Score: {sol_signal.get('score', 0)}\n"
+            f"⭐ Quality: {sol_signal.get('quality', 'LOW')}\n"
+            f"🎯 Signal: {sol_signal.get('signal', 'NO_TRADE')}\n"
+            f"⚠️ Reason: {sol_signal.get('reason', 'UNKNOWN')}\n"
+            f"🧠 Strategies: {', '.join(sol_signal.get('strategy_matches', []))}"
+        )
+
 
         await update.message.reply_text(message)
 
