@@ -1,10 +1,10 @@
 import requests
 from analysis import generate_signal
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, JobQueue
+from telegram.ext import Application, CommandHandler, ContextTypes
 import os
+
 TOKEN = os.getenv("BOT_TOKEN")
-    
 
 
 def get_price(symbol):
@@ -27,7 +27,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 ربات ترید فعال است!\n\n"
         "📊 برای دریافت قیمت BTC و SOL دستور زیر را بفرست:\n"
-        "/price"
+        "/price\n\n"
+        "📈 برای دریافت تحلیل:\n"
+        "/signal"
     )
 
 
@@ -46,8 +48,9 @@ async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         await update.message.reply_text(
-            "❌ خطا در دریافت قیمت."
+            f"❌ خطا در دریافت قیمت: {e}"
         )
+
 
 async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -59,10 +62,18 @@ async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         btc_signal = generate_signal(btc_data)
         sol_signal = generate_signal(sol_data)
 
-              message = (
+        btc_strategies = ", ".join(
+            btc_signal.get("strategy_matches", [])
+        )
+
+        sol_strategies = ", ".join(
+            sol_signal.get("strategy_matches", [])
+        )
+
+        message = (
             "🤖 CryptoBot Signal\n\n"
 
-            f"₿ BTC:\n"
+            "₿ BTC:\n"
             f"📅 Daily: {btc_signal.get('daily', 'UNKNOWN')}\n"
             f"⏱ 4H: {btc_signal.get('4h', 'UNKNOWN')}\n"
             f"🕐 1H: {btc_signal.get('1h', 'UNKNOWN')}\n"
@@ -70,9 +81,9 @@ async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⭐ Quality: {btc_signal.get('quality', 'LOW')}\n"
             f"🎯 Signal: {btc_signal.get('signal', 'NO_TRADE')}\n"
             f"⚠️ Reason: {btc_signal.get('reason', 'UNKNOWN')}\n"
-            f"🧠 Strategies: {', '.join(btc_signal.get('strategy_matches', []))}\n\n"
+            f"🧠 Strategies: {btc_strategies}\n\n"
 
-            f"◎ SOL:\n"
+            "◎ SOL:\n"
             f"📅 Daily: {sol_signal.get('daily', 'UNKNOWN')}\n"
             f"⏱ 4H: {sol_signal.get('4h', 'UNKNOWN')}\n"
             f"🕐 1H: {sol_signal.get('1h', 'UNKNOWN')}\n"
@@ -80,31 +91,39 @@ async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⭐ Quality: {sol_signal.get('quality', 'LOW')}\n"
             f"🎯 Signal: {sol_signal.get('signal', 'NO_TRADE')}\n"
             f"⚠️ Reason: {sol_signal.get('reason', 'UNKNOWN')}\n"
-            f"🧠 Strategies: {', '.join(sol_signal.get('strategy_matches', []))}"
+            f"🧠 Strategies: {sol_strategies}"
         )
-
 
         await update.message.reply_text(message)
 
     except Exception as e:
         await update.message.reply_text(
             f"❌ خطا: {e}"
-                             )
+        )
+
 
 async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
     try:
         from market import get_market_data
 
         for symbol in ["BTC-SWAP-USDT", "SOL-SWAP-USDT"]:
+
             data = get_market_data(symbol)
+
             result = generate_signal(data)
 
             print(symbol, result)
 
             if result["signal"] in ["LONG", "SHORT"]:
+
                 await context.bot.send_message(
                     chat_id=6912201079,
-                    text=f"🚨 {symbol}\nسیگنال: {result['signal']}"
+                    text=(
+                        f"🚨 {symbol}\n"
+                        f"سیگنال: {result['signal']}\n"
+                        f"⭐ کیفیت: {result.get('quality', 'UNKNOWN')}\n"
+                        f"📊 امتیاز: {result.get('score', 0)}"
+                    )
                 )
 
     except Exception as e:
@@ -112,9 +131,15 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
 
 
 app = Application.builder().token(TOKEN).build()
+
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("price", price))
 app.add_handler(CommandHandler("signal", signal))
-app.job_queue.run_repeating(auto_signal, interval=300, first=10)
+
+app.job_queue.run_repeating(
+    auto_signal,
+    interval=300,
+    first=10
+)
 
 app.run_polling()
