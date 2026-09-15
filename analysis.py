@@ -818,7 +818,7 @@ def quality_filter(score_data):
 # ============================================================
 # FINAL SIGNAL ENGINE
 # ============================================================
-def calculate_trade_levels(candles, direction):
+    def calculate_trade_levels(candles, direction):
     """
     Calculate Entry, Stop Loss and Take Profit levels
     based on recent swing structure.
