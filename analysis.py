@@ -842,55 +842,53 @@ def generate_signal(market_data):
         }
 
     # ========================================================
-    # DETERMINE MARKET BIAS
+    # TEST BOTH DIRECTIONS
     # ========================================================
 
-    long_bias = 0
-    short_bias = 0
+    long_score = 0
+    short_score = 0
+
+    long_strategies = []
+    short_strategies = []
+
+    # ========================================================
+    # DAILY BIAS
+    # ========================================================
 
     if daily == "BULLISH":
-        long_bias += 2
+        long_score += 2
+        long_strategies.append("DAILY_BULLISH")
 
-    if daily == "BEARISH":
-        short_bias += 2
+    elif daily == "BEARISH":
+        short_score += 2
+        short_strategies.append("DAILY_BEARISH")
+
+    # ========================================================
+    # 4H
+    # ========================================================
 
     if four_hour == "BULLISH":
-        long_bias += 2
+        long_score += 2
+        long_strategies.append("4H_BULLISH")
 
-    if four_hour == "BEARISH":
-        short_bias += 2
+    elif four_hour == "BEARISH":
+        short_score += 2
+        short_strategies.append("4H_BEARISH")
 
-    # 1H structure
+    # RANGE = NEUTRAL
+    # بنابراین معامله را مستقیم رد نمی‌کنیم.
+
+    # ========================================================
+    # 1H
+    # ========================================================
+
     if one_hour == "BULLISH":
-        long_bias += 1
+        long_score += 1
+        long_strategies.append("1H_BULLISH")
 
-    if one_hour == "BEARISH":
-        short_bias += 1
-
-    # ========================================================
-    # CHOOSE DIRECTION
-    # ========================================================
-
-    if long_bias > short_bias and long_bias >= 3:
-
-        direction = "LONG"
-
-    elif short_bias > long_bias and short_bias >= 3:
-
-        direction = "SHORT"
-
-    else:
-
-        return {
-            "daily": daily,
-            "4h": four_hour,
-            "1h": one_hour,
-            "signal": "NO_TRADE",
-            "reason": "NO_CLEAR_DIRECTION",
-            "score": 0,
-            "quality": "LOW",
-            "strategy_matches": []
-        }
+    elif one_hour == "BEARISH":
+        short_score += 1
+        short_strategies.append("1H_BEARISH")
 
     # ========================================================
     # INDICATORS
@@ -902,176 +900,190 @@ def generate_signal(market_data):
 
     pullback = detect_pullback(candles_1h)
 
-    confirmation = confirmation_candle(
+    liquidity_long = detect_liquidity_sweep(
         candles_1h,
-        direction
+        "LONG"
     )
 
-    liquidity_sweep = detect_liquidity_sweep(
+    liquidity_short = detect_liquidity_sweep(
         candles_1h,
-        direction
+        "SHORT"
     )
 
-    order_block = detect_order_block(
+    order_block_long = detect_order_block(
         candles_1h,
-        direction
+        "LONG"
     )
 
-    breakout_retest = detect_breakout_retest(
+    order_block_short = detect_order_block(
         candles_1h,
-        direction
+        "SHORT"
     )
 
-    sr_reversal = sr_reversal_signal(
+    breakout_long = detect_breakout_retest(
         candles_1h,
-        direction
+        "LONG"
     )
 
-    range_state = detect_range(candles_1h)
-
-    trend_pullback = trend_pullback_signal(
+    breakout_short = detect_breakout_retest(
         candles_1h,
-        direction
+        "SHORT"
+    )
+
+    sr_long = sr_reversal_signal(
+        candles_1h,
+        "LONG"
+    )
+
+    sr_short = sr_reversal_signal(
+        candles_1h,
+        "SHORT"
+    )
+
+    confirmation_long = confirmation_candle(
+        candles_1h,
+        "LONG"
+    )
+
+    confirmation_short = confirmation_candle(
+        candles_1h,
+        "SHORT"
+    )
+
+    trend_pullback_long = trend_pullback_signal(
+        candles_1h,
+        "LONG"
+    )
+
+    trend_pullback_short = trend_pullback_signal(
+        candles_1h,
+        "SHORT"
     )
 
     # ========================================================
-    # SCORE
+    # LONG STRATEGIES
     # ========================================================
 
-    score = 0
-    strategies = []
+    if ema == "BULLISH":
+        long_score += 1
+        long_strategies.append("EMA_BULLISH")
 
-    # --------------------------------------------------------
-    # Higher timeframe
-    # --------------------------------------------------------
+    if bos == "BULLISH_BOS":
+        long_score += 1
+        long_strategies.append("BULLISH_BOS")
 
-    if direction == "LONG":
+    if trend_pullback_long:
+        long_score += 2
+        long_strategies.append("TREND_PULLBACK")
 
-        if daily == "BULLISH":
-            score += 2
-            strategies.append("DAILY_BULLISH")
+    if breakout_long:
+        long_score += 2
+        long_strategies.append("BREAKOUT_RETEST")
 
-        if four_hour == "BULLISH":
-            score += 2
-            strategies.append("4H_BULLISH")
+    if liquidity_long:
+        long_score += 2
+        long_strategies.append("LIQUIDITY_SWEEP")
 
-    if direction == "SHORT":
+    if order_block_long:
+        long_score += 2
+        long_strategies.append("ORDER_BLOCK")
 
-        if daily == "BEARISH":
-            score += 2
-            strategies.append("DAILY_BEARISH")
+    if sr_long:
+        long_score += 1
+        long_strategies.append("SR_REVERSAL")
 
-        if four_hour == "BEARISH":
-            score += 2
-            strategies.append("4H_BEARISH")
-
-    # --------------------------------------------------------
-    # EMA
-    # --------------------------------------------------------
-
-    if direction == "LONG" and ema == "BULLISH":
-        score += 1
-        strategies.append("EMA_BULLISH")
-
-    if direction == "SHORT" and ema == "BEARISH":
-        score += 1
-        strategies.append("EMA_BEARISH")
-
-    # --------------------------------------------------------
-    # MAIN STRATEGIES
-    # --------------------------------------------------------
-
-    if trend_pullback:
-
-        score += 2
-        strategies.append("TREND_PULLBACK")
-
-    if breakout_retest:
-
-        score += 2
-        strategies.append("BREAKOUT_RETEST")
-
-    if liquidity_sweep:
-
-        score += 2
-        strategies.append("LIQUIDITY_SWEEP")
-
-    if order_block:
-
-        score += 2
-        strategies.append("ORDER_BLOCK")
-
-    # --------------------------------------------------------
-    # BOS
-    # --------------------------------------------------------
-
-    if direction == "LONG" and bos == "BULLISH_BOS":
-
-        score += 1
-        strategies.append("BULLISH_BOS")
-
-    if direction == "SHORT" and bos == "BEARISH_BOS":
-
-        score += 1
-        strategies.append("BEARISH_BOS")
-
-    # --------------------------------------------------------
-    # S/R REVERSAL
-    # --------------------------------------------------------
-
-    if sr_reversal:
-
-        score += 1
-        strategies.append("SR_REVERSAL")
-
-    # --------------------------------------------------------
-    # CONFIRMATION
-    # --------------------------------------------------------
-
-    if confirmation:
-
-        score += 1
-        strategies.append("CONFIRMATION")
+    if confirmation_long:
+        long_score += 1
+        long_strategies.append("CONFIRMATION")
 
     # ========================================================
-    # MAIN SETUP COUNT
+    # SHORT STRATEGIES
     # ========================================================
 
-    main_setups = 0
+    if ema == "BEARISH":
+        short_score += 1
+        short_strategies.append("EMA_BEARISH")
 
-    if trend_pullback:
-        main_setups += 1
+    if bos == "BEARISH_BOS":
+        short_score += 1
+        short_strategies.append("BEARISH_BOS")
 
-    if breakout_retest:
-        main_setups += 1
+    if trend_pullback_short:
+        short_score += 2
+        short_strategies.append("TREND_PULLBACK")
 
-    if liquidity_sweep:
-        main_setups += 1
+    if breakout_short:
+        short_score += 2
+        short_strategies.append("BREAKOUT_RETEST")
 
-    if order_block:
-        main_setups += 1
+    if liquidity_short:
+        short_score += 2
+        short_strategies.append("LIQUIDITY_SWEEP")
+
+    if order_block_short:
+        short_score += 2
+        short_strategies.append("ORDER_BLOCK")
+
+    if sr_short:
+        short_score += 1
+        short_strategies.append("SR_REVERSAL")
+
+    if confirmation_short:
+        short_score += 1
+        short_strategies.append("CONFIRMATION")
 
     # ========================================================
-    # FINAL FILTER
+    # CHOOSE STRONGER DIRECTION
     # ========================================================
 
-    # حداقل یک استراتژی اصلی باید وجود داشته باشد
-    if main_setups == 0:
+    if long_score > short_score:
+
+        direction = "LONG"
+        score = long_score
+        strategies = long_strategies
+        confirmation = confirmation_long
+
+    elif short_score > long_score:
+
+        direction = "SHORT"
+        score = short_score
+        strategies = short_strategies
+        confirmation = confirmation_short
+
+    else:
+
+        return {
+            "daily": daily,
+            "4h": four_hour,
+            "1h": one_hour,
+            "signal": "NO_TRADE",
+            "reason": "DIRECTION_TIE",
+            "score": 0,
+            "quality": "LOW",
+            "strategy_matches": []
+        }
+
+    # ========================================================
+    # MAIN SETUP
+    # ========================================================
+
+    main_setup = any(
+        x in strategies
+        for x in [
+            "TREND_PULLBACK",
+            "BREAKOUT_RETEST",
+            "LIQUIDITY_SWEEP",
+            "ORDER_BLOCK"
+        ]
+    )
+
+    if not main_setup:
 
         return {
             "daily": daily,
             "4h": four_hour,
             "1h": one_hour,
             "direction": direction,
-            "bos": bos,
-            "pullback": pullback,
-            "confirmation": confirmation,
-            "ema": ema,
-            "liquidity_sweep": liquidity_sweep,
-            "order_block": order_block,
-            "breakout_retest": breakout_retest,
-            "sr_reversal": sr_reversal,
-            "range": range_state,
             "score": score,
             "quality": "LOW",
             "signal": "NO_TRADE",
@@ -1093,53 +1105,32 @@ def generate_signal(market_data):
         quality = "LOW"
 
     # ========================================================
-    # SIGNAL
+    # FINAL CONFIRMATION
     # ========================================================
 
-    if quality in ["HIGH", "MEDIUM"] and confirmation:
+    if not confirmation:
 
         return {
             "daily": daily,
             "4h": four_hour,
             "1h": one_hour,
             "direction": direction,
-            "bos": bos,
-            "pullback": pullback,
-            "confirmation": confirmation,
-            "ema": ema,
-            "liquidity_sweep": liquidity_sweep,
-            "order_block": order_block,
-            "breakout_retest": breakout_retest,
-            "sr_reversal": sr_reversal,
-            "range": range_state,
             "score": score,
             "quality": quality,
-            "signal": direction,
-            "reason": "VALID_SETUP",
+            "signal": "NO_TRADE",
+            "reason": "CONFIRMATION_MISSING",
             "strategy_matches": strategies
         }
 
     # ========================================================
-    # NO TRADE
+    # FINAL SIGNAL
     # ========================================================
 
-    return {
-        "daily": daily,
-        "4h": four_hour,
-        "1h": one_hour,
-        "direction": direction,
-        "bos": bos,
-        "pullback": pullback,
-        "confirmation": confirmation,
-        "ema": ema,
-        "liquidity_sweep": liquidity_sweep,
-        "order_block": order_block,
-        "breakout_retest": breakout_retest,
-        "sr_reversal": sr_reversal,
-        "range": range_state,
-        "score": score,
-        "quality": quality,
-        "signal": "NO_TRADE",
-        "reason": "CONFIRMATION_MISSING",
-        "strategy_matches": strategies
-        }
+    if quality in ["HIGH", "MEDIUM"]:
+
+        return {
+            "daily": daily,
+            "4h": four_hour,
+            "1h": one_hour,
+            "direction": direction,
+            "bos": bos
