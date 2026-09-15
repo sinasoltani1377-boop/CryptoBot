@@ -1032,6 +1032,7 @@ def generate_signal(market_data):
         short_score += 1
         short_strategies.append("CONFIRMATION")
 
+    
     # ========================================================
     # CHOOSE STRONGER DIRECTION
     # ========================================================
@@ -1052,17 +1053,35 @@ def generate_signal(market_data):
 
     else:
 
-        return {
-            "daily": daily,
-            "4h": four_hour,
-            "1h": one_hour,
-            "signal": "NO_TRADE",
-            "reason": "DIRECTION_TIE",
-            "score": 0,
-            "quality": "LOW",
-            "strategy_matches": []
-        }
+        # اگر امتیاز دو طرف برابر بود،
+        # Daily Bias تصمیم نهایی را می‌دهد.
 
+        if daily == "BULLISH":
+
+            direction = "LONG"
+            score = long_score
+            strategies = long_strategies
+            confirmation = confirmation_long
+
+        elif daily == "BEARISH":
+
+            direction = "SHORT"
+            score = short_score
+            strategies = short_strategies
+            confirmation = confirmation_short
+
+        else:
+
+            return {
+                "daily": daily,
+                "4h": four_hour,
+                "1h": one_hour,
+                "signal": "NO_TRADE",
+                "reason": "DIRECTION_TIE",
+                "score": 0,
+                "quality": "LOW",
+                "strategy_matches": []
+            }
     # ========================================================
     # MAIN SETUP
     # ========================================================
