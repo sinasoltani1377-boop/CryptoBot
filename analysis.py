@@ -818,12 +818,7 @@ def quality_filter(score_data):
 # ============================================================
 # FINAL SIGNAL ENGINE
 # ============================================================
-    def calculate_trade_levels(candles, direction):
-    """
-    Calculate Entry, Stop Loss and Take Profit levels
-    based on recent swing structure.
-    """
-
+def calculate_trade_levels(candles, direction):
     if not candles or len(candles) < 10:
         return None
 
@@ -837,31 +832,25 @@ def quality_filter(score_data):
         entry = closes[-1]
 
         if direction == "LONG":
-
             swing_low = min(lows[-8:])
-
             risk = entry - swing_low
 
             if risk <= 0:
                 return None
 
             sl = swing_low
-
             tp1 = entry + (risk * 1.5)
             tp2 = entry + (risk * 2)
             tp3 = entry + (risk * 3)
 
         elif direction == "SHORT":
-
             swing_high = max(highs[-8:])
-
             risk = swing_high - entry
 
             if risk <= 0:
                 return None
 
             sl = swing_high
-
             tp1 = entry - (risk * 1.5)
             tp2 = entry - (risk * 2)
             tp3 = entry - (risk * 3)
@@ -881,7 +870,9 @@ def quality_filter(score_data):
 
     except Exception:
         return None
-     def generate_signal(market_data):
+
+
+def generate_signal(market_data):
 
     alignment = check_trend_alignment(market_data)
 
@@ -903,8 +894,6 @@ def quality_filter(score_data):
             "strategy_matches": []
         }
 
-    # DIRECTION
-
     if daily == "BULLISH":
         direction = "LONG"
 
@@ -922,8 +911,6 @@ def quality_filter(score_data):
             "quality": "LOW",
             "strategy_matches": []
         }
-
-    # 4H FILTER
 
     if direction == "LONG" and four_hour == "BEARISH":
         return {
@@ -951,52 +938,22 @@ def quality_filter(score_data):
             "strategy_matches": []
         }
 
-    # INDICATORS
-
     ema = ema_trend(candles)
     bos = detect_bos(candles)
 
-    confirmation = confirmation_candle(
-        candles,
-        direction
-    )
-
-    pullback = trend_pullback_signal(
-        candles,
-        direction
-    )
-
-    sweep = detect_liquidity_sweep(
-        candles,
-        direction
-    )
-
-    order_block = detect_order_block(
-        candles,
-        direction
-    )
-
-    breakout_retest = detect_breakout_retest(
-        candles,
-        direction
-    )
-
-    sr_reversal = sr_reversal_signal(
-        candles,
-        direction
-    )
-
-    # SCORE
+    confirmation = confirmation_candle(candles, direction)
+    pullback = trend_pullback_signal(candles, direction)
+    sweep = detect_liquidity_sweep(candles, direction)
+    order_block = detect_order_block(candles, direction)
+    breakout_retest = detect_breakout_retest(candles, direction)
+    sr_reversal = sr_reversal_signal(candles, direction)
 
     score = 0
     strategies = []
 
     score += 2
-
     strategies.append(
-        "DAILY_BULLISH"
-        if direction == "LONG"
-        else "DAILY_BEARISH"
+        "DAILY_BULLISH" if direction == "LONG" else "DAILY_BEARISH"
     )
 
     if (
@@ -1005,11 +962,8 @@ def quality_filter(score_data):
         (direction == "SHORT" and four_hour == "BEARISH")
     ):
         score += 2
-
         strategies.append(
-            "4H_BULLISH"
-            if direction == "LONG"
-            else "4H_BEARISH"
+            "4H_BULLISH" if direction == "LONG" else "4H_BEARISH"
         )
 
     if (
@@ -1018,11 +972,8 @@ def quality_filter(score_data):
         (direction == "SHORT" and one_hour == "BEARISH")
     ):
         score += 1
-
         strategies.append(
-            "1H_BULLISH"
-            if direction == "LONG"
-            else "1H_BEARISH"
+            "1H_BULLISH" if direction == "LONG" else "1H_BEARISH"
         )
 
     if (
@@ -1031,14 +982,9 @@ def quality_filter(score_data):
         (direction == "SHORT" and ema == "BEARISH")
     ):
         score += 1
-
         strategies.append(
-            "EMA_BULLISH"
-            if direction == "LONG"
-            else "EMA_BEARISH"
+            "EMA_BULLISH" if direction == "LONG" else "EMA_BEARISH"
         )
-
-    # MAIN SETUPS
 
     setup_count = 0
 
@@ -1067,8 +1013,6 @@ def quality_filter(score_data):
         setup_count += 1
         strategies.append("SR_REVERSAL")
 
-    # BOS
-
     if direction == "LONG" and bos == "BULLISH_BOS":
         score += 1
         strategies.append("BULLISH_BOS")
@@ -1076,8 +1020,6 @@ def quality_filter(score_data):
     if direction == "SHORT" and bos == "BEARISH_BOS":
         score += 1
         strategies.append("BEARISH_BOS")
-
-    # NO MAIN SETUP
 
     if setup_count == 0:
         return {
@@ -1092,10 +1034,7 @@ def quality_filter(score_data):
             "strategy_matches": strategies
         }
 
-    # CONFIRMATION
-
     if not confirmation:
-
         if score >= 8:
             quality = "HIGH"
         elif score >= 6:
@@ -1118,19 +1057,13 @@ def quality_filter(score_data):
     score += 1
     strategies.append("CONFIRMATION")
 
-    # QUALITY
-
     if score >= 8:
         quality = "HIGH"
-
     elif score >= 6:
         quality = "MEDIUM"
-
     else:
         quality = "LOW"
 
-    # FINAL FILTER
-
     if score < 5:
         return {
             "daily": daily,
@@ -1144,12 +1077,7 @@ def quality_filter(score_data):
             "strategy_matches": strategies
         }
 
-    # ENTRY / SL / TP
-
-    trade_levels = calculate_trade_levels(
-        candles,
-        direction
-    )
+    trade_levels = calculate_trade_levels(candles, direction)
 
     if trade_levels is None:
         return {
@@ -1163,58 +1091,20 @@ def quality_filter(score_data):
             "reason": "INVALID_TRADE_LEVELS",
             "strategy_matches": strategies
         }
-
-      # ========================================================
-    # FINAL FILTER
-    # ========================================================
-
-    if score < 5:
-        return {
-            "daily": daily,
-            "4h": four_hour,
-            "1h": one_hour,
-            "direction": direction,
-            "score": score,
-            "quality": quality,
-            "signal": "NO_TRADE",
-            "reason": "SCORE_TOO_LOW",
-            "strategy_matches": strategies
-        }
-
-    # ========================================================
-    # ENTRY / SL / TP
-    # ========================================================
-
-    trade_levels = calculate_trade_levels(
-        candles,
-        direction
-    )
-
-    if trade_levels is None:
-        return {
-            "daily": daily,
-            "4h": four_hour,
-            "1h": one_hour,
-            "direction": direction,
-            "score": score,
-            "quality": quality,
-            "signal": "NO_TRADE",
-            "reason": "INVALID_TRADE_LEVELS",
-            "strategy_matches": strategies
-        }
-
-    # ========================================================
-    # FINAL SIGNAL
-    # ========================================================
 
     return {
         "daily": daily,
         "4h": four_hour,
         "1h": one_hour,
-
         "direction": direction,
-
-        # TRADE LEVELS
+        "ema": ema,
+        "bos": bos,
+        "pullback": pullback,
+        "liquidity_sweep": sweep,
+        "order_block": order_block,
+        "breakout_retest": breakout_retest,
+        "sr_reversal": sr_reversal,
+        "confirmation": confirmation,
         "entry": trade_levels["entry"],
         "sl": trade_levels["sl"],
         "tp1": trade_levels["tp1"],
@@ -1222,26 +1112,9 @@ def quality_filter(score_data):
         "tp3": trade_levels["tp3"],
         "risk": trade_levels["risk"],
         "rr": trade_levels["rr"],
-
-        # INDICATORS
-        "ema": ema,
-        "bos": bos,
-
-        "pullback": pullback,
-        "liquidity_sweep": sweep,
-        "order_block": order_block,
-        "breakout_retest": breakout_retest,
-        "sr_reversal": sr_reversal,
-
-        "confirmation": confirmation,
-
-        # SCORE
         "score": score,
         "quality": quality,
-
-        # SIGNAL
         "signal": direction,
         "reason": "ACTIVE_SETUP",
-
         "strategy_matches": strategies
     }
