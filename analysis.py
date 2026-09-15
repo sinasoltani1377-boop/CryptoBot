@@ -818,4 +818,378 @@ def quality_filter(score_data):
 # ============================================================
 # FINAL SIGNAL ENGINE
 # ============================================================
-There was an error committing your changes: sinasoltani1377-boop has committed since you started editing. See what changed
+def generate_signal(market_data):
+
+    alignment = check_trend_alignment(market_data)
+
+    daily = alignment["daily"]
+    four_hour = alignment["4h"]
+    one_hour = alignment["1h"]
+
+    candles_1h = market_data.get("1h", [])
+
+    if len(candles_1h) < 50:
+        return {
+            "daily": daily,
+            "4h": four_hour,
+            "1h": one_hour,
+            "signal": "NO_TRADE",
+            "reason": "NOT_ENOUGH_CANDLES",
+            "score": 0,
+            "quality": "LOW",
+            "strategy_matches": []
+        }
+
+    # ========================================================
+    # INDICATORS
+    # ========================================================
+
+    ema = ema_trend(candles_1h)
+
+    bos_long = detect_bos(candles_1h) == "BULLISH_BOS"
+    bos_short = detect_bos(candles_1h) == "BEARISH_BOS"
+
+    confirmation_long = confirmation_candle(
+        candles_1h,
+        "LONG"
+    )
+
+    confirmation_short = confirmation_candle(
+        candles_1h,
+        "SHORT"
+    )
+
+    pullback_long = trend_pullback_signal(
+        candles_1h,
+        "LONG"
+    )
+
+    pullback_short = trend_pullback_signal(
+        candles_1h,
+        "SHORT"
+    )
+
+    sweep_long = detect_liquidity_sweep(
+        candles_1h,
+        "LONG"
+    )
+
+    sweep_short = detect_liquidity_sweep(
+        candles_1h,
+        "SHORT"
+    )
+
+    ob_long = detect_order_block(
+        candles_1h,
+        "LONG"
+    )
+
+    ob_short = detect_order_block(
+        candles_1h,
+        "SHORT"
+    )
+
+    breakout_long = detect_breakout_retest(
+        candles_1h,
+        "LONG"
+    )
+
+    breakout_short = detect_breakout_retest(
+        candles_1h,
+        "SHORT"
+    )
+
+    sr_long = sr_reversal_signal(
+        candles_1h,
+        "LONG"
+    )
+
+    sr_short = sr_reversal_signal(
+        candles_1h,
+        "SHORT"
+    )
+
+    # ========================================================
+    # LONG SCORE
+    # ========================================================
+
+    long_score = 0
+    long_strategies = []
+
+    if daily == "BULLISH":
+        long_score += 2
+        long_strategies.append("DAILY_BULLISH")
+
+    if four_hour == "BULLISH":
+        long_score += 2
+        long_strategies.append("4H_BULLISH")
+
+    if one_hour == "BULLISH":
+        long_score += 1
+        long_strategies.append("1H_BULLISH")
+
+    if ema == "BULLISH":
+        long_score += 1
+        long_strategies.append("EMA_BULLISH")
+
+    if pullback_long:
+        long_score += 2
+        long_strategies.append("TREND_PULLBACK")
+
+    if breakout_long:
+        long_score += 2
+        long_strategies.append("BREAKOUT_RETEST")
+
+    if sweep_long:
+        long_score += 2
+        long_strategies.append("LIQUIDITY_SWEEP")
+
+    if ob_long:
+        long_score += 2
+        long_strategies.append("ORDER_BLOCK")
+
+    if sr_long:
+        long_score += 1
+        long_strategies.append("SR_REVERSAL")
+
+    if bos_long:
+        long_score += 1
+        long_strategies.append("BULLISH_BOS")
+
+    if confirmation_long:
+        long_score += 1
+        long_strategies.append("CONFIRMATION")
+
+    # ========================================================
+    # SHORT SCORE
+    # ========================================================
+
+    short_score = 0
+    short_strategies = []
+
+    if daily == "BEARISH":
+        short_score += 2
+        short_strategies.append("DAILY_BEARISH")
+
+    if four_hour == "BEARISH":
+        short_score += 2
+        short_strategies.append("4H_BEARISH")
+
+    if one_hour == "BEARISH":
+        short_score += 1
+        short_strategies.append("1H_BEARISH")
+
+    if ema == "BEARISH":
+        short_score += 1
+        short_strategies.append("EMA_BEARISH")
+
+    if pullback_short:
+        short_score += 2
+        short_strategies.append("TREND_PULLBACK")
+
+    if breakout_short:
+        short_score += 2
+        short_strategies.append("BREAKOUT_RETEST")
+
+    if sweep_short:
+        short_score += 2
+        short_strategies.append("LIQUIDITY_SWEEP")
+
+    if ob_short:
+        short_score += 2
+        short_strategies.append("ORDER_BLOCK")
+
+    if sr_short:
+        short_score += 1
+        short_strategies.append("SR_REVERSAL")
+
+    if bos_short:
+        short_score += 1
+        short_strategies.append("BEARISH_BOS")
+
+    if confirmation_short:
+        short_score += 1
+        short_strategies.append("CONFIRMATION")
+
+    # ========================================================
+    # CHOOSE DIRECTION
+    # ========================================================
+
+    if long_score > short_score:
+
+        direction = "LONG"
+        score = long_score
+        strategies = long_strategies
+        confirmation = confirmation_long
+
+    elif short_score > long_score:
+
+        direction = "SHORT"
+        score = short_score
+        strategies = short_strategies
+        confirmation = confirmation_short
+
+    else:
+
+        if daily == "BULLISH":
+
+            direction = "LONG"
+            score = long_score
+            strategies = long_strategies
+            confirmation = confirmation_long
+
+        elif daily == "BEARISH":
+
+            direction = "SHORT"
+            score = short_score
+            strategies = short_strategies
+            confirmation = confirmation_short
+
+        else:
+
+            return {
+                "daily": daily,
+                "4h": four_hour,
+                "1h": one_hour,
+                "signal": "NO_TRADE",
+                "reason": "DIRECTION_TIE",
+                "score": 0,
+                "quality": "LOW",
+                "strategy_matches": []
+            }
+
+    # ========================================================
+    # ACTIVE SETUP CHECK
+    # ========================================================
+
+    setup_exists = any(
+        x in strategies
+        for x in [
+            "TREND_PULLBACK",
+            "BREAKOUT_RETEST",
+            "LIQUIDITY_SWEEP",
+            "ORDER_BLOCK",
+            "BULLISH_BOS",
+            "BEARISH_BOS",
+            "SR_REVERSAL"
+        ]
+    )
+
+    if not setup_exists:
+
+        return {
+            "daily": daily,
+            "4h": four_hour,
+            "1h": one_hour,
+            "direction": direction,
+            "score": score,
+            "quality": "LOW",
+            "signal": "NO_TRADE",
+            "reason": "NO_SETUP",
+            "strategy_matches": strategies
+        }
+
+    # ========================================================
+    # QUALITY
+    # ========================================================
+
+    if score >= 7:
+        quality = "HIGH"
+
+    elif score >= 4:
+        quality = "MEDIUM"
+
+    else:
+        quality = "LOW"
+
+    # ========================================================
+    # CONFIRMATION FILTER
+    # ========================================================
+
+    if not confirmation:
+
+        return {
+            "daily": daily,
+            "4h": four_hour,
+            "1h": one_hour,
+            "direction": direction,
+            "score": score,
+            "quality": quality,
+            "signal": "NO_TRADE",
+            "reason": "WAITING_CONFIRMATION",
+            "strategy_matches": strategies
+        }
+
+    # ========================================================
+    # FINAL SIGNAL
+    # ========================================================
+
+    if score >= 4:
+
+        return {
+            "daily": daily,
+            "4h": four_hour,
+            "1h": one_hour,
+            "direction": direction,
+            "bos": (
+                "BULLISH_BOS"
+                if bos_long and direction == "LONG"
+                else "BEARISH_BOS"
+                if bos_short and direction == "SHORT"
+                else "NO_BOS"
+            ),
+            "pullback": (
+                "PULLBACK"
+                if (
+                    pullback_long
+                    if direction == "LONG"
+                    else pullback_short
+                )
+                else "NO_PULLBACK"
+            ),
+            "confirmation": confirmation,
+            "ema": ema,
+            "liquidity_sweep": (
+                sweep_long
+                if direction == "LONG"
+                else sweep_short
+            ),
+            "order_block": (
+                ob_long
+                if direction == "LONG"
+                else ob_short
+            ),
+            "breakout_retest": (
+                breakout_long
+                if direction == "LONG"
+                else breakout_short
+            ),
+            "sr_reversal": (
+                sr_long
+                if direction == "LONG"
+                else sr_short
+            ),
+            "range": detect_range(candles_1h),
+            "score": score,
+            "quality": quality,
+            "signal": direction,
+            "reason": "ACTIVE_SETUP",
+            "strategy_matches": strategies
+        }
+
+    # ========================================================
+    # NO TRADE
+    # ========================================================
+
+    return {
+        "daily": daily,
+        "4h": four_hour,
+        "1h": one_hour,
+        "direction": direction,
+        "score": score,
+        "quality": quality,
+        "signal": "NO_TRADE",
+        "reason": "SCORE_TOO_LOW",
+        "strategy_matches": strategies
+    }
+    
