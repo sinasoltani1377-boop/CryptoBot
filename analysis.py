@@ -1035,7 +1035,7 @@ def generate_signal(market_data):
         }
 
     if not confirmation:
-    if score < 5:
+        if score < 5:
         return {
             "daily": daily,
             "4h": four_hour,
