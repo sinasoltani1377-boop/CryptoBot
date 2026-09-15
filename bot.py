@@ -117,14 +117,21 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
             if result["signal"] in ["LONG", "SHORT"]:
 
                 await context.bot.send_message(
-                    chat_id=6912201079,
-                    text=(
-                        f"🚨 {symbol}\n"
-                        f"سیگنال: {result['signal']}\n"
-                        f"⭐ کیفیت: {result.get('quality', 'UNKNOWN')}\n"
-                        f"📊 امتیاز: {result.get('score', 0)}"
-                    )
-                )
+    chat_id=6912201079,
+    text=(
+        f"🚨 {symbol}\n\n"
+        f"🎯 سیگنال: {result['signal']}\n"
+        f"⭐ کیفیت: {result.get('quality', 'UNKNOWN')}\n"
+        f"📊 امتیاز: {result.get('score', 0)}\n\n"
+        f"💰 Entry: {result.get('entry', 'N/A')}\n"
+        f"🛑 SL: {result.get('sl', 'N/A')}\n\n"
+        f"🎯 TP1: {result.get('tp1', 'N/A')}\n"
+        f"🎯 TP2: {result.get('tp2', 'N/A')}\n"
+        f"🎯 TP3: {result.get('tp3', 'N/A')}\n\n"
+        f"📐 Risk: {result.get('risk', 'N/A')}\n"
+        f"⚖️ RR: 1:{result.get('rr', 'N/A')}"
+    )
+)
 
     except Exception as e:
         print("AUTO_SIGNAL_ERROR:", e)
