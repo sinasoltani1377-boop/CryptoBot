@@ -1090,7 +1090,7 @@ if direction == "LONG" and daily == "BEARISH":
         "strategy_matches": strategies
     }
 
-if direction == "SHORT" and daily == "BULLISH":
+    if direction == "SHORT" and daily == "BULLISH":
     return {
         "daily": daily,
         "4h": four_hour,
@@ -1103,8 +1103,8 @@ if direction == "SHORT" and daily == "BULLISH":
         "strategy_matches": strategies
     }
 
-# No real setup
-if not setup_exists:
+    # No real setup
+    if not setup_exists:
     return {
         "daily": daily,
         "4h": four_hour,
