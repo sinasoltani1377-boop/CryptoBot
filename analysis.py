@@ -1059,8 +1059,13 @@ def generate_signal(market_data):
             }
 
     # ========================================================
+  
+    # ========================================================
     # ACTIVE SETUP CHECK
     # ========================================================
+
+    # BOS alone is NOT enough for a trade.
+    # A real setup must have one of the main strategies.
 
     setup_exists = any(
         x in strategies
@@ -1068,10 +1073,7 @@ def generate_signal(market_data):
             "TREND_PULLBACK",
             "BREAKOUT_RETEST",
             "LIQUIDITY_SWEEP",
-            "ORDER_BLOCK",
-            "BULLISH_BOS",
-            "BEARISH_BOS",
-            "SR_REVERSAL"
+            "ORDER_BLOCK"
         ]
     )
 
@@ -1085,10 +1087,41 @@ def generate_signal(market_data):
             "score": score,
             "quality": "LOW",
             "signal": "NO_TRADE",
-            "reason": "NO_SETUP",
+            "reason": "NO_MAIN_SETUP",
             "strategy_matches": strategies
         }
 
+    # ========================================================
+    # DAILY TREND FILTER
+    # ========================================================
+
+    if direction == "LONG" and daily == "BEARISH":
+
+        return {
+            "daily": daily,
+            "4h": four_hour,
+            "1h": one_hour,
+            "direction": direction,
+            "score": score,
+            "quality": "LOW",
+            "signal": "NO_TRADE",
+            "reason": "DAILY_TREND_AGAINST_LONG",
+            "strategy_matches": strategies
+        }
+
+    if direction == "SHORT" and daily == "BULLISH":
+
+        return {
+            "daily": daily,
+            "4h": four_hour,
+            "1h": one_hour,
+            "direction": direction,
+            "score": score,
+            "quality": "LOW",
+            "signal": "NO_TRADE",
+            "reason": "DAILY_TREND_AGAINST_SHORT",
+            "strategy_matches": strategies
+        }
     # ========================================================
     # QUALITY
     # ========================================================
