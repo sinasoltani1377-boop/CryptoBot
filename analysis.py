@@ -1164,14 +1164,57 @@ def calculate_trade_levels(candles, direction):
             "strategy_matches": strategies
         }
 
+      # ========================================================
+    # FINAL FILTER
+    # ========================================================
+
+    if score < 5:
+        return {
+            "daily": daily,
+            "4h": four_hour,
+            "1h": one_hour,
+            "direction": direction,
+            "score": score,
+            "quality": quality,
+            "signal": "NO_TRADE",
+            "reason": "SCORE_TOO_LOW",
+            "strategy_matches": strategies
+        }
+
+    # ========================================================
+    # ENTRY / SL / TP
+    # ========================================================
+
+    trade_levels = calculate_trade_levels(
+        candles,
+        direction
+    )
+
+    if trade_levels is None:
+        return {
+            "daily": daily,
+            "4h": four_hour,
+            "1h": one_hour,
+            "direction": direction,
+            "score": score,
+            "quality": quality,
+            "signal": "NO_TRADE",
+            "reason": "INVALID_TRADE_LEVELS",
+            "strategy_matches": strategies
+        }
+
+    # ========================================================
     # FINAL SIGNAL
+    # ========================================================
 
     return {
         "daily": daily,
         "4h": four_hour,
         "1h": one_hour,
+
         "direction": direction,
 
+        # TRADE LEVELS
         "entry": trade_levels["entry"],
         "sl": trade_levels["sl"],
         "tp1": trade_levels["tp1"],
@@ -1180,6 +1223,7 @@ def calculate_trade_levels(candles, direction):
         "risk": trade_levels["risk"],
         "rr": trade_levels["rr"],
 
+        # INDICATORS
         "ema": ema,
         "bos": bos,
 
@@ -1191,11 +1235,13 @@ def calculate_trade_levels(candles, direction):
 
         "confirmation": confirmation,
 
+        # SCORE
         "score": score,
         "quality": quality,
 
+        # SIGNAL
         "signal": direction,
         "reason": "ACTIVE_SETUP",
 
         "strategy_matches": strategies
-}
+    }
