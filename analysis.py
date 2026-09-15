@@ -881,7 +881,7 @@ def calculate_trade_levels(candles, direction):
 
     except Exception:
         return None
-def generate_signal(market_data):
+     def generate_signal(market_data):
 
     alignment = check_trend_alignment(market_data)
 
@@ -903,9 +903,7 @@ def generate_signal(market_data):
             "strategy_matches": []
         }
 
-    # ========================================================
     # DIRECTION
-    # ========================================================
 
     if daily == "BULLISH":
         direction = "LONG"
@@ -925,9 +923,7 @@ def generate_signal(market_data):
             "strategy_matches": []
         }
 
-    # ========================================================
     # 4H FILTER
-    # ========================================================
 
     if direction == "LONG" and four_hour == "BEARISH":
         return {
@@ -955,12 +951,9 @@ def generate_signal(market_data):
             "strategy_matches": []
         }
 
-    # ========================================================
     # INDICATORS
-    # ========================================================
 
     ema = ema_trend(candles)
-
     bos = detect_bos(candles)
 
     confirmation = confirmation_candle(
@@ -993,63 +986,59 @@ def generate_signal(market_data):
         direction
     )
 
-    # ========================================================
     # SCORE
-    # ========================================================
 
     score = 0
     strategies = []
 
-    # Daily
     score += 2
+
     strategies.append(
         "DAILY_BULLISH"
         if direction == "LONG"
         else "DAILY_BEARISH"
     )
 
-    # 4H
     if (
         (direction == "LONG" and four_hour == "BULLISH")
         or
         (direction == "SHORT" and four_hour == "BEARISH")
     ):
         score += 2
+
         strategies.append(
             "4H_BULLISH"
             if direction == "LONG"
             else "4H_BEARISH"
         )
 
-    # 1H
     if (
         (direction == "LONG" and one_hour == "BULLISH")
         or
         (direction == "SHORT" and one_hour == "BEARISH")
     ):
         score += 1
+
         strategies.append(
             "1H_BULLISH"
             if direction == "LONG"
             else "1H_BEARISH"
         )
 
-    # EMA
     if (
         (direction == "LONG" and ema == "BULLISH")
         or
         (direction == "SHORT" and ema == "BEARISH")
     ):
         score += 1
+
         strategies.append(
             "EMA_BULLISH"
             if direction == "LONG"
             else "EMA_BEARISH"
         )
 
-    # ========================================================
     # MAIN SETUPS
-    # ========================================================
 
     setup_count = 0
 
@@ -1078,27 +1067,17 @@ def generate_signal(market_data):
         setup_count += 1
         strategies.append("SR_REVERSAL")
 
-    # ========================================================
-    # BOS IS CONFIRMATION ONLY
-    # ========================================================
+    # BOS
 
-    if (
-        direction == "LONG"
-        and bos == "BULLISH_BOS"
-    ):
+    if direction == "LONG" and bos == "BULLISH_BOS":
         score += 1
         strategies.append("BULLISH_BOS")
 
-    if (
-        direction == "SHORT"
-        and bos == "BEARISH_BOS"
-    ):
+    if direction == "SHORT" and bos == "BEARISH_BOS":
         score += 1
         strategies.append("BEARISH_BOS")
 
-    # ========================================================
     # NO MAIN SETUP
-    # ========================================================
 
     if setup_count == 0:
         return {
@@ -1113,18 +1092,24 @@ def generate_signal(market_data):
             "strategy_matches": strategies
         }
 
-    # ========================================================
     # CONFIRMATION
-    # ========================================================
 
     if not confirmation:
+
+        if score >= 8:
+            quality = "HIGH"
+        elif score >= 6:
+            quality = "MEDIUM"
+        else:
+            quality = "LOW"
+
         return {
             "daily": daily,
             "4h": four_hour,
             "1h": one_hour,
             "direction": direction,
             "score": score,
-            "quality": "LOW",
+            "quality": quality,
             "signal": "NO_TRADE",
             "reason": "WAITING_CONFIRMATION",
             "strategy_matches": strategies
@@ -1133,9 +1118,7 @@ def generate_signal(market_data):
     score += 1
     strategies.append("CONFIRMATION")
 
-    # ========================================================
     # QUALITY
-    # ========================================================
 
     if score >= 8:
         quality = "HIGH"
@@ -1146,11 +1129,9 @@ def generate_signal(market_data):
     else:
         quality = "LOW"
 
-    # ========================================================
     # FINAL FILTER
-    # ========================================================
 
-    if score < 6:
+    if score < 5:
         return {
             "daily": daily,
             "4h": four_hour,
@@ -1163,17 +1144,34 @@ def generate_signal(market_data):
             "strategy_matches": strategies
         }
 
-    # ========================================================
-    # FINAL SIGNAL
-    # ========================================================
-    trade_levels = calculate_trade_levels(candles, direction)
+    # ENTRY / SL / TP
+
+    trade_levels = calculate_trade_levels(
+        candles,
+        direction
+    )
 
     if trade_levels is None:
+        return {
+            "daily": daily,
+            "4h": four_hour,
+            "1h": one_hour,
+            "direction": direction,
+            "score": score,
+            "quality": quality,
+            "signal": "NO_TRADE",
+            "reason": "INVALID_TRADE_LEVELS",
+            "strategy_matches": strategies
+        }
+
+    # FINAL SIGNAL
+
     return {
         "daily": daily,
         "4h": four_hour,
         "1h": one_hour,
         "direction": direction,
+
         "entry": trade_levels["entry"],
         "sl": trade_levels["sl"],
         "tp1": trade_levels["tp1"],
@@ -1181,17 +1179,6 @@ def generate_signal(market_data):
         "tp3": trade_levels["tp3"],
         "risk": trade_levels["risk"],
         "rr": trade_levels["rr"],
-        "score": score,
-        "quality": quality,
-        "signal": "NO_TRADE",
-        "reason": "INVALID_TRADE_LEVELS",
-        "strategy_matches": strategies
-    }
-    return {
-        "daily": daily,
-        "4h": four_hour,
-        "1h": one_hour,
-        "direction": direction,
 
         "ema": ema,
         "bos": bos,
@@ -1211,4 +1198,4 @@ def generate_signal(market_data):
         "reason": "ACTIVE_SETUP",
 
         "strategy_matches": strategies
-    }
+}
