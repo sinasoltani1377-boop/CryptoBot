@@ -1035,24 +1035,37 @@ def generate_signal(market_data):
         }
 
     if not confirmation:
-        if score >= 8:
-            quality = "HIGH"
-        elif score >= 6:
-            quality = "MEDIUM"
-        else:
-            quality = "LOW"
-
+    if score < 5:
         return {
             "daily": daily,
             "4h": four_hour,
             "1h": one_hour,
             "direction": direction,
             "score": score,
-            "quality": quality,
+            "quality": "LOW",
             "signal": "NO_TRADE",
-            "reason": "WAITING_CONFIRMATION",
+            "reason": "SCORE_TOO_LOW",
             "strategy_matches": strategies
         }
+
+    if score >= 8:
+        quality = "HIGH"
+    elif score >= 6:
+        quality = "MEDIUM"
+    else:
+        quality = "LOW"
+
+    return {
+        "daily": daily,
+        "4h": four_hour,
+        "1h": one_hour,
+        "direction": direction,
+        "score": score,
+        "quality": quality,
+        "signal": "NO_TRADE",
+        "reason": "WAITING_CONFIRMATION",
+        "strategy_matches": strategies
+    }
 
     score += 1
     strategies.append("CONFIRMATION")
