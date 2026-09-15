@@ -1061,36 +1061,61 @@ def generate_signal(market_data):
     # ========================================================
   
     # ========================================================
-    # ACTIVE SETUP CHECK
-    # ========================================================
 
-    # BOS alone is NOT enough for a trade.
-    # A real setup must have one of the main strategies.
+    # PROFESSIONAL SETUP FILTER
+    # ============================================================
 
-    setup_exists = any(
-        x in strategies
-        for x in [
-            "TREND_PULLBACK",
-            "BREAKOUT_RETEST",
-            "LIQUIDITY_SWEEP",
-            "ORDER_BLOCK"
-        ]
-    )
+setup_exists = any(
+    x in strategies
+    for x in [
+        "TREND_PULLBACK",
+        "BREAKOUT_RETEST",
+        "LIQUIDITY_SWEEP",
+        "ORDER_BLOCK",
+        "SR_REVERSAL"
+    ]
+)
 
-    if not setup_exists:
+# Daily trend is the primary direction filter
+if direction == "LONG" and daily == "BEARISH":
+    return {
+        "daily": daily,
+        "4h": four_hour,
+        "1h": one_hour,
+        "direction": direction,
+        "score": score,
+        "quality": "LOW",
+        "signal": "NO_TRADE",
+        "reason": "DAILY_TREND_AGAINST_LONG",
+        "strategy_matches": strategies
+    }
 
-        return {
-            "daily": daily,
-            "4h": four_hour,
-            "1h": one_hour,
-            "direction": direction,
-            "score": score,
-            "quality": "LOW",
-            "signal": "NO_TRADE",
-            "reason": "NO_MAIN_SETUP",
-            "strategy_matches": strategies
-        }
+if direction == "SHORT" and daily == "BULLISH":
+    return {
+        "daily": daily,
+        "4h": four_hour,
+        "1h": one_hour,
+        "direction": direction,
+        "score": score,
+        "quality": "LOW",
+        "signal": "NO_TRADE",
+        "reason": "DAILY_TREND_AGAINST_SHORT",
+        "strategy_matches": strategies
+    }
 
+# No real setup
+if not setup_exists:
+    return {
+        "daily": daily,
+        "4h": four_hour,
+        "1h": one_hour,
+        "direction": direction,
+        "score": score,
+        "quality": "LOW",
+        "signal": "NO_TRADE",
+        "reason": "NO_MAIN_SETUP",
+        "strategy_matches": strategies
+    }
     # ========================================================
     # DAILY TREND FILTER
     # ========================================================
