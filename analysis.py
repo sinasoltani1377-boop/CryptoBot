@@ -370,52 +370,62 @@ def detect_breakout_retest(candles, direction):
 # ============================================================
 # CONFIRMATION CANDLE
 # ============================================================
-
 def confirmation_candle(candles, direction):
     if len(candles) < 2:
         return False
 
-    candle = candles[-1]
+    current = candles[-1]
+    previous = candles[-2]
 
-    open_price = safe_float(candle["open"])
-    close_price = safe_float(candle["close"])
-    high = safe_float(candle["high"])
-    low = safe_float(candle["low"])
+    open_price = safe_float(current["open"])
+    close_price = safe_float(current["close"])
+    high = safe_float(current["high"])
+    low = safe_float(current["low"])
+
+    previous_open = safe_float(previous["open"])
+    previous_close = safe_float(previous["close"])
 
     body = abs(close_price - open_price)
     candle_range = high - low
+
+    previous_body = abs(previous_close - previous_open)
 
     if candle_range <= 0:
         return False
 
     body_ratio = body / candle_range
 
-    if body_ratio < 0.55:
-        return False
-
-    previous = candles[-2]
-
-    previous_open = safe_float(previous["open"])
-    previous_close = safe_float(previous["close"])
-
-    previous_body = abs(previous_close - previous_open)
-
+    # LONG confirmation
     if direction == "LONG":
 
-        if close_price <= open_price:
+        bullish = close_price > open_price
+
+        if not bullish:
             return False
 
-        if body < previous_body:
+        # نسبت بدنه حداقل 45٪ باشد
+        if body_ratio < 0.45:
+            return False
+
+        # لازم نیست حتماً بدنه از کندل قبلی بزرگ‌تر باشد
+        # فقط نباید خیلی ضعیف باشد
+        if previous_body > 0 and body < previous_body * 0.5:
             return False
 
         return True
 
+    # SHORT confirmation
     if direction == "SHORT":
 
-        if close_price >= open_price:
+        bearish = close_price < open_price
+
+        if not bearish:
             return False
 
-        if body < previous_body:
+        if body_ratio < 0.45:
+            return False
+
+        if previous_body > 0 and body < previous_body * 0.5:
             return False
 
         return True
