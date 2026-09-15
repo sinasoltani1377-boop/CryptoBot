@@ -818,6 +818,69 @@ def quality_filter(score_data):
 # ============================================================
 # FINAL SIGNAL ENGINE
 # ============================================================
+def calculate_trade_levels(candles, direction):
+    """
+    Calculate Entry, Stop Loss and Take Profit levels
+    based on recent swing structure.
+    """
+
+    if not candles or len(candles) < 10:
+        return None
+
+    try:
+        recent = candles[-20:]
+
+        highs = [float(c["high"]) for c in recent]
+        lows = [float(c["low"]) for c in recent]
+        closes = [float(c["close"]) for c in recent]
+
+        entry = closes[-1]
+
+        if direction == "LONG":
+
+            swing_low = min(lows[-8:])
+
+            risk = entry - swing_low
+
+            if risk <= 0:
+                return None
+
+            sl = swing_low
+
+            tp1 = entry + (risk * 1.5)
+            tp2 = entry + (risk * 2)
+            tp3 = entry + (risk * 3)
+
+        elif direction == "SHORT":
+
+            swing_high = max(highs[-8:])
+
+            risk = swing_high - entry
+
+            if risk <= 0:
+                return None
+
+            sl = swing_high
+
+            tp1 = entry - (risk * 1.5)
+            tp2 = entry - (risk * 2)
+            tp3 = entry - (risk * 3)
+
+        else:
+            return None
+
+        return {
+            "entry": round(entry, 4),
+            "sl": round(sl, 4),
+            "tp1": round(tp1, 4),
+            "tp2": round(tp2, 4),
+            "tp3": round(tp3, 4),
+            "risk": round(risk, 4),
+            "rr": 3
+        }
+
+    except Exception:
+        return None
 def generate_signal(market_data):
 
     alignment = check_trend_alignment(market_data)
