@@ -1123,6 +1123,7 @@ def generate_signal(market_data):
         }
 
     # ========================================================
+    # ========================================================
     # FINAL SIGNAL
     # ========================================================
 
@@ -1133,4 +1134,50 @@ def generate_signal(market_data):
             "4h": four_hour,
             "1h": one_hour,
             "direction": direction,
-            "bos": bos
+            "bos": bos,
+            "pullback": pullback,
+            "confirmation": confirmation,
+            "ema": ema,
+            "liquidity_sweep": (
+                liquidity_long
+                if direction == "LONG"
+                else liquidity_short
+            ),
+            "order_block": (
+                order_block_long
+                if direction == "LONG"
+                else order_block_short
+            ),
+            "breakout_retest": (
+                breakout_long
+                if direction == "LONG"
+                else breakout_short
+            ),
+            "sr_reversal": (
+                sr_long
+                if direction == "LONG"
+                else sr_short
+            ),
+            "range": detect_range(candles_1h),
+            "score": score,
+            "quality": quality,
+            "signal": direction,
+            "reason": "VALID_SETUP",
+            "strategy_matches": strategies
+        }
+
+    # ========================================================
+    # NO TRADE
+    # ========================================================
+
+    return {
+        "daily": daily,
+        "4h": four_hour,
+        "1h": one_hour,
+        "direction": direction,
+        "score": score,
+        "quality": quality,
+        "signal": "NO_TRADE",
+        "reason": "SCORE_TOO_LOW",
+        "strategy_matches": strategies
+    }
