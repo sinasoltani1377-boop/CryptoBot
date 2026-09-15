@@ -828,7 +828,7 @@ def generate_signal(market_data):
 
     candles = market_data.get("1h", [])
 
-    if len(candles) < 200:
+    if len(candles) < 50:
         return {
             "daily": daily,
             "4h": four_hour,
