@@ -1166,7 +1166,27 @@ def generate_signal(market_data):
     # ========================================================
     # FINAL SIGNAL
     # ========================================================
+    trade_levels = calculate_trade_levels(candles, direction)
 
+    if trade_levels is None:
+    return {
+        "daily": daily,
+        "4h": four_hour,
+        "1h": one_hour,
+        "direction": direction,
+        "entry": trade_levels["entry"],
+        "sl": trade_levels["sl"],
+        "tp1": trade_levels["tp1"],
+        "tp2": trade_levels["tp2"],
+        "tp3": trade_levels["tp3"],
+        "risk": trade_levels["risk"],
+        "rr": trade_levels["rr"],
+        "score": score,
+        "quality": quality,
+        "signal": "NO_TRADE",
+        "reason": "INVALID_TRADE_LEVELS",
+        "strategy_matches": strategies
+    }
     return {
         "daily": daily,
         "4h": four_hour,
