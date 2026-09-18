@@ -53,21 +53,25 @@ def tracker_event_text(event):
             f"🎯 TP1 HIT\n\n🔹 {t['symbol']}\n📈 {t['direction']}\n"
             f"💰 Price: {p}\n\nTP1: {t['tp1']}\nTP2: {t['tp2']}\nTP3: {t['tp3']}"
         )
+
     if e == "TP2":
         return (
             f"🎯 TP2 HIT\n\n🔹 {t['symbol']}\n📈 {t['direction']}\n"
             f"💰 Price: {p}\n\nTP3: {t['tp3']}"
         )
+
     if e == "TP3":
         return (
             f"🏆 TP3 HIT\n\n🔹 {t['symbol']}\n📈 {t['direction']}\n"
             f"💰 Price: {p}\n\nنتیجه: TP3"
         )
+
     if e == "SL":
         return (
             f"🛑 SL HIT\n\n🔹 {t['symbol']}\n📉 {t['direction']}\n"
             f"💰 Price: {p}\n\nنتیجه: STOP LOSS"
         )
+
     return None
 
 
@@ -83,12 +87,15 @@ async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from market import get_futures_symbols
 
         message = "📊 Toobit USDT-M Futures\n\n"
+
         for symbol in get_futures_symbols()[:20]:
             try:
                 message += f"🔹 {symbol}: ${get_price(symbol):,.6f}\n"
             except Exception:
                 pass
+
         await update.message.reply_text(message)
+
     except Exception as e:
         await update.message.reply_text(f"❌ خطا در دریافت قیمت:\n{e}")
 
@@ -96,7 +103,9 @@ async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Manual scan also respects the same lock, so it cannot collide with auto scan.
     if _scan_lock.locked():
-        await update.message.reply_text("⏳ یک اسکن بازار در حال اجراست. کمی صبر کن و دوباره /signal را بزن.")
+        await update.message.reply_text(
+            "⏳ یک اسکن بازار در حال اجراست. کمی صبر کن و دوباره /signal را بزن."
+        )
         return
 
     async with _scan_lock:
@@ -112,13 +121,23 @@ async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try:
                     result = generate_signal(get_market_data(symbol))
                     scanned += 1
-                    if result.get("signal") in ["LONG", "SHORT"]:
+
+                    # فقط سیگنال‌های HIGH نمایش داده شوند
+                    if (
+                        result.get("signal") in ["LONG", "SHORT"]
+                        and result.get("quality") == "HIGH"
+                    ):
                         found += 1
-                        strategies = ", ".join(result.get("strategy_matches", [])) or "N/A"
+
+                        strategies = (
+                            ", ".join(result.get("strategy_matches", []))
+                            or "N/A"
+                        )
+
                         parts.append(
                             f"🚨 {symbol}\n"
                             f"🎯 Signal: {result.get('signal')}\n"
-                            f"⭐ Quality: {result.get('quality', 'LOW')}\n"
+                            f"⭐ Quality: {result.get('quality')}\n"
                             f"📊 Score: {result.get('score', 0)}\n\n"
                             f"💰 Entry: {result.get('entry', 'N/A')}\n"
                             f"🛑 SL: {result.get('sl', 'N/A')}\n\n"
@@ -129,20 +148,27 @@ async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             f"⚖️ RR: 1:{result.get('rr', 'N/A')}\n"
                             f"🧠 Strategies: {strategies}\n"
                         )
+
                 except Exception as e:
                     print(f"SIGNAL_ERROR {symbol}: {e}")
 
             if not found:
                 parts.append(
-                    f"⚪ در حال حاضر سیگنال معتبری پیدا نشد.\n\n🔎 Symbols scanned: {scanned}"
+                    f"⚪ در حال حاضر سیگنال HIGH پیدا نشد.\n\n"
+                    f"🔎 Symbols scanned: {scanned}"
                 )
 
             msg = "\n".join(parts)
+
             await update.message.reply_text(
-                msg[:3900] + ("\n\n⚠️ پیام کوتاه شد." if len(msg) > 3900 else "")
+                msg[:3900]
+                + ("\n\n⚠️ پیام کوتاه شد." if len(msg) > 3900 else "")
             )
+
         except Exception as e:
-            await update.message.reply_text(f"❌ خطا در اسکن بازار:\n{e}")
+            await update.message.reply_text(
+                f"❌ خطا در اسکن بازار:\n{e}"
+            )
 
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -162,17 +188,23 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
         try:
             from market import get_futures_symbols, get_market_data
 
-            # 1) Check existing trades first. This part is kept separate from market scanning.
+            # 1) Check existing trades first.
             try:
                 events = check_open_trades()
+
                 for event in events:
                     msg = tracker_event_text(event)
+
                     if msg:
-                        await context.bot.send_message(chat_id=CHAT_ID, text=msg)
+                        await context.bot.send_message(
+                            chat_id=CHAT_ID,
+                            text=msg
+                        )
+
             except Exception as e:
                 print(f"TRACKER_CHECK_ERROR: {e}")
 
-            # 2) Scan the market and register only new LONG/SHORT signals.
+            # 2) Scan the market and register ONLY HIGH LONG/SHORT signals.
             symbols = get_futures_symbols()
             scanned = 0
             new_signals = 0
@@ -182,23 +214,31 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
                     result = generate_signal(get_market_data(symbol))
                     scanned += 1
 
+                    # LOW و MEDIUM کاملاً حذف می‌شوند
                     if result.get("signal") not in ["LONG", "SHORT"]:
                         continue
 
+                    if result.get("quality") != "HIGH":
+                        continue
+
                     trade, created = register_signal(symbol, result)
+
                     if not created:
                         continue
 
                     new_signals += 1
+
                     await context.bot.send_message(
                         chat_id=CHAT_ID,
                         text=signal_text(symbol, result),
                     )
+
                 except Exception as e:
                     print(f"AUTO_SYMBOL_ERROR {symbol}: {e}")
 
             print(
-                f"AUTO_SCAN_DONE: scanned={scanned}, new_signals={new_signals}"
+                f"AUTO_SCAN_DONE: scanned={scanned}, "
+                f"new_signals={new_signals}"
             )
 
         except Exception as e:
@@ -206,6 +246,7 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
 
 
 app = Application.builder().token(TOKEN).build()
+
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("price", price))
 app.add_handler(CommandHandler("signal", signal))
