@@ -1,77 +1,72 @@
 import requests
-import time
+import os
+from analysis import generate_signal
+from tracker import register_signal, check_open_trades, format_stats
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 
-# API Key خودت رو بذار اینجا
-API_KEY = "YOUR_API_KEY"  
+TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = 6912201079
 
-# حداقل حجم 24ساعته دلاری برای فیلتر کردن کوین‌ها
-MIN_VOLUME = 1000000 
+def get_price(symbol):
+    r=requests.get("https://api.toobit.com/quote/v1/contract/ticker/price",params={"symbol":symbol},timeout=10)
+    r.raise_for_status(); return float(r.json()[0]["p"])
 
-# حداکثر تعداد کوین‌هایی که میخوای بررسی کنی
-LIMIT = 100  
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🤖 ربات ترید فعال است!\n\n📊 /price\n📈 /signal\n📊 /stats")
 
-# آدرس API
-url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
+async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        from market import get_futures_symbols
+        message="📊 Toobit USDT-M Futures\n\n"
+        for symbol in get_futures_symbols()[:20]:
+            try: message += f"🔹 {symbol}: ${get_price(symbol):,.6f}\n"
+            except Exception: pass
+        await update.message.reply_text(message)
+    except Exception as e: await update.message.reply_text(f"❌ خطا در دریافت قیمت:\n{e}")
 
-params = {
-    "start": "1",
-    "limit": LIMIT,
-    "convert": "USD"
-}
+async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        from market import get_futures_symbols, get_market_data
+        parts=["🤖 CryptoBot Market Scan\n"]; scanned=0; found=0
+        for symbol in get_futures_symbols():
+            try:
+                result=generate_signal(get_market_data(symbol)); scanned+=1
+                if result.get("signal") in ["LONG","SHORT"]:
+                    found+=1; st=", ".join(result.get("strategy_matches",[]))
+                    parts.append(f"🚨 {symbol}\n🎯 Signal: {result.get('signal')}\n⭐ Quality: {result.get('quality','LOW')}\n📊 Score: {result.get('score',0)}\n\n💰 Entry: {result.get('entry','N/A')}\n🛑 SL: {result.get('sl','N/A')}\n\n🎯 TP1: {result.get('tp1','N/A')}\n🎯 TP2: {result.get('tp2','N/A')}\n🎯 TP3: {result.get('tp3','N/A')}\n\n📐 Risk: {result.get('risk','N/A')}\n⚖️ RR: 1:{result.get('rr','N/A')}\n🧠 Strategies: {st}\n")
+            except Exception as e: print(f"SIGNAL_ERROR {symbol}: {e}")
+        if not found: parts.append(f"⚪ در حال حاضر سیگنال معتبری پیدا نشد.\n\n🔎 Symbols scanned: {scanned}")
+        msg="\n".join(parts); await update.message.reply_text(msg[:3900]+("\n\n⚠️ پیام کوتاه شد." if len(msg)>3900 else ""))
+    except Exception as e: await update.message.reply_text(f"❌ خطا در اسکن بازار:\n{e}")
 
-headers = {
-    "Accepts": "application/json",
-    "X-CMC_PRO_API_KEY": API_KEY
-}
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try: await update.message.reply_text(format_stats())
+    except Exception as e: await update.message.reply_text(f"❌ خطا در آمار:\n{e}")
 
-try:
-    response = requests.get(url, params=params, headers=headers)
-    data = response.json()["data"]
+async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        from market import get_futures_symbols, get_market_data
+        for event in check_open_trades():
+            t=event["trade"]; e=event["event"]; p=event["price"]
+            if e=="TP1": msg=f"🎯 TP1 HIT\n\n🔹 {t['symbol']}\n📈 {t['direction']}\n💰 Price: {p}\n\nTP1: {t['tp1']}\nTP2: {t['tp2']}\nTP3: {t['tp3']}"
+            elif e=="TP2": msg=f"🎯 TP2 HIT\n\n🔹 {t['symbol']}\n📈 {t['direction']}\n💰 Price: {p}\n\nTP3: {t['tp3']}"
+            elif e=="TP3": msg=f"🏆 TP3 HIT\n\n🔹 {t['symbol']}\n📈 {t['direction']}\n💰 Price: {p}\n\nنتیجه: TP3"
+            elif e=="SL": msg=f"🛑 SL HIT\n\n🔹 {t['symbol']}\n📉 {t['direction']}\n💰 Price: {p}\n\nنتیجه: STOP LOSS"
+            else: continue
+            await context.bot.send_message(chat_id=CHAT_ID,text=msg)
+        for symbol in get_futures_symbols():
+            try:
+                result=generate_signal(get_market_data(symbol))
+                if result.get("signal") not in ["LONG","SHORT"]: continue
+                trade,created=register_signal(symbol,result)
+                if not created: continue
+                st=", ".join(result.get("strategy_matches",[]))
+                await context.bot.send_message(chat_id=CHAT_ID,text=f"🚨 {symbol}\n\n🎯 سیگنال: {result['signal']}\n⭐ کیفیت: {result.get('quality','UNKNOWN')}\n📊 امتیاز: {result.get('score',0)}\n\n💰 Entry: {result.get('entry','N/A')}\n🛑 SL: {result.get('sl','N/A')}\n\n🎯 TP1: {result.get('tp1','N/A')}\n🎯 TP2: {result.get('tp2','N/A')}\n🎯 TP3: {result.get('tp3','N/A')}\n\n📐 Risk: {result.get('risk','N/A')}\n⚖️ RR: 1:{result.get('rr','N/A')}\n\n🧠 Strategies: {st}\n\n📌 Tracker: معامله ثبت شد")
+            except Exception as e: print(f"AUTO_SYMBOL_ERROR {symbol}: {e}")
+    except Exception as e: print("AUTO_SIGNAL_ERROR:",e)
 
-    results = []
-    for coin in data:
-        volume_24h = coin["quote"]["USD"]["volume_24h"]
-        if volume_24h < MIN_VOLUME:
-            continue
-
-        price = coin["quote"]["USD"]["price"]
-        ath = coin["quote"]["USD"].get("ath_price", price)  # اگر API قرارداد ATH نداشت
-        atl = coin["quote"]["USD"].get("atl_price", price)  # اگر API قرارداد ATL نداشت
-
-        # محاسبه فاصله‌ها
-        if ath != 0:
-            dist_to_ath_pct = ((ath - price) / ath) * 100
-        else:
-            dist_to_ath_pct = 0
-        
-        if atl != 0:
-            dist_to_atl_pct = ((price - atl) / atl) * 100
-        else:
-            dist_to_atl_pct = 0
-
-        potential_growth = ath / price if price != 0 else 0
-
-        results.append({
-            "symbol": coin["symbol"],
-            "price": price,
-            "volume_24h": volume_24h,
-            "dist_to_ath_%": dist_to_ath_pct,
-            "dist_to_atl_%": dist_to_atl_pct,
-            "growth_x": potential_growth
-        })
-
-        time.sleep(0.3)  # برای جلوگیری از بلاک شدن API
-
-    # مرتب‌سازی بر اساس بیشترین فاصله تا ATH
-    sorted_coins = sorted(results, key=lambda x: x["dist_to_ath_%"], reverse=True)
-
-    print("Top Coins by Distance to ATH:")
-    for c in sorted_coins[:20]:
-        print(f"{c['symbol']}: Price ${c['price']:.4f}, "
-              f"Vol ${c['volume_24h']:.0f}, "
-              f"ATH Dist {c['dist_to_ath_%']:.2f}%, "
-              f"ATL Dist {c['dist_to_atl_%']:.2f}%, "
-              f"Growth x{c['growth_x']:.2f}")
-
-except Exception as e:
-    print(f"Error: {e}")
+app=Application.builder().token(TOKEN).build()
+app.add_handler(CommandHandler("start",start)); app.add_handler(CommandHandler("price",price)); app.add_handler(CommandHandler("signal",signal)); app.add_handler(CommandHandler("stats",stats))
+app.job_queue.run_repeating(auto_signal,interval=300,first=10)
+app.run_polling()
