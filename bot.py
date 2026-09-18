@@ -1,6 +1,7 @@
 import os
-import asyncio
 import logging
+import asyncio
+import threading
 import requests
 
 from telegram import Update
@@ -13,28 +14,14 @@ from telegram.ext import (
 from analysis import generate_signal
 
 
-# ============================================================
+# =========================
 # CONFIG
-# ============================================================
+# =========================
 
 TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = 6912201079
 
-AUTO_INTERVAL = 300  # 5 minutes
-
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-)
-
-logger = logging.getLogger(__name__)
-
-_scan_lock = asyncio.Lock()
-
-
-# ============================================================
-# SYMBOLS
-# ============================================================
+TOOBIT_KLINES_URL = "https://api.toobit.com/quote/v1/klines"
+TOOBIT_TICKER_URL = "https://api.toobit.com/quote/v1/contract/ticker/price"
 
 SYMBOLS = [
     "BTC-SWAP-USDT",
@@ -49,86 +36,131 @@ SYMBOLS = [
     "DOT-SWAP-USDT",
 ]
 
+INTERVALS = {
+    "1d": "1d",
+    "4h": "4h",
+    "1h": "1h",
+}
 
-# ============================================================
-# TOOBIT KLINES
-# ============================================================
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+
+logger = logging.getLogger(__name__)
+
+_scan_lock = asyncio.Lock()
+
+
+# =========================
+# CANDLE NORMALIZATION
+# =========================
+
+def safe_number(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
 
 def normalize_candle(candle):
     """
-    Toobit normally returns candles as arrays:
-
-    [
-        timestamp,
-        open,
-        high,
-        low,
-        close,
-        volume,
-        ...
-    ]
-
-    analysis.py expects dictionaries.
+    تبدیل کندل Toobit به فرمت مورد نیاز analysis.py
     """
 
+    # اگر قبلاً dict باشد
     if isinstance(candle, dict):
         return {
-            "open": candle.get("open"),
-            "high": candle.get("high"),
-            "low": candle.get("low"),
-            "close": candle.get("close"),
-            "volume": candle.get("volume"),
-            "timestamp": candle.get("timestamp"),
+            "timestamp": candle.get("timestamp", candle.get("time")),
+            "open": safe_number(candle.get("open")),
+            "high": safe_number(candle.get("high")),
+            "low": safe_number(candle.get("low")),
+            "close": safe_number(candle.get("close")),
+            "volume": safe_number(candle.get("volume")),
         }
 
+    # فرمت معمول Toobit:
+    # [timestamp, open, high, low, close, volume, ...]
     if isinstance(candle, (list, tuple)):
-
         if len(candle) < 5:
             return None
 
         return {
             "timestamp": candle[0],
-            "open": candle[1],
-            "high": candle[2],
-            "low": candle[3],
-            "close": candle[4],
-            "volume": candle[5] if len(candle) > 5 else None,
+            "open": safe_number(candle[1]),
+            "high": safe_number(candle[2]),
+            "low": safe_number(candle[3]),
+            "close": safe_number(candle[4]),
+            "volume": safe_number(candle[5]) if len(candle) > 5 else None,
         }
 
+    # اگر string یا نوع ناشناخته بود، نادیده گرفته شود
     return None
 
 
-def normalize_candles(candles):
+def extract_candle_rows(data):
+    """
+    استخراج لیست کندل‌ها از فرمت‌های مختلف پاسخ API
+    """
 
-    if not isinstance(candles, list):
-        return []
+    # پاسخ مستقیم:
+    # [[...], [...], [...]]
+    if isinstance(data, list):
+        return data
 
-    normalized = []
+    # اگر پاسخ dict باشد
+    if isinstance(data, dict):
 
-    for candle in candles:
+        # حالت‌های رایج
+        for key in ("data", "result", "rows", "klines", "candles"):
+            value = data.get(key)
 
-        converted = normalize_candle(candle)
+            if isinstance(value, list):
+                return value
 
-        if converted is not None:
-            normalized.append(converted)
+    return []
 
-    return normalized
 
+def normalize_candles(data):
+    rows = extract_candle_rows(data)
+
+    candles = []
+
+    for row in rows:
+        candle = normalize_candle(row)
+
+        if candle is None:
+            continue
+
+        # کندل ناقص نباید وارد analysis شود
+        if (
+            candle["open"] is None
+            or candle["high"] is None
+            or candle["low"] is None
+            or candle["close"] is None
+        ):
+            continue
+
+        candles.append(candle)
+
+    return candles
+
+
+# =========================
+# TOOBIT MARKET DATA
+# =========================
 
 def get_klines(symbol, interval, limit=200):
 
-    url = "https://api.toobit.com/quote/v1/klines"
-
-    params = {
-        "symbol": symbol,
-        "interval": interval,
-        "limit": limit,
-    }
-
     try:
+        params = {
+            "symbol": symbol,
+            "interval": interval,
+            "limit": limit,
+        }
 
         response = requests.get(
-            url,
+            TOOBIT_KLINES_URL,
             params=params,
             timeout=15,
         )
@@ -137,72 +169,69 @@ def get_klines(symbol, interval, limit=200):
 
         data = response.json()
 
-        if not data:
-            return []
-
         candles = normalize_candles(data)
 
-        if not candles:
-            logger.error(
-                f"No valid candles for {symbol} {interval}"
+        if len(candles) < 50:
+            logger.warning(
+                "%s %s: insufficient candles: %s",
+                symbol,
+                interval,
+                len(candles),
             )
+            return []
 
         return candles
 
     except Exception as e:
-
         logger.error(
-            f"Klines error {symbol} {interval}: {e}"
+            "Kline error %s %s: %s",
+            symbol,
+            interval,
+            e,
         )
-
         return []
 
 
-# ============================================================
-# MARKET DATA
-# ============================================================
-
 def get_market_data(symbol):
 
+    daily = get_klines(
+        symbol,
+        INTERVALS["1d"],
+        200,
+    )
+
+    h4 = get_klines(
+        symbol,
+        INTERVALS["4h"],
+        200,
+    )
+
+    h1 = get_klines(
+        symbol,
+        INTERVALS["1h"],
+        200,
+    )
+
+    if not daily or not h4 or not h1:
+        return None
+
     return {
-        "1d": get_klines(
-            symbol,
-            "1d",
-            200
-        ),
-
-        "4h": get_klines(
-            symbol,
-            "4h",
-            200
-        ),
-
-        "1h": get_klines(
-            symbol,
-            "1h",
-            200
-        ),
+        "1d": daily,
+        "4h": h4,
+        "1h": h1,
     }
 
 
-# ============================================================
+# =========================
 # PRICE
-# ============================================================
+# =========================
 
 def get_price(symbol):
 
-    url = (
-        "https://api.toobit.com/"
-        "quote/v1/contract/ticker/price"
-    )
-
     try:
-
         response = requests.get(
-            url,
-            params={
-                "symbol": symbol
-            },
+            TOOBIT_TICKER_URL,
+            params={"symbol": symbol},
             timeout=10,
         )
 
@@ -210,454 +239,320 @@ def get_price(symbol):
 
         data = response.json()
 
-        return float(data["p"])
+        if isinstance(data, dict):
 
-    except Exception as e:
+            price = data.get("p")
 
-        logger.error(
-            f"Price error {symbol}: {e}"
-        )
+            if price is None:
+                price = data.get("price")
+
+            if price is not None:
+                return float(price)
 
         return None
 
+    except Exception as e:
+        logger.error(
+            "Price error %s: %s",
+            symbol,
+            e,
+        )
+        return None
 
-# ============================================================
+
+# =========================
 # SIGNAL TEXT
-# ============================================================
+# =========================
 
 def signal_text(symbol, result):
 
-    direction = result.get(
-        "signal",
-        "NO_TRADE"
-    )
+    direction = result.get("direction", "UNKNOWN")
 
-    quality = result.get(
-        "quality",
-        "LOW"
-    )
+    emoji = "🟢" if direction == "LONG" else "🔴"
 
-    score = result.get(
-        "score",
-        0
-    )
-
-    entry = result.get("entry")
-    sl = result.get("sl")
-
-    tp1 = result.get("tp1")
-    tp2 = result.get("tp2")
-    tp3 = result.get("tp3")
-
-    risk = result.get("risk")
-    rr = result.get("rr")
-
-    strategies = result.get(
-        "strategy_matches",
-        []
-    )
-
-    if strategies:
-        strategy_text = ", ".join(
-            strategies
-        )
-    else:
-        strategy_text = "N/A"
-
-    daily = result.get(
-        "daily",
-        "N/A"
-    )
-
-    four_h = result.get(
-        "4h",
-        "N/A"
-    )
-
-    one_h = result.get(
-        "1h",
-        "N/A"
-    )
-
-    emoji = (
-        "🟢"
-        if direction == "LONG"
-        else "🔴"
-    )
-
-    return (
-        "🚨 CryptoBot HIGH SIGNAL\n\n"
-
-        f"💎 {symbol}\n"
-
-        f"{emoji} Signal: {direction}\n"
-
-        f"⭐ Quality: {quality}\n"
-
-        f"📊 Score: {score}/10\n\n"
-
-        f"📅 Daily: {daily}\n"
-
-        f"⏱ 4H: {four_h}\n"
-
-        f"🕐 1H: {one_h}\n\n"
-
-        f"💰 Entry: {entry}\n"
-
-        f"🛑 SL: {sl}\n\n"
-
-        f"🎯 TP1: {tp1}\n"
-
-        f"🎯 TP2: {tp2}\n"
-
-        f"🎯 TP3: {tp3}\n\n"
-
-        f"⚠️ Risk: {risk}\n"
-
-        f"📈 RR: {rr}\n\n"
-
+    text = (
+        f"{emoji} <b>{symbol}</b>\n\n"
+        f"🎯 Signal: <b>{direction}</b>\n"
+        f"⭐ Quality: <b>{result.get('quality')}</b>\n"
+        f"📊 Score: <b>{result.get('score')}</b>\n\n"
+        f"📅 Daily: {result.get('daily')}\n"
+        f"⏱ 4H: {result.get('4h')}\n"
+        f"🕐 1H: {result.get('1h')}\n\n"
+        f"💰 Entry: <b>{result.get('entry')}</b>\n"
+        f"🛑 SL: <b>{result.get('sl')}</b>\n\n"
+        f"🎯 TP1: <b>{result.get('tp1')}</b>\n"
+        f"🎯 TP2: <b>{result.get('tp2')}</b>\n"
+        f"🎯 TP3: <b>{result.get('tp3')}</b>\n\n"
+        f"📏 Risk: {result.get('risk')}\n"
+        f"⚖️ RR: {result.get('rr')}\n\n"
         f"🧠 Strategies:\n"
-        f"{strategy_text}\n\n"
-
-        "⏱ Generated: 5m scanner"
+        f"{', '.join(result.get('strategy_matches', []))}"
     )
 
+    return text
 
-# ============================================================
+
+# =========================
+# ANALYSIS
+# =========================
+
+def analyze_symbol(symbol):
+
+    market_data = get_market_data(symbol)
+
+    if market_data is None:
+        return None
+
+    result = generate_signal(
+        market_data["1d"],
+        market_data["4h"],
+        market_data["1h"],
+    )
+
+    if not isinstance(result, dict):
+        return None
+
+    # فقط HIGH
+    if result.get("quality") != "HIGH":
+        return None
+
+    # فقط LONG / SHORT
+    if result.get("direction") not in ("LONG", "SHORT"):
+        return None
+
+    if result.get("signal") not in ("LONG", "SHORT"):
+        return None
+
+    return result
+
+
+# =========================
 # /START
-# ============================================================
+# =========================
 
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
-
         "🤖 CryptoBot فعال است.\n\n"
-
         "دستورات:\n"
-
-        "/price - قیمت‌ها\n"
-
-        "/signal - بررسی سیگنال‌ها\n\n"
-
-        "⚡ فقط سیگنال‌های HIGH ارسال می‌شوند."
+        "/price - قیمت BTC و SOL\n"
+        "/signal - بررسی سیگنال‌های HIGH"
     )
 
 
-# ============================================================
+# =========================
 # /PRICE
-# ============================================================
+# =========================
 
-async def price_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    messages = []
+    btc = get_price("BTC-SWAP-USDT")
+    sol = get_price("SOL-SWAP-USDT")
 
-    for symbol in SYMBOLS:
+    text = "💰 <b>CryptoBot Prices</b>\n\n"
 
-        price = get_price(symbol)
+    if btc is not None:
+        text += f"₿ BTC: <b>{btc}</b>\n"
+    else:
+        text += "₿ BTC: unavailable\n"
 
-        if price is not None:
-
-            messages.append(
-                f"💎 {symbol}: {price}"
-            )
-
-    if not messages:
-
-        await update.message.reply_text(
-            "❌ دریافت قیمت‌ها ناموفق بود."
-        )
-
-        return
+    if sol is not None:
+        text += f"◎ SOL: <b>{sol}</b>\n"
+    else:
+        text += "◎ SOL: unavailable\n"
 
     await update.message.reply_text(
-        "\n".join(messages)
+        text,
+        parse_mode="HTML",
     )
 
 
-# ============================================================
-# SCAN
-# ============================================================
+# =========================
+# /SIGNAL
+# =========================
 
-async def scan_symbols():
+async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    results = []
+    await update.message.reply_text(
+        "🔎 در حال بررسی بازار...\n"
+        "فقط سیگنال‌های HIGH نمایش داده می‌شوند."
+    )
+
+    found = 0
 
     for symbol in SYMBOLS:
 
         try:
-
-            market_data = get_market_data(
-                symbol
+            result = await asyncio.to_thread(
+                analyze_symbol,
+                symbol,
             )
 
-            daily_candles = market_data["1d"]
-            h4_candles = market_data["4h"]
-            h1_candles = market_data["1h"]
+            if result:
 
-            if not daily_candles:
-                logger.warning(
-                    f"No Daily data: {symbol}"
+                await update.message.reply_text(
+                    signal_text(symbol, result),
+                    parse_mode="HTML",
                 )
-                continue
 
-            if not h4_candles:
-                logger.warning(
-                    f"No 4H data: {symbol}"
-                )
-                continue
-
-            if not h1_candles:
-                logger.warning(
-                    f"No 1H data: {symbol}"
-                )
-                continue
-
-            # analysis.py v3 expects:
-            #
-            # generate_signal(
-            #     daily_candles,
-            #     h4_candles,
-            #     h1_candles
-            # )
-
-            result = generate_signal(
-                daily_candles,
-                h4_candles,
-                h1_candles,
-            )
-
-            if not isinstance(
-                result,
-                dict
-            ):
-                logger.error(
-                    f"Invalid result: {symbol}"
-                )
-                continue
-
-            # فقط LONG / SHORT
-            if result.get(
-                "signal"
-            ) not in [
-                "LONG",
-                "SHORT",
-            ]:
-                continue
-
-            # فقط HIGH
-            if result.get(
-                "quality"
-            ) != "HIGH":
-                continue
-
-            results.append(
-                (
-                    symbol,
-                    result
-                )
-            )
+                found += 1
 
         except Exception as e:
 
             logger.error(
-                f"Scan error {symbol}: {e}"
-            )
-
-    return results
-
-
-# ============================================================
-# /SIGNAL
-# ============================================================
-
-async def signal_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    async with _scan_lock:
-
-        await update.message.reply_text(
-            "🔎 در حال بررسی بازار...\n"
-            "فقط HIGH QUALITY بررسی می‌شود."
-        )
-
-        results = await scan_symbols()
-
-    if not results:
-
-        await update.message.reply_text(
-            "⚪ در حال حاضر هیچ "
-            "سیگنال HIGH معتبری پیدا نشد."
-        )
-
-        return
-
-    for symbol, result in results:
-
-        await update.message.reply_text(
-            signal_text(
+                "Signal error %s: %s",
                 symbol,
-                result
+                e,
             )
+
+    if found == 0:
+
+        await update.message.reply_text(
+            "⏳ در حال حاضر هیچ سیگنال HIGH معتبری پیدا نشد."
         )
 
 
-# ============================================================
-# AUTO SIGNAL
-# ============================================================
+# =========================
+# AUTO SCANNER
+# =========================
 
-async def auto_signal(
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
 
     if _scan_lock.locked():
-
-        logger.info(
-            "Scanner already running."
-        )
-
+        logger.warning("Previous scan still running. Skipping.")
         return
 
     async with _scan_lock:
 
-        try:
+        logger.info("Starting automatic market scan...")
 
-            results = await scan_symbols()
+        found = 0
 
-            if not results:
+        for symbol in SYMBOLS:
 
-                logger.info(
-                    "No HIGH signals."
+            try:
+
+                result = await asyncio.to_thread(
+                    analyze_symbol,
+                    symbol,
                 )
 
-                return
+                if result:
 
-            for symbol, result in results:
+                    found += 1
 
-                try:
-
-                    await context.bot.send_message(
-
-                        chat_id=CHAT_ID,
-
-                        text=signal_text(
-                            symbol,
-                            result
-                        ),
+                    logger.info(
+                        "HIGH signal found: %s %s",
+                        symbol,
+                        result.get("direction"),
                     )
 
-                except Exception as e:
-
-                    logger.error(
-                        f"Telegram send error: {e}"
+                    # ارسال به چت‌هایی که /start زده‌اند
+                    chat_ids = context.application.bot_data.get(
+                        "chat_ids",
+                        set(),
                     )
 
-        except Exception as e:
+                    for chat_id in chat_ids:
 
-            logger.error(
-                f"Auto scanner error: {e}"
-            )
+                        try:
+
+                            await context.bot.send_message(
+                                chat_id=chat_id,
+                                text=signal_text(symbol, result),
+                                parse_mode="HTML",
+                            )
+
+                        except Exception as e:
+
+                            logger.error(
+                                "Telegram send error: %s",
+                                e,
+                            )
+
+            except Exception as e:
+
+                logger.error(
+                    "Scan error %s: %s",
+                    symbol,
+                    e,
+                )
+
+        if found == 0:
+            logger.info("No HIGH signals.")
 
 
-# ============================================================
-# ERROR HANDLER
-# ============================================================
+# =========================
+# SAVE CHAT ID
+# =========================
 
-async def error_handler(
-    update: object,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def register_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    logger.error(
-        "Telegram error: %s",
-        context.error,
+    chat_ids = context.application.bot_data.setdefault(
+        "chat_ids",
+        set(),
+    )
+
+    chat_ids.add(update.effective_chat.id)
+
+    await update.message.reply_text(
+        "✅ این چت برای دریافت سیگنال‌های خودکار ثبت شد."
     )
 
 
-# ============================================================
+# =========================
 # MAIN
-# ============================================================
+# =========================
 
 def main():
 
     if not TOKEN:
-
         raise RuntimeError(
-            "BOT_TOKEN environment variable "
-            "is missing."
+            "BOT_TOKEN environment variable is missing."
         )
 
-    app = (
+    application = (
         Application.builder()
         .token(TOKEN)
         .build()
     )
 
-    app.add_handler(
-        CommandHandler(
-            "start",
-            start
-        )
+    application.add_handler(
+        CommandHandler("start", register_chat)
     )
 
-    app.add_handler(
-        CommandHandler(
-            "price",
-            price_command
-        )
+    application.add_handler(
+        CommandHandler("price", price)
     )
 
-    app.add_handler(
-        CommandHandler(
-            "signal",
-            signal_command
-        )
+    application.add_handler(
+        CommandHandler("signal", signal)
     )
 
-    app.add_error_handler(
-        error_handler
+    # ثبت چت هنگام /start
+    application.add_handler(
+        CommandHandler("register", register_chat)
     )
 
-    if app.job_queue:
+    # Auto scanner - every 5 minutes
+    application.job_queue.run_repeating(
+        auto_signal,
+        interval=300,
+        first=10,
+    )
 
-        app.job_queue.run_repeating(
-
-            auto_signal,
-
-            interval=AUTO_INTERVAL,
-
-            first=10,
-
-            name="auto_signal",
-        )
-
-        logger.info(
-            "Auto scanner started: every 5 minutes"
-        )
-
-    else:
-
-        logger.error(
-            "JobQueue is not available."
-        )
+    logger.info(
+        "Auto scanner started: every 5 minutes"
+    )
 
     logger.info(
         "CryptoBot started successfully."
     )
 
-    app.run_polling()
+    application.run_polling(
+        drop_pending_updates=True
+    )
 
-
-# ============================================================
-# START
-# ============================================================
 
 if __name__ == "__main__":
     main()
