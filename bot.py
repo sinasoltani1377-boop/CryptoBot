@@ -1,263 +1,453 @@
-import asyncio
 import os
+import asyncio
+import logging
 import requests
-from analysis import generate_signal
-from tracker import register_signal, check_open_trades, format_stats
+
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+)
+
+from analysis import generate_signal
+
+
+# =========================
+# CONFIG
+# =========================
 
 TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = 6912201079
-AUTO_INTERVAL = 300
 
-# Prevent a second full-market scan from starting while the previous one is running.
+AUTO_INTERVAL = 300  # 5 minutes
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+
+logger = logging.getLogger(__name__)
+
 _scan_lock = asyncio.Lock()
 
 
-def get_price(symbol):
-    r = requests.get(
-        "https://api.toobit.com/quote/v1/contract/ticker/price",
-        params={"symbol": symbol},
-        timeout=10,
-    )
-    r.raise_for_status()
-    return float(r.json()[0]["p"])
+# =========================
+# SYMBOLS
+# =========================
+
+SYMBOLS = [
+    "BTC-SWAP-USDT",
+    "ETH-SWAP-USDT",
+    "SOL-SWAP-USDT",
+    "BNB-SWAP-USDT",
+    "XRP-SWAP-USDT",
+    "DOGE-SWAP-USDT",
+    "ADA-SWAP-USDT",
+    "AVAX-SWAP-USDT",
+    "LINK-SWAP-USDT",
+    "DOT-SWAP-USDT",
+]
 
 
-def signal_text(symbol, result):
-    strategies = ", ".join(result.get("strategy_matches", [])) or "N/A"
-    return (
-        f"🚨 {symbol}\n\n"
-        f"🎯 سیگنال: {result.get('signal')}\n"
-        f"⭐ کیفیت: {result.get('quality', 'UNKNOWN')}\n"
-        f"📊 امتیاز: {result.get('score', 0)}\n\n"
-        f"💰 Entry: {result.get('entry', 'N/A')}\n"
-        f"🛑 SL: {result.get('sl', 'N/A')}\n\n"
-        f"🎯 TP1: {result.get('tp1', 'N/A')}\n"
-        f"🎯 TP2: {result.get('tp2', 'N/A')}\n"
-        f"🎯 TP3: {result.get('tp3', 'N/A')}\n\n"
-        f"📐 Risk: {result.get('risk', 'N/A')}\n"
-        f"⚖️ RR: 1:{result.get('rr', 'N/A')}\n\n"
-        f"🧠 Strategies: {strategies}\n\n"
-        f"📌 Tracker: معامله ثبت شد"
-    )
+# =========================
+# MARKET DATA
+# =========================
 
+def get_klines(symbol, interval, limit=200):
+    url = "https://api.toobit.com/quote/v1/klines"
 
-def tracker_event_text(event):
-    t = event["trade"]
-    e = event["event"]
-    p = event["price"]
+    params = {
+        "symbol": symbol,
+        "interval": interval,
+        "limit": limit,
+    }
 
-    if e == "TP1":
-        return (
-            f"🎯 TP1 HIT\n\n🔹 {t['symbol']}\n📈 {t['direction']}\n"
-            f"💰 Price: {p}\n\nTP1: {t['tp1']}\nTP2: {t['tp2']}\nTP3: {t['tp3']}"
-        )
-
-    if e == "TP2":
-        return (
-            f"🎯 TP2 HIT\n\n🔹 {t['symbol']}\n📈 {t['direction']}\n"
-            f"💰 Price: {p}\n\nTP3: {t['tp3']}"
-        )
-
-    if e == "TP3":
-        return (
-            f"🏆 TP3 HIT\n\n🔹 {t['symbol']}\n📈 {t['direction']}\n"
-            f"💰 Price: {p}\n\nنتیجه: TP3"
-        )
-
-    if e == "SL":
-        return (
-            f"🛑 SL HIT\n\n🔹 {t['symbol']}\n📉 {t['direction']}\n"
-            f"💰 Price: {p}\n\nنتیجه: STOP LOSS"
-        )
-
-    return None
-
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🤖 ربات ترید فعال است!\n\n"
-        "📊 /price\n📈 /signal\n📊 /stats"
-    )
-
-
-async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        from market import get_futures_symbols
+        response = requests.get(
+            url,
+            params=params,
+            timeout=15,
+        )
 
-        message = "📊 Toobit USDT-M Futures\n\n"
+        response.raise_for_status()
 
-        for symbol in get_futures_symbols()[:20]:
-            try:
-                message += f"🔹 {symbol}: ${get_price(symbol):,.6f}\n"
-            except Exception:
-                pass
+        data = response.json()
 
-        await update.message.reply_text(message)
+        if not data:
+            return []
+
+        return data
 
     except Exception as e:
-        await update.message.reply_text(f"❌ خطا در دریافت قیمت:\n{e}")
+        logger.error(
+            f"Klines error {symbol} {interval}: {e}"
+        )
+        return []
 
 
-async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Manual scan also respects the same lock, so it cannot collide with auto scan.
-    if _scan_lock.locked():
+def get_market_data(symbol):
+    return {
+        "1d": get_klines(symbol, "1d", 200),
+        "4h": get_klines(symbol, "4h", 200),
+        "1h": get_klines(symbol, "1h", 200),
+    }
+
+
+def get_price(symbol):
+    url = "https://api.toobit.com/quote/v1/contract/ticker/price"
+
+    try:
+        response = requests.get(
+            url,
+            params={"symbol": symbol},
+            timeout=10,
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        return float(data["p"])
+
+    except Exception as e:
+        logger.error(
+            f"Price error {symbol}: {e}"
+        )
+        return None
+
+
+# =========================
+# SIGNAL TEXT
+# =========================
+
+def signal_text(symbol, result):
+
+    direction = result.get("signal", "NO_TRADE")
+
+    quality = result.get("quality", "LOW")
+
+    score = result.get("score", 0)
+
+    entry = result.get("entry")
+    sl = result.get("sl")
+
+    tp1 = result.get("tp1")
+    tp2 = result.get("tp2")
+    tp3 = result.get("tp3")
+
+    risk = result.get("risk")
+    rr = result.get("rr")
+
+    strategies = result.get(
+        "strategy_matches",
+        []
+    )
+
+    strategy_text = (
+        ", ".join(strategies)
+        if strategies
+        else "N/A"
+    )
+
+    daily = result.get("daily", "N/A")
+    four_h = result.get("4h", "N/A")
+    one_h = result.get("1h", "N/A")
+
+    emoji = "🟢" if direction == "LONG" else "🔴"
+
+    return (
+        f"🚨 CryptoBot HIGH SIGNAL\n\n"
+        f"💎 {symbol}\n"
+        f"{emoji} Signal: {direction}\n"
+        f"⭐ Quality: {quality}\n"
+        f"📊 Score: {score}/10\n\n"
+        f"📅 Daily: {daily}\n"
+        f"⏱ 4H: {four_h}\n"
+        f"🕐 1H: {one_h}\n\n"
+        f"💰 Entry: {entry}\n"
+        f"🛑 SL: {sl}\n\n"
+        f"🎯 TP1: {tp1}\n"
+        f"🎯 TP2: {tp2}\n"
+        f"🎯 TP3: {tp3}\n\n"
+        f"⚠️ Risk: {risk}\n"
+        f"📈 RR: {rr}\n\n"
+        f"🧠 Strategies:\n"
+        f"{strategy_text}\n\n"
+        f"⏱ Generated: 5m scanner"
+    )
+
+
+# =========================
+# /START
+# =========================
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    await update.message.reply_text(
+        "🤖 CryptoBot فعال است.\n\n"
+        "دستورات:\n"
+        "/price - قیمت‌ها\n"
+        "/signal - بررسی سیگنال‌ها\n\n"
+        "⚡ فقط سیگنال‌های HIGH ارسال می‌شوند."
+    )
+
+
+# =========================
+# /PRICE
+# =========================
+
+async def price_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    messages = []
+
+    for symbol in SYMBOLS:
+
+        price = get_price(symbol)
+
+        if price is not None:
+
+            messages.append(
+                f"💎 {symbol}: {price}"
+            )
+
+    if not messages:
+
         await update.message.reply_text(
-            "⏳ یک اسکن بازار در حال اجراست. کمی صبر کن و دوباره /signal را بزن."
+            "❌ دریافت قیمت‌ها ناموفق بود."
         )
         return
 
-    async with _scan_lock:
+    await update.message.reply_text(
+        "\n".join(messages)
+    )
+
+
+# =========================
+# SCAN
+# =========================
+
+async def scan_symbols():
+
+    results = []
+
+    for symbol in SYMBOLS:
+
         try:
-            from market import get_futures_symbols, get_market_data
 
-            symbols = get_futures_symbols()
-            parts = ["🤖 CryptoBot Market Scan\n"]
-            scanned = 0
-            found = 0
+            market_data = get_market_data(symbol)
 
-            for symbol in symbols:
-                try:
-                    result = generate_signal(get_market_data(symbol))
-                    scanned += 1
+            if not market_data:
+                continue
 
-                    # فقط سیگنال‌های HIGH نمایش داده شوند
-                    if (
-                        result.get("signal") in ["LONG", "SHORT"]
-                        and result.get("quality") == "HIGH"
-                    ):
-                        found += 1
+            result = generate_signal(
+                market_data
+            )
 
-                        strategies = (
-                            ", ".join(result.get("strategy_matches", []))
-                            or "N/A"
-                        )
+            if not isinstance(result, dict):
+                continue
 
-                        parts.append(
-                            f"🚨 {symbol}\n"
-                            f"🎯 Signal: {result.get('signal')}\n"
-                            f"⭐ Quality: {result.get('quality')}\n"
-                            f"📊 Score: {result.get('score', 0)}\n\n"
-                            f"💰 Entry: {result.get('entry', 'N/A')}\n"
-                            f"🛑 SL: {result.get('sl', 'N/A')}\n\n"
-                            f"🎯 TP1: {result.get('tp1', 'N/A')}\n"
-                            f"🎯 TP2: {result.get('tp2', 'N/A')}\n"
-                            f"🎯 TP3: {result.get('tp3', 'N/A')}\n\n"
-                            f"📐 Risk: {result.get('risk', 'N/A')}\n"
-                            f"⚖️ RR: 1:{result.get('rr', 'N/A')}\n"
-                            f"🧠 Strategies: {strategies}\n"
-                        )
+            # فقط LONG / SHORT
+            if result.get("signal") not in [
+                "LONG",
+                "SHORT",
+            ]:
+                continue
 
-                except Exception as e:
-                    print(f"SIGNAL_ERROR {symbol}: {e}")
+            # فقط HIGH
+            if result.get("quality") != "HIGH":
+                continue
 
-            if not found:
-                parts.append(
-                    f"⚪ در حال حاضر سیگنال HIGH پیدا نشد.\n\n"
-                    f"🔎 Symbols scanned: {scanned}"
-                )
-
-            msg = "\n".join(parts)
-
-            await update.message.reply_text(
-                msg[:3900]
-                + ("\n\n⚠️ پیام کوتاه شد." if len(msg) > 3900 else "")
+            results.append(
+                (symbol, result)
             )
 
         except Exception as e:
-            await update.message.reply_text(
-                f"❌ خطا در اسکن بازار:\n{e}"
+
+            logger.error(
+                f"Scan error {symbol}: {e}"
             )
 
-
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        await update.message.reply_text(format_stats())
-    except Exception as e:
-        await update.message.reply_text(f"❌ خطا در آمار:\n{e}")
+    return results
 
 
-async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
-    # This extra guard protects us even if the scheduler is configured to allow overlap.
+# =========================
+# /SIGNAL
+# =========================
+
+async def signal_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    async with _scan_lock:
+
+        await update.message.reply_text(
+            "🔎 در حال بررسی بازار...\n"
+            "فقط HIGH QUALITY بررسی می‌شود."
+        )
+
+        results = await scan_symbols()
+
+    if not results:
+
+        await update.message.reply_text(
+            "⚪ در حال حاضر هیچ "
+            "سیگنال HIGH معتبری پیدا نشد."
+        )
+
+        return
+
+    for symbol, result in results:
+
+        await update.message.reply_text(
+            signal_text(
+                symbol,
+                result
+            )
+        )
+
+
+# =========================
+# AUTO SIGNAL
+# =========================
+
+async def auto_signal(
+    context: ContextTypes.DEFAULT_TYPE
+):
+
     if _scan_lock.locked():
-        print("AUTO_SIGNAL_SKIPPED: previous market scan is still running")
+        logger.info(
+            "Scanner already running."
+        )
         return
 
     async with _scan_lock:
+
         try:
-            from market import get_futures_symbols, get_market_data
 
-            # 1) Check existing trades first.
-            try:
-                events = check_open_trades()
+            results = await scan_symbols()
 
-                for event in events:
-                    msg = tracker_event_text(event)
+            if not results:
 
-                    if msg:
-                        await context.bot.send_message(
-                            chat_id=CHAT_ID,
-                            text=msg
-                        )
+                logger.info(
+                    "No HIGH signals."
+                )
 
-            except Exception as e:
-                print(f"TRACKER_CHECK_ERROR: {e}")
+                return
 
-            # 2) Scan the market and register ONLY HIGH LONG/SHORT signals.
-            symbols = get_futures_symbols()
-            scanned = 0
-            new_signals = 0
+            for symbol, result in results:
 
-            for symbol in symbols:
                 try:
-                    result = generate_signal(get_market_data(symbol))
-                    scanned += 1
-
-                    # LOW و MEDIUM کاملاً حذف می‌شوند
-                    if result.get("signal") not in ["LONG", "SHORT"]:
-                        continue
-
-                    if result.get("quality") != "HIGH":
-                        continue
-
-                    trade, created = register_signal(symbol, result)
-
-                    if not created:
-                        continue
-
-                    new_signals += 1
 
                     await context.bot.send_message(
                         chat_id=CHAT_ID,
-                        text=signal_text(symbol, result),
+                        text=signal_text(
+                            symbol,
+                            result
+                        ),
                     )
 
                 except Exception as e:
-                    print(f"AUTO_SYMBOL_ERROR {symbol}: {e}")
 
-            print(
-                f"AUTO_SCAN_DONE: scanned={scanned}, "
-                f"new_signals={new_signals}"
-            )
+                    logger.error(
+                        f"Telegram send error: {e}"
+                    )
 
         except Exception as e:
-            print("AUTO_SIGNAL_ERROR:", e)
+
+            logger.error(
+                f"Auto scanner error: {e}"
+            )
 
 
-app = Application.builder().token(TOKEN).build()
+# =========================
+# ERROR HANDLER
+# =========================
 
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("price", price))
-app.add_handler(CommandHandler("signal", signal))
-app.add_handler(CommandHandler("stats", stats))
+async def error_handler(
+    update: object,
+    context: ContextTypes.DEFAULT_TYPE,
+):
 
-# Only one automatic scan instance is allowed at a time.
-app.job_queue.run_repeating(
-    auto_signal,
-    interval=AUTO_INTERVAL,
-    first=10,
-    job_kwargs={"max_instances": 1, "coalesce": True},
-)
+    logger.error(
+        "Telegram error: %s",
+        context.error,
+    )
 
-app.run_polling()
+
+# =========================
+# MAIN
+# =========================
+
+def main():
+
+    if not TOKEN:
+
+        raise RuntimeError(
+            "BOT_TOKEN environment variable is missing."
+        )
+
+    app = (
+        Application.builder()
+        .token(TOKEN)
+        .build()
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "start",
+            start
+        )
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "price",
+            price_command
+        )
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "signal",
+            signal_command
+        )
+    )
+
+    app.add_error_handler(
+        error_handler
+    )
+
+    # اجرای اسکن خودکار هر 5 دقیقه
+    if app.job_queue:
+
+        app.job_queue.run_repeating(
+            auto_signal,
+            interval=AUTO_INTERVAL,
+            first=10,
+            name="auto_signal",
+        )
+
+        logger.info(
+            "Auto scanner started: every 5 minutes"
+        )
+
+    else:
+
+        logger.error(
+            "JobQueue is not available."
+        )
+
+    logger.info(
+        "CryptoBot started successfully."
+    )
+
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
