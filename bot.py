@@ -13,9 +13,9 @@ from telegram.ext import (
 from analysis import generate_signal
 
 
-# =========================
+# ============================================================
 # CONFIG
-# =========================
+# ============================================================
 
 TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = 6912201079
@@ -32,9 +32,9 @@ logger = logging.getLogger(__name__)
 _scan_lock = asyncio.Lock()
 
 
-# =========================
+# ============================================================
 # SYMBOLS
-# =========================
+# ============================================================
 
 SYMBOLS = [
     "BTC-SWAP-USDT",
@@ -50,11 +50,73 @@ SYMBOLS = [
 ]
 
 
-# =========================
-# MARKET DATA
-# =========================
+# ============================================================
+# TOOBIT KLINES
+# ============================================================
+
+def normalize_candle(candle):
+    """
+    Toobit normally returns candles as arrays:
+
+    [
+        timestamp,
+        open,
+        high,
+        low,
+        close,
+        volume,
+        ...
+    ]
+
+    analysis.py expects dictionaries.
+    """
+
+    if isinstance(candle, dict):
+        return {
+            "open": candle.get("open"),
+            "high": candle.get("high"),
+            "low": candle.get("low"),
+            "close": candle.get("close"),
+            "volume": candle.get("volume"),
+            "timestamp": candle.get("timestamp"),
+        }
+
+    if isinstance(candle, (list, tuple)):
+
+        if len(candle) < 5:
+            return None
+
+        return {
+            "timestamp": candle[0],
+            "open": candle[1],
+            "high": candle[2],
+            "low": candle[3],
+            "close": candle[4],
+            "volume": candle[5] if len(candle) > 5 else None,
+        }
+
+    return None
+
+
+def normalize_candles(candles):
+
+    if not isinstance(candles, list):
+        return []
+
+    normalized = []
+
+    for candle in candles:
+
+        converted = normalize_candle(candle)
+
+        if converted is not None:
+            normalized.append(converted)
+
+    return normalized
+
 
 def get_klines(symbol, interval, limit=200):
+
     url = "https://api.toobit.com/quote/v1/klines"
 
     params = {
@@ -64,6 +126,7 @@ def get_klines(symbol, interval, limit=200):
     }
 
     try:
+
         response = requests.get(
             url,
             params=params,
@@ -77,30 +140,69 @@ def get_klines(symbol, interval, limit=200):
         if not data:
             return []
 
-        return data
+        candles = normalize_candles(data)
+
+        if not candles:
+            logger.error(
+                f"No valid candles for {symbol} {interval}"
+            )
+
+        return candles
 
     except Exception as e:
+
         logger.error(
             f"Klines error {symbol} {interval}: {e}"
         )
+
         return []
 
 
+# ============================================================
+# MARKET DATA
+# ============================================================
+
 def get_market_data(symbol):
+
     return {
-        "1d": get_klines(symbol, "1d", 200),
-        "4h": get_klines(symbol, "4h", 200),
-        "1h": get_klines(symbol, "1h", 200),
+        "1d": get_klines(
+            symbol,
+            "1d",
+            200
+        ),
+
+        "4h": get_klines(
+            symbol,
+            "4h",
+            200
+        ),
+
+        "1h": get_klines(
+            symbol,
+            "1h",
+            200
+        ),
     }
 
 
+# ============================================================
+# PRICE
+# ============================================================
+
 def get_price(symbol):
-    url = "https://api.toobit.com/quote/v1/contract/ticker/price"
+
+    url = (
+        "https://api.toobit.com/"
+        "quote/v1/contract/ticker/price"
+    )
 
     try:
+
         response = requests.get(
             url,
-            params={"symbol": symbol},
+            params={
+                "symbol": symbol
+            },
             timeout=10,
         )
 
@@ -111,21 +213,34 @@ def get_price(symbol):
         return float(data["p"])
 
     except Exception as e:
+
         logger.error(
             f"Price error {symbol}: {e}"
         )
+
         return None
 
 
-# =========================
+# ============================================================
 # SIGNAL TEXT
-# =========================
+# ============================================================
 
 def signal_text(symbol, result):
 
-    direction = result.get("signal", "NO_TRADE")
-    quality = result.get("quality", "LOW")
-    score = result.get("score", 0)
+    direction = result.get(
+        "signal",
+        "NO_TRADE"
+    )
+
+    quality = result.get(
+        "quality",
+        "LOW"
+    )
+
+    score = result.get(
+        "score",
+        0
+    )
 
     entry = result.get("entry")
     sl = result.get("sl")
@@ -142,62 +257,102 @@ def signal_text(symbol, result):
         []
     )
 
-    strategy_text = (
-        ", ".join(strategies)
-        if strategies
-        else "N/A"
+    if strategies:
+        strategy_text = ", ".join(
+            strategies
+        )
+    else:
+        strategy_text = "N/A"
+
+    daily = result.get(
+        "daily",
+        "N/A"
     )
 
-    daily = result.get("daily", "N/A")
-    four_h = result.get("4h", "N/A")
-    one_h = result.get("1h", "N/A")
+    four_h = result.get(
+        "4h",
+        "N/A"
+    )
 
-    emoji = "🟢" if direction == "LONG" else "🔴"
+    one_h = result.get(
+        "1h",
+        "N/A"
+    )
+
+    emoji = (
+        "🟢"
+        if direction == "LONG"
+        else "🔴"
+    )
 
     return (
-        f"🚨 CryptoBot HIGH SIGNAL\n\n"
+        "🚨 CryptoBot HIGH SIGNAL\n\n"
+
         f"💎 {symbol}\n"
+
         f"{emoji} Signal: {direction}\n"
+
         f"⭐ Quality: {quality}\n"
+
         f"📊 Score: {score}/10\n\n"
+
         f"📅 Daily: {daily}\n"
+
         f"⏱ 4H: {four_h}\n"
+
         f"🕐 1H: {one_h}\n\n"
+
         f"💰 Entry: {entry}\n"
+
         f"🛑 SL: {sl}\n\n"
+
         f"🎯 TP1: {tp1}\n"
+
         f"🎯 TP2: {tp2}\n"
+
         f"🎯 TP3: {tp3}\n\n"
+
         f"⚠️ Risk: {risk}\n"
+
         f"📈 RR: {rr}\n\n"
+
         f"🧠 Strategies:\n"
         f"{strategy_text}\n\n"
-        f"⏱ Generated: 5m scanner"
+
+        "⏱ Generated: 5m scanner"
     )
 
 
-# =========================
+# ============================================================
 # /START
-# =========================
+# ============================================================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     await update.message.reply_text(
+
         "🤖 CryptoBot فعال است.\n\n"
+
         "دستورات:\n"
+
         "/price - قیمت‌ها\n"
+
         "/signal - بررسی سیگنال‌ها\n\n"
+
         "⚡ فقط سیگنال‌های HIGH ارسال می‌شوند."
     )
 
 
-# =========================
+# ============================================================
 # /PRICE
-# =========================
+# ============================================================
 
 async def price_command(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
+    context: ContextTypes.DEFAULT_TYPE
 ):
 
     messages = []
@@ -217,6 +372,7 @@ async def price_command(
         await update.message.reply_text(
             "❌ دریافت قیمت‌ها ناموفق بود."
         )
+
         return
 
     await update.message.reply_text(
@@ -224,9 +380,9 @@ async def price_command(
     )
 
 
-# =========================
+# ============================================================
 # SCAN
-# =========================
+# ============================================================
 
 async def scan_symbols():
 
@@ -236,35 +392,75 @@ async def scan_symbols():
 
         try:
 
-            market_data = get_market_data(symbol)
-
-            if not market_data:
-                continue
-
-            # analysis.py فعلی سه آرگومان می‌خواهد:
-            # Daily + 4H + 1H
-            result = generate_signal(
-                market_data["1d"],
-                market_data["4h"],
-                market_data["1h"],
+            market_data = get_market_data(
+                symbol
             )
 
-            if not isinstance(result, dict):
+            daily_candles = market_data["1d"]
+            h4_candles = market_data["4h"]
+            h1_candles = market_data["1h"]
+
+            if not daily_candles:
+                logger.warning(
+                    f"No Daily data: {symbol}"
+                )
+                continue
+
+            if not h4_candles:
+                logger.warning(
+                    f"No 4H data: {symbol}"
+                )
+                continue
+
+            if not h1_candles:
+                logger.warning(
+                    f"No 1H data: {symbol}"
+                )
+                continue
+
+            # analysis.py v3 expects:
+            #
+            # generate_signal(
+            #     daily_candles,
+            #     h4_candles,
+            #     h1_candles
+            # )
+
+            result = generate_signal(
+                daily_candles,
+                h4_candles,
+                h1_candles,
+            )
+
+            if not isinstance(
+                result,
+                dict
+            ):
+                logger.error(
+                    f"Invalid result: {symbol}"
+                )
                 continue
 
             # فقط LONG / SHORT
-            if result.get("signal") not in [
+            if result.get(
+                "signal"
+            ) not in [
                 "LONG",
                 "SHORT",
             ]:
                 continue
 
             # فقط HIGH
-            if result.get("quality") != "HIGH":
+            if result.get(
+                "quality"
+            ) != "HIGH":
                 continue
 
             results.append(
-                (symbol, result)
+                (
+                    symbol,
+                    result
+                )
             )
 
         except Exception as e:
@@ -276,13 +472,13 @@ async def scan_symbols():
     return results
 
 
-# =========================
+# ============================================================
 # /SIGNAL
-# =========================
+# ============================================================
 
 async def signal_command(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
+    context: ContextTypes.DEFAULT_TYPE
 ):
 
     async with _scan_lock:
@@ -313,18 +509,20 @@ async def signal_command(
         )
 
 
-# =========================
+# ============================================================
 # AUTO SIGNAL
-# =========================
+# ============================================================
 
 async def auto_signal(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
     if _scan_lock.locked():
+
         logger.info(
             "Scanner already running."
         )
+
         return
 
     async with _scan_lock:
@@ -346,7 +544,9 @@ async def auto_signal(
                 try:
 
                     await context.bot.send_message(
+
                         chat_id=CHAT_ID,
+
                         text=signal_text(
                             symbol,
                             result
@@ -366,13 +566,13 @@ async def auto_signal(
             )
 
 
-# =========================
+# ============================================================
 # ERROR HANDLER
-# =========================
+# ============================================================
 
 async def error_handler(
     update: object,
-    context: ContextTypes.DEFAULT_TYPE,
+    context: ContextTypes.DEFAULT_TYPE
 ):
 
     logger.error(
@@ -381,16 +581,17 @@ async def error_handler(
     )
 
 
-# =========================
+# ============================================================
 # MAIN
-# =========================
+# ============================================================
 
 def main():
 
     if not TOKEN:
 
         raise RuntimeError(
-            "BOT_TOKEN environment variable is missing."
+            "BOT_TOKEN environment variable "
+            "is missing."
         )
 
     app = (
@@ -424,13 +625,16 @@ def main():
         error_handler
     )
 
-    # اجرای اسکن خودکار هر 5 دقیقه
     if app.job_queue:
 
         app.job_queue.run_repeating(
+
             auto_signal,
+
             interval=AUTO_INTERVAL,
+
             first=10,
+
             name="auto_signal",
         )
 
@@ -450,6 +654,10 @@ def main():
 
     app.run_polling()
 
+
+# ============================================================
+# START
+# ============================================================
 
 if __name__ == "__main__":
     main()
