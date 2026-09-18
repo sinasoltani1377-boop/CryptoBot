@@ -16,7 +16,6 @@ def safe_float(value, default=0.0):
             return value
     except (TypeError, ValueError):
         pass
-
     return default
 
 
@@ -97,7 +96,9 @@ def find_swings(candles, strength=2):
     swing_highs = []
     swing_lows = []
 
-    if len(candles) < (strength * 2 + 1):
+    required = strength * 2 + 1
+
+    if len(candles) < required:
         return swing_highs, swing_lows
 
     for i in range(strength, len(candles) - strength):
@@ -125,12 +126,14 @@ def find_swings(candles, strength=2):
             for j in range(i + 1, i + strength + 1)
         ]
 
+        # Swing High
         if current_high > max(left_highs + right_highs):
             swing_highs.append({
                 "index": i,
                 "price": current_high,
             })
 
+        # Swing Low
         if current_low < min(left_lows + right_lows):
             swing_lows.append({
                 "index": i,
@@ -168,10 +171,8 @@ def get_structure_direction(candles):
 def structure_details(candles):
     swing_highs, swing_lows = find_swings(candles)
 
-    direction = get_structure_direction(candles)
-
     return {
-        "direction": direction,
+        "direction": get_structure_direction(candles),
         "swing_highs": swing_highs[-5:],
         "swing_lows": swing_lows[-5:],
     }
@@ -219,22 +220,19 @@ def detect_bos(candles):
 
     swing_highs, swing_lows = find_swings(candles[:-1])
 
-    if not swing_highs and not swing_lows:
-        return None
-
     current_close = safe_float(candles[-1].get("close"))
 
     if swing_highs:
         last_high = swing_highs[-1]["price"]
 
         if current_close > last_high:
-            return "BULLISH"
+            return "LONG"
 
     if swing_lows:
         last_low = swing_lows[-1]["price"]
 
         if current_close < last_low:
-            return "BEARISH"
+            return "SHORT"
 
     return None
 
@@ -310,14 +308,14 @@ def detect_breakout_retest(candles, direction):
 
     recent = candles[-3:]
 
-    if direction == "LONG" and resistance:
+    if direction == "LONG" and resistance is not None:
         breakout = safe_float(recent[1].get("close")) > resistance
         retest = safe_float(recent[2].get("low")) <= resistance
         close_above = safe_float(recent[2].get("close")) > resistance
 
         return breakout and retest and close_above
 
-    if direction == "SHORT" and support:
+    if direction == "SHORT" and support is not None:
         breakout = safe_float(recent[1].get("close")) < support
         retest = safe_float(recent[2].get("high")) >= support
         close_below = safe_float(recent[2].get("close")) < support
@@ -430,14 +428,20 @@ def detect_order_block(candles, direction):
 
         if direction == "LONG":
             bearish_candle = close_price < open_price
-            strong_move = next_close > next_open and next_body >= body * 1.3
+            strong_move = (
+                next_close > next_open
+                and next_body >= body * 1.3
+            )
 
             if bearish_candle and strong_move:
                 return True
 
         if direction == "SHORT":
             bullish_candle = close_price > open_price
-            strong_move = next_close < next_open and next_body >= body * 1.3
+            strong_move = (
+                next_close < next_open
+                and next_body >= body * 1.3
+            )
 
             if bullish_candle and strong_move:
                 return True
@@ -446,7 +450,7 @@ def detect_order_block(candles, direction):
 
 
 # ============================================================
-# RANGE DETECTION
+# RANGE
 # ============================================================
 
 def detect_range(candles):
@@ -455,11 +459,8 @@ def detect_range(candles):
 
     recent = candles[-20:]
 
-    highs = get_highs(recent)
-    lows = get_lows(recent)
-
-    highest = max(highs)
-    lowest = min(lows)
+    highest = max(get_highs(recent))
+    lowest = min(get_lows(recent))
 
     current = safe_float(candles[-1].get("close"))
 
@@ -532,13 +533,13 @@ def sr_reversal_signal(candles, direction):
     current_low = safe_float(current.get("low"))
     current_close = safe_float(current.get("close"))
 
-    if direction == "LONG" and support:
+    if direction == "LONG" and support is not None:
         touched = current_low <= support * 1.003
         recovered = current_close > support
 
         return touched and recovered
 
-    if direction == "SHORT" and resistance:
+    if direction == "SHORT" and resistance is not None:
         touched = current_high >= resistance * 0.997
         rejected = current_close < resistance
 
@@ -587,64 +588,8 @@ def quality_filter(score):
 
 
 # ============================================================
-# SIGNAL SCORE
+# DIRECTION
 # ============================================================
-
-def calculate_signal_score(
-    daily_trend,
-    h4_trend,
-    h1_trend,
-    direction,
-    ema,
-    main_setup,
-    bos,
-    confirmation
-):
-    score = 0
-    strategies = []
-
-    # Daily
-    if daily_trend == direction_to_trend(direction):
-        score += 2
-
-    # 4H
-    if h4_trend == direction_to_trend(direction):
-        score += 2
-
-    # 1H
-    if h1_trend == direction_to_trend(direction):
-        score += 1
-
-    # EMA
-    if ema == direction_to_trend(direction):
-        score += 1
-
-    # Main setup
-    if main_setup:
-        score += 2
-        strategies.extend(main_setup)
-
-    # BOS
-    if bos == direction:
-        score += 1
-        strategies.append("BOS")
-
-    # Confirmation
-    if confirmation:
-        score += 1
-        strategies.append("CONFIRMATION")
-
-    strategies = list(dict.fromkeys(strategies))
-
-    quality = quality_filter(score)
-
-    return {
-        "score": score,
-        "max_score": 10,
-        "quality": quality,
-        "strategies": strategies,
-    }
-
 
 def direction_to_trend(direction):
     if direction == "LONG":
@@ -657,6 +602,59 @@ def direction_to_trend(direction):
 
 
 # ============================================================
+# SCORE
+# ============================================================
+
+def calculate_signal_score(
+    daily_trend,
+    h4_trend,
+    h1_trend,
+    direction,
+    ema,
+    main_setup,
+    bos,
+    confirmation,
+):
+    score = 0
+    strategies = []
+
+    expected = direction_to_trend(direction)
+
+    if daily_trend == expected:
+        score += 2
+
+    if h4_trend == expected:
+        score += 2
+
+    if h1_trend == expected:
+        score += 1
+
+    if ema == expected:
+        score += 1
+
+    if main_setup:
+        score += 2
+        strategies.extend(main_setup)
+
+    if bos == direction:
+        score += 1
+        strategies.append("BOS")
+
+    if confirmation:
+        score += 1
+        strategies.append("CONFIRMATION")
+
+    strategies = list(dict.fromkeys(strategies))
+
+    return {
+        "score": score,
+        "max_score": 10,
+        "quality": quality_filter(score),
+        "strategies": strategies,
+    }
+
+
+# ============================================================
 # TRADE LEVELS
 # ============================================================
 
@@ -664,23 +662,17 @@ def calculate_trade_levels(candles, direction):
     if len(candles) < 10:
         return None
 
-    current_price = safe_float(candles[-1].get("close"))
+    entry = safe_float(candles[-1].get("close"))
 
-    if current_price <= 0:
+    if entry <= 0:
         return None
 
     recent = candles[-8:]
 
-    highs = get_highs(recent)
-    lows = get_lows(recent)
-
-    recent_high = max(highs)
-    recent_low = min(lows)
+    recent_high = max(get_highs(recent))
+    recent_low = min(get_lows(recent))
 
     if direction == "LONG":
-
-        entry = current_price
-
         sl = recent_low
 
         if sl >= entry:
@@ -691,24 +683,17 @@ def calculate_trade_levels(candles, direction):
         if risk <= 0:
             return None
 
-        tp1 = entry + risk * 1.0
-        tp2 = entry + risk * 2.0
-        tp3 = entry + risk * 3.0
-
         return {
             "entry": entry,
             "sl": sl,
-            "tp1": tp1,
-            "tp2": tp2,
-            "tp3": tp3,
+            "tp1": entry + risk,
+            "tp2": entry + risk * 2,
+            "tp3": entry + risk * 3,
             "risk": risk,
             "rr": 3.0,
         }
 
     if direction == "SHORT":
-
-        entry = current_price
-
         sl = recent_high
 
         if sl <= entry:
@@ -719,16 +704,12 @@ def calculate_trade_levels(candles, direction):
         if risk <= 0:
             return None
 
-        tp1 = entry - risk * 1.0
-        tp2 = entry - risk * 2.0
-        tp3 = entry - risk * 3.0
-
         return {
             "entry": entry,
             "sl": sl,
-            "tp1": tp1,
-            "tp2": tp2,
-            "tp3": tp3,
+            "tp1": entry - risk,
+            "tp2": entry - risk * 2,
+            "tp3": entry - risk * 3,
             "risk": risk,
             "rr": 3.0,
         }
@@ -781,6 +762,7 @@ def no_trade_result(
 # ============================================================
 
 def generate_signal(daily_candles, h4_candles, h1_candles):
+
     if not daily_candles or not h4_candles or not h1_candles:
         return no_trade_result(
             "UNKNOWN",
@@ -801,7 +783,6 @@ def generate_signal(daily_candles, h4_candles, h1_candles):
     h4 = get_structure_direction(h4_candles)
     h1 = get_structure_direction(h1_candles)
 
-    # Daily must establish the main direction.
     if daily not in ("BULLISH", "BEARISH"):
         return no_trade_result(
             daily,
@@ -812,14 +793,13 @@ def generate_signal(daily_candles, h4_candles, h1_candles):
 
     direction = "LONG" if daily == "BULLISH" else "SHORT"
 
-    expected_trend = direction_to_trend(direction)
-
-    # 4H cannot directly fight the Daily trend.
-    opposite_trend = (
-        "BEARISH" if direction == "LONG" else "BULLISH"
+    opposite = (
+        "BEARISH"
+        if direction == "LONG"
+        else "BULLISH"
     )
 
-    if h4 == opposite_trend:
+    if h4 == opposite:
         return no_trade_result(
             daily,
             h4,
@@ -827,11 +807,7 @@ def generate_signal(daily_candles, h4_candles, h1_candles):
             reason="4H_AGAINST_DAILY",
         )
 
-    # --------------------------------------------------------
-    # 1H must not directly fight the setup.
-    # --------------------------------------------------------
-
-    if h1 == opposite_trend:
+    if h1 == opposite:
         return no_trade_result(
             daily,
             h4,
@@ -839,15 +815,7 @@ def generate_signal(daily_candles, h4_candles, h1_candles):
             reason="1H_AGAINST_DIRECTION",
         )
 
-    # --------------------------------------------------------
-    # EMA
-    # --------------------------------------------------------
-
     ema = ema_trend(h1)
-
-    # --------------------------------------------------------
-    # Setup detection
-    # --------------------------------------------------------
 
     bos = detect_bos(h1)
 
@@ -881,10 +849,6 @@ def generate_signal(daily_candles, h4_candles, h1_candles):
         direction,
     )
 
-    # --------------------------------------------------------
-    # Main setups
-    # --------------------------------------------------------
-
     main_setup = []
 
     if pullback:
@@ -902,7 +866,6 @@ def generate_signal(daily_candles, h4_candles, h1_candles):
     if sr_reversal:
         main_setup.append("SR_REVERSAL")
 
-    # No setup = no trade.
     if not main_setup:
         return no_trade_result(
             daily,
@@ -910,10 +873,6 @@ def generate_signal(daily_candles, h4_candles, h1_candles):
             h1,
             reason="NO_MAIN_SETUP",
         )
-
-    # --------------------------------------------------------
-    # Score
-    # --------------------------------------------------------
 
     score_data = calculate_signal_score(
         daily_trend=daily,
@@ -930,10 +889,6 @@ def generate_signal(daily_candles, h4_candles, h1_candles):
     quality = score_data["quality"]
     strategies = score_data["strategies"]
 
-    # --------------------------------------------------------
-    # HIGH QUALITY ONLY
-    # --------------------------------------------------------
-
     if quality != "HIGH":
         return no_trade_result(
             daily,
@@ -944,7 +899,6 @@ def generate_signal(daily_candles, h4_candles, h1_candles):
             reason="QUALITY_NOT_HIGH",
         )
 
-    # Confirmation is mandatory.
     if not confirmation:
         return no_trade_result(
             daily,
@@ -954,10 +908,6 @@ def generate_signal(daily_candles, h4_candles, h1_candles):
             quality=quality,
             reason="NO_CONFIRMATION",
         )
-
-    # --------------------------------------------------------
-    # Trade levels
-    # --------------------------------------------------------
 
     levels = calculate_trade_levels(
         h1_candles,
@@ -974,54 +924,29 @@ def generate_signal(daily_candles, h4_candles, h1_candles):
             reason="INVALID_TRADE_LEVELS",
         )
 
-    # --------------------------------------------------------
-    # Final result
-    # --------------------------------------------------------
-
     return {
         "daily": daily,
         "4h": h4,
         "1h": h1,
-
         "direction": direction,
-
         "ema": ema,
-
         "bos": bos,
-
         "pullback": pullback,
-
         "liquidity_sweep": liquidity_sweep,
-
         "order_block": order_block,
-
         "breakout_retest": breakout_retest,
-
         "sr_reversal": sr_reversal,
-
         "confirmation": confirmation,
-
         "entry": levels["entry"],
-
         "sl": levels["sl"],
-
         "tp1": levels["tp1"],
-
         "tp2": levels["tp2"],
-
         "tp3": levels["tp3"],
-
         "risk": levels["risk"],
-
         "rr": levels["rr"],
-
         "score": score,
-
         "quality": quality,
-
         "signal": direction,
-
         "reason": "HIGH_QUALITY_SETUP",
-
         "strategy_matches": strategies,
     }
