@@ -124,9 +124,7 @@ def get_price(symbol):
 def signal_text(symbol, result):
 
     direction = result.get("signal", "NO_TRADE")
-
     quality = result.get("quality", "LOW")
-
     score = result.get("score", 0)
 
     entry = result.get("entry")
@@ -243,8 +241,12 @@ async def scan_symbols():
             if not market_data:
                 continue
 
+            # analysis.py فعلی سه آرگومان می‌خواهد:
+            # Daily + 4H + 1H
             result = generate_signal(
-                market_data
+                market_data["1d"],
+                market_data["4h"],
+                market_data["1h"],
             )
 
             if not isinstance(result, dict):
