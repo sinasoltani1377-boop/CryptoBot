@@ -1,10 +1,15 @@
 import requests
-from analysis import generate_signal
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
 import os
 
+from analysis import generate_signal
+
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
+
+
 TOKEN = os.getenv("BOT_TOKEN")
+
+CHAT_ID = 6912201079
 
 
 def get_price(symbol):
@@ -24,129 +29,289 @@ def get_price(symbol):
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     await update.message.reply_text(
         "🤖 ربات ترید فعال است!\n\n"
-        "📊 برای دریافت قیمت BTC و SOL دستور زیر را بفرست:\n"
+        "📊 برای دریافت قیمت دستور زیر را بفرست:\n"
         "/price\n\n"
-        "📈 برای دریافت تحلیل:\n"
+        "📈 برای اسکن بازار:\n"
         "/signal"
     )
 
 
 async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        btc = get_price("BTC-SWAP-USDT")
-        sol = get_price("SOL-SWAP-USDT")
 
-        message = (
-            "📊 Toobit Futures\n\n"
-            f"₿ BTC: ${btc:,.2f}\n"
-            f"◎ SOL: ${sol:,.2f}"
-        )
+    try:
+
+        from market import get_futures_symbols
+
+        symbols = get_futures_symbols()
+
+        message = "📊 Toobit USDT-M Futures\n\n"
+
+        # فقط چند ارز اول برای جلوگیری از پیام خیلی بزرگ
+        for symbol in symbols[:20]:
+
+            try:
+
+                price = get_price(symbol)
+
+                message += (
+                    f"🔹 {symbol}: "
+                    f"${price:,.6f}\n"
+                )
+
+            except Exception:
+                continue
 
         await update.message.reply_text(message)
 
     except Exception as e:
+
         await update.message.reply_text(
-            f"❌ خطا در دریافت قیمت: {e}"
+            f"❌ خطا در دریافت قیمت:\n{e}"
         )
 
 
 async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     try:
+
+        from market import get_futures_symbols
         from market import get_market_data
 
-        btc_data = get_market_data("BTC-SWAP-USDT")
-        sol_data = get_market_data("SOL-SWAP-USDT")
+        symbols = get_futures_symbols()
 
-        btc_signal = generate_signal(btc_data)
-        sol_signal = generate_signal(sol_data)
+        message_parts = [
+            "🤖 CryptoBot Market Scan\n"
+        ]
 
-        btc_strategies = ", ".join(
-            btc_signal.get("strategy_matches", [])
+        scanned = 0
+        signals_found = 0
+
+        for symbol in symbols:
+
+            try:
+
+                data = get_market_data(symbol)
+
+                result = generate_signal(data)
+
+                scanned += 1
+
+                signal_type = result.get(
+                    "signal",
+                    "NO_TRADE"
+                )
+
+                # فقط سیگنال‌های واقعی نمایش داده شوند
+                if signal_type in ["LONG", "SHORT"]:
+
+                    signals_found += 1
+
+                    strategies = ", ".join(
+                        result.get(
+                            "strategy_matches",
+                            []
+                        )
+                    )
+
+                    message_parts.append(
+                        f"🚨 {symbol}\n"
+                        f"🎯 Signal: {signal_type}\n"
+                        f"⭐ Quality: "
+                        f"{result.get('quality', 'LOW')}\n"
+                        f"📊 Score: "
+                        f"{result.get('score', 0)}\n\n"
+                        f"💰 Entry: "
+                        f"{result.get('entry', 'N/A')}\n"
+                        f"🛑 SL: "
+                        f"{result.get('sl', 'N/A')}\n\n"
+                        f"🎯 TP1: "
+                        f"{result.get('tp1', 'N/A')}\n"
+                        f"🎯 TP2: "
+                        f"{result.get('tp2', 'N/A')}\n"
+                        f"🎯 TP3: "
+                        f"{result.get('tp3', 'N/A')}\n\n"
+                        f"📐 Risk: "
+                        f"{result.get('risk', 'N/A')}\n"
+                        f"⚖️ RR: "
+                        f"1:{result.get('rr', 'N/A')}\n"
+                        f"🧠 Strategies: "
+                        f"{strategies}\n"
+                    )
+
+            except Exception as e:
+
+                print(
+                    f"SIGNAL_ERROR {symbol}: {e}"
+                )
+
+        if signals_found == 0:
+
+            message_parts.append(
+                "⚪ در حال حاضر سیگنال معتبری "
+                "پیدا نشد.\n\n"
+                f"🔎 Symbols scanned: {scanned}"
+            )
+
+        final_message = "\n".join(
+            message_parts
         )
 
-        sol_strategies = ", ".join(
-            sol_signal.get("strategy_matches", [])
+        # جلوگیری از عبور پیام تلگرام از محدودیت
+        if len(final_message) > 3900:
+
+            final_message = (
+                final_message[:3900]
+                + "\n\n⚠️ پیام کوتاه شد."
+            )
+
+        await update.message.reply_text(
+            final_message
         )
-
-        message = (
-            "🤖 CryptoBot Signal\n\n"
-
-            "₿ BTC:\n"
-            f"📅 Daily: {btc_signal.get('daily', 'UNKNOWN')}\n"
-            f"⏱ 4H: {btc_signal.get('4h', 'UNKNOWN')}\n"
-            f"🕐 1H: {btc_signal.get('1h', 'UNKNOWN')}\n"
-            f"📊 Score: {btc_signal.get('score', 0)}\n"
-            f"⭐ Quality: {btc_signal.get('quality', 'LOW')}\n"
-            f"🎯 Signal: {btc_signal.get('signal', 'NO_TRADE')}\n"
-            f"⚠️ Reason: {btc_signal.get('reason', 'UNKNOWN')}\n"
-            f"🧠 Strategies: {btc_strategies}\n\n"
-
-            "◎ SOL:\n"
-            f"📅 Daily: {sol_signal.get('daily', 'UNKNOWN')}\n"
-            f"⏱ 4H: {sol_signal.get('4h', 'UNKNOWN')}\n"
-            f"🕐 1H: {sol_signal.get('1h', 'UNKNOWN')}\n"
-            f"📊 Score: {sol_signal.get('score', 0)}\n"
-            f"⭐ Quality: {sol_signal.get('quality', 'LOW')}\n"
-            f"🎯 Signal: {sol_signal.get('signal', 'NO_TRADE')}\n"
-            f"⚠️ Reason: {sol_signal.get('reason', 'UNKNOWN')}\n"
-            f"🧠 Strategies: {sol_strategies}"
-        )
-
-        await update.message.reply_text(message)
 
     except Exception as e:
+
         await update.message.reply_text(
-            f"❌ خطا: {e}"
+            f"❌ خطا در اسکن بازار:\n{e}"
         )
 
 
-async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
+async def auto_signal(
+    context: ContextTypes.DEFAULT_TYPE
+):
+
     try:
+
+        from market import get_futures_symbols
         from market import get_market_data
 
-        for symbol in ["BTC-SWAP-USDT", "SOL-SWAP-USDT"]:
+        symbols = get_futures_symbols()
 
-            data = get_market_data(symbol)
+        for symbol in symbols:
 
-            result = generate_signal(data)
+            try:
 
-            print(symbol, result)
+                data = get_market_data(symbol)
 
-            if result["signal"] in ["LONG", "SHORT"]:
+                result = generate_signal(data)
 
-                await context.bot.send_message(
-    chat_id=6912201079,
-    text=(
-        f"🚨 {symbol}\n\n"
-        f"🎯 سیگنال: {result['signal']}\n"
-        f"⭐ کیفیت: {result.get('quality', 'UNKNOWN')}\n"
-        f"📊 امتیاز: {result.get('score', 0)}\n\n"
-        f"💰 Entry: {result.get('entry', 'N/A')}\n"
-        f"🛑 SL: {result.get('sl', 'N/A')}\n\n"
-        f"🎯 TP1: {result.get('tp1', 'N/A')}\n"
-        f"🎯 TP2: {result.get('tp2', 'N/A')}\n"
-        f"🎯 TP3: {result.get('tp3', 'N/A')}\n\n"
-        f"📐 Risk: {result.get('risk', 'N/A')}\n"
-        f"⚖️ RR: 1:{result.get('rr', 'N/A')}"
+                print(
+                    symbol,
+                    result
+                )
+
+                if result.get("signal") in [
+                    "LONG",
+                    "SHORT"
+                ]:
+
+                    strategies = ", ".join(
+                        result.get(
+                            "strategy_matches",
+                            []
+                        )
+                    )
+
+                    await context.bot.send_message(
+
+                        chat_id=CHAT_ID,
+
+                        text=(
+
+                            f"🚨 {symbol}\n\n"
+
+                            f"🎯 سیگنال: "
+                            f"{result['signal']}\n"
+
+                            f"⭐ کیفیت: "
+                            f"{result.get('quality', 'UNKNOWN')}\n"
+
+                            f"📊 امتیاز: "
+                            f"{result.get('score', 0)}\n\n"
+
+                            f"💰 Entry: "
+                            f"{result.get('entry', 'N/A')}\n"
+
+                            f"🛑 SL: "
+                            f"{result.get('sl', 'N/A')}\n\n"
+
+                            f"🎯 TP1: "
+                            f"{result.get('tp1', 'N/A')}\n"
+
+                            f"🎯 TP2: "
+                            f"{result.get('tp2', 'N/A')}\n"
+
+                            f"🎯 TP3: "
+                            f"{result.get('tp3', 'N/A')}\n\n"
+
+                            f"📐 Risk: "
+                            f"{result.get('risk', 'N/A')}\n"
+
+                            f"⚖️ RR: "
+                            f"1:{result.get('rr', 'N/A')}\n\n"
+
+                            f"🧠 Strategies: "
+                            f"{strategies}"
+                        )
+                    )
+
+            except Exception as e:
+
+                print(
+                    f"AUTO_SYMBOL_ERROR "
+                    f"{symbol}: {e}"
+                )
+
+    except Exception as e:
+
+        print(
+            "AUTO_SIGNAL_ERROR:",
+            e
+        )
+
+
+app = (
+    Application
+    .builder()
+    .token(TOKEN)
+    .build()
+)
+
+
+app.add_handler(
+    CommandHandler(
+        "start",
+        start
     )
 )
 
-    except Exception as e:
-        print("AUTO_SIGNAL_ERROR:", e)
+
+app.add_handler(
+    CommandHandler(
+        "price",
+        price
+    )
+)
 
 
-app = Application.builder().token(TOKEN).build()
+app.add_handler(
+    CommandHandler(
+        "signal",
+        signal
+    )
+)
 
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("price", price))
-app.add_handler(CommandHandler("signal", signal))
 
 app.job_queue.run_repeating(
+
     auto_signal,
+
     interval=300,
+
     first=10
 )
+
 
 app.run_polling()
