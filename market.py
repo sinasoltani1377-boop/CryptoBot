@@ -46,7 +46,7 @@ def get_market_data(symbol):
 
 def get_futures_symbols():
     """
-    دریافت قراردادهای فعال USDT Futures از Toobit.
+    دریافت قراردادهای USDT-M Futures فعال از Toobit.
     """
 
     url = f"{BASE_URL}/api/v1/exchangeInfo"
@@ -60,41 +60,64 @@ def get_futures_symbols():
 
     data = response.json()
 
+    contracts = data.get("contracts", [])
+
     symbols = []
 
-    for item in data.get("symbols", []):
-        symbol = item.get("symbol", "")
-        status = item.get("status", "")
+    for contract in contracts:
 
-        if (
-            symbol.endswith("USDT")
-            and status in ["TRADING", "1"]
-        ):
-            symbols.append(symbol)
+        symbol = contract.get("symbol", "")
+
+        status = str(
+            contract.get("status", "")
+        ).upper()
+
+        # فقط قراردادهای USDT-M
+        if not symbol.endswith("-SWAP-USDT"):
+            continue
+
+        # اگر وضعیت مشخص شده باشد،
+        # فقط قراردادهای فعال را قبول می‌کنیم.
+        if status and status not in {
+            "TRADING",
+            "1",
+            "ONLINE",
+            "ACTIVE"
+        }:
+            continue
+
+        symbols.append(symbol)
 
     return sorted(set(symbols))
 
 
 if __name__ == "__main__":
 
-    print("\n========== TOOBIT FUTURES ==========\n")
+    print("\n========== TOOBIT USDT-M FUTURES ==========\n")
 
     try:
+
         symbols = get_futures_symbols()
 
-        print(f"Found {len(symbols)} symbols:\n")
+        print(f"Found {len(symbols)} Futures symbols:\n")
 
         for symbol in symbols:
             print(symbol)
 
     except Exception as e:
-        print("Error getting symbols:", e)
 
-    print("\n========== TEST MARKET DATA ==========\n")
+        print("Error getting Futures symbols:")
+        print(e)
 
-    for symbol in ["BTC-SWAP-USDT", "SOL-SWAP-USDT"]:
+    print("\n========== MARKET DATA TEST ==========\n")
+
+    for symbol in [
+        "BTC-SWAP-USDT",
+        "SOL-SWAP-USDT"
+    ]:
 
         try:
+
             data = get_market_data(symbol)
 
             print("\n====================")
@@ -102,6 +125,10 @@ if __name__ == "__main__":
             print("====================")
 
             for timeframe, candles in data.items():
+
+                if not candles:
+                    print(f"{timeframe}: NO DATA")
+                    continue
 
                 last = candles[-1]
 
@@ -114,4 +141,6 @@ if __name__ == "__main__":
                 )
 
         except Exception as e:
-            print(f"{symbol} ERROR:", e)
+
+            print(f"{symbol} ERROR:")
+            print(e)
