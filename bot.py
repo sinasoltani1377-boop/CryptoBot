@@ -397,7 +397,7 @@ async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 found += 1
 
-                  except Exception:
+        except Exception:
 
             logger.exception(
                 "Signal error %s",
@@ -410,6 +410,10 @@ async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⏳ در حال حاضر هیچ سیگنال HIGH معتبری پیدا نشد."
         )
 
+
+# =========================
+# AUTO SCANNER
+# =========================
 
 # =========================
 # AUTO SCANNER
