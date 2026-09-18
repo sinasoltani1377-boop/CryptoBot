@@ -4,7 +4,7 @@ import time
 from datetime import datetime, timezone
 import requests
 
-TRADES_FILE = "trades.json"
+TRADES_FILE = os.getenv("TRADES_FILE", "/tmp/cryptobot_trades.json")
 COOLDOWN_SECONDS = 30 * 60
 
 def now():
