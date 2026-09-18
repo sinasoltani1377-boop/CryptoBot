@@ -44,21 +44,74 @@ def get_market_data(symbol):
     }
 
 
+def get_futures_symbols():
+    """
+    دریافت قراردادهای فعال USDT Futures از Toobit.
+    """
+
+    url = f"{BASE_URL}/api/v1/exchangeInfo"
+
+    response = requests.get(
+        url,
+        timeout=10
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    symbols = []
+
+    for item in data.get("symbols", []):
+        symbol = item.get("symbol", "")
+        status = item.get("status", "")
+
+        if (
+            symbol.endswith("USDT")
+            and status in ["TRADING", "1"]
+        ):
+            symbols.append(symbol)
+
+    return sorted(set(symbols))
+
+
 if __name__ == "__main__":
+
+    print("\n========== TOOBIT FUTURES ==========\n")
+
+    try:
+        symbols = get_futures_symbols()
+
+        print(f"Found {len(symbols)} symbols:\n")
+
+        for symbol in symbols:
+            print(symbol)
+
+    except Exception as e:
+        print("Error getting symbols:", e)
+
+    print("\n========== TEST MARKET DATA ==========\n")
+
     for symbol in ["BTC-SWAP-USDT", "SOL-SWAP-USDT"]:
-        data = get_market_data(symbol)
 
-        print("\n====================")
-        print(symbol)
-        print("====================")
+        try:
+            data = get_market_data(symbol)
 
-        for timeframe, candles in data.items():
-            last = candles[-1]
+            print("\n====================")
+            print(symbol)
+            print("====================")
 
-            print(
-                f"{timeframe}: "
-                f"O={last['open']} "
-                f"H={last['high']} "
-                f"L={last['low']} "
-                f"C={last['close']}"
-            )
+            for timeframe, candles in data.items():
+
+                last = candles[-1]
+
+                print(
+                    f"{timeframe}: "
+                    f"O={last['open']} "
+                    f"H={last['high']} "
+                    f"L={last['low']} "
+                    f"C={last['close']}"
+                )
+
+        except Exception as e:
+            print(f"{symbol} ERROR:", e)
