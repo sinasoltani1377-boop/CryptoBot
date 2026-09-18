@@ -414,7 +414,6 @@ async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 # AUTO SCANNER
 # =========================
-
 async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
 
     if _scan_lock.locked():
@@ -430,7 +429,6 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
         for symbol in SYMBOLS:
 
             try:
-
                 result = await asyncio.to_thread(
                     analyze_symbol,
                     symbol,
@@ -446,7 +444,6 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
                         result.get("direction"),
                     )
 
-                    # ارسال به چت‌هایی که /start زده‌اند
                     chat_ids = context.application.bot_data.get(
                         "chat_ids",
                         set(),
@@ -455,22 +452,19 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
                     for chat_id in chat_ids:
 
                         try:
-
                             await context.bot.send_message(
                                 chat_id=chat_id,
                                 text=signal_text(symbol, result),
                                 parse_mode="HTML",
                             )
 
-                        except Exception as e:
-
-                            logger.error(
-                                "Telegram send error: %s",
-                                e,
+                        except Exception:
+                            logger.exception(
+                                "Telegram send error for chat %s",
+                                chat_id,
                             )
 
-                        except Exception:
-
+            except Exception:
                 logger.exception(
                     "Scan error %s",
                     symbol,
@@ -478,7 +472,6 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
 
         if found == 0:
             logger.info("No HIGH signals.")
-
 
 # =========================
 # SAVE CHAT ID
