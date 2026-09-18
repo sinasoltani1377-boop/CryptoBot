@@ -397,12 +397,11 @@ async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 found += 1
 
-        except Exception as e:
+             except Exception:
 
-            logger.error(
-                "Signal error %s: %s",
+            logger.exception(
+                "Signal error %s",
                 symbol,
-                e,
             )
 
     if found == 0:
@@ -470,12 +469,11 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
                                 e,
                             )
 
-            except Exception as e:
+                        except Exception:
 
-                logger.error(
-                    "Scan error %s: %s",
+                logger.exception(
+                    "Scan error %s",
                     symbol,
-                    e,
                 )
 
         if found == 0:
