@@ -1,7 +1,6 @@
 import os
 import logging
 import asyncio
-import threading
 import requests
 
 from telegram import Update
@@ -42,6 +41,11 @@ INTERVALS = {
     "1h": "1h",
 }
 
+
+# =========================
+# LOGGING
+# =========================
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
@@ -64,14 +68,14 @@ def safe_number(value):
 
 
 def normalize_candle(candle):
-    """
-    تبدیل کندل Toobit به فرمت مورد نیاز analysis.py
-    """
 
-    # اگر قبلاً dict باشد
     if isinstance(candle, dict):
+
         return {
-            "timestamp": candle.get("timestamp", candle.get("time")),
+            "timestamp": candle.get(
+                "timestamp",
+                candle.get("time")
+            ),
             "open": safe_number(candle.get("open")),
             "high": safe_number(candle.get("high")),
             "low": safe_number(candle.get("low")),
@@ -79,9 +83,8 @@ def normalize_candle(candle):
             "volume": safe_number(candle.get("volume")),
         }
 
-    # فرمت معمول Toobit:
-    # [timestamp, open, high, low, close, volume, ...]
     if isinstance(candle, (list, tuple)):
+
         if len(candle) < 5:
             return None
 
@@ -91,28 +94,29 @@ def normalize_candle(candle):
             "high": safe_number(candle[2]),
             "low": safe_number(candle[3]),
             "close": safe_number(candle[4]),
-            "volume": safe_number(candle[5]) if len(candle) > 5 else None,
+            "volume": safe_number(candle[5])
+            if len(candle) > 5
+            else None,
         }
 
-    # اگر string یا نوع ناشناخته بود، نادیده گرفته شود
     return None
 
 
 def extract_candle_rows(data):
-    """
-    استخراج لیست کندل‌ها از فرمت‌های مختلف پاسخ API
-    """
 
-    # پاسخ مستقیم:
-    # [[...], [...], [...]]
     if isinstance(data, list):
         return data
 
-    # اگر پاسخ dict باشد
     if isinstance(data, dict):
 
-        # حالت‌های رایج
-        for key in ("data", "result", "rows", "klines", "candles"):
+        for key in (
+            "data",
+            "result",
+            "rows",
+            "klines",
+            "candles",
+        ):
+
             value = data.get(key)
 
             if isinstance(value, list):
@@ -122,17 +126,18 @@ def extract_candle_rows(data):
 
 
 def normalize_candles(data):
+
     rows = extract_candle_rows(data)
 
     candles = []
 
     for row in rows:
+
         candle = normalize_candle(row)
 
         if candle is None:
             continue
 
-        # کندل ناقص نباید وارد analysis شود
         if (
             candle["open"] is None
             or candle["high"] is None
@@ -153,6 +158,7 @@ def normalize_candles(data):
 def get_klines(symbol, interval, limit=200):
 
     try:
+
         params = {
             "symbol": symbol,
             "interval": interval,
@@ -172,23 +178,27 @@ def get_klines(symbol, interval, limit=200):
         candles = normalize_candles(data)
 
         if len(candles) < 50:
+
             logger.warning(
                 "%s %s: insufficient candles: %s",
                 symbol,
                 interval,
                 len(candles),
             )
+
             return []
 
         return candles
 
     except Exception as e:
+
         logger.error(
             "Kline error %s %s: %s",
             symbol,
             interval,
             e,
         )
+
         return []
 
 
@@ -229,6 +239,7 @@ def get_market_data(symbol):
 def get_price(symbol):
 
     try:
+
         response = requests.get(
             TOOBIT_TICKER_URL,
             params={"symbol": symbol},
@@ -252,12 +263,132 @@ def get_price(symbol):
         return None
 
     except Exception as e:
+
         logger.error(
             "Price error %s: %s",
             symbol,
             e,
         )
+
         return None
+
+
+# =========================
+# STRATEGY DIAGNOSTIC
+# =========================
+
+def log_strategy_details(symbol, result):
+
+    details = result.get("strategy_details")
+
+    if not isinstance(details, dict):
+        return
+
+    strategy_status = []
+
+    for name, value in details.items():
+
+        if value:
+            status = "YES"
+        else:
+            status = "NO"
+
+        strategy_status.append(
+            f"{name}={status}"
+        )
+
+    if strategy_status:
+
+        logger.info(
+            "%s | STRATEGIES | %s",
+            symbol,
+            " | ".join(strategy_status),
+        )
+
+
+# =========================
+# FULL DIAGNOSTIC
+# =========================
+
+def log_signal_diagnostic(symbol, result):
+
+    if not isinstance(result, dict):
+        return
+
+    daily = result.get("daily", "UNKNOWN")
+    h4 = result.get("4h", "UNKNOWN")
+    h1 = result.get("1h", "UNKNOWN")
+
+    direction = result.get(
+        "direction",
+        "UNKNOWN",
+    )
+
+    signal = result.get(
+        "signal",
+        "UNKNOWN",
+    )
+
+    score = result.get(
+        "score",
+        "UNKNOWN",
+    )
+
+    quality = result.get(
+        "quality",
+        "UNKNOWN",
+    )
+
+    reason = result.get(
+        "reason",
+        result.get(
+            "blocked_reason",
+            "UNKNOWN",
+        ),
+    )
+
+    strategies = (
+        result.get("strategy_matches")
+        or result.get("strategies")
+        or []
+    )
+
+    if isinstance(strategies, (list, tuple)):
+
+        strategies_text = (
+            ", ".join(str(x) for x in strategies)
+            if strategies
+            else "NONE"
+        )
+
+    else:
+
+        strategies_text = str(
+            strategies
+        )
+
+    logger.info(
+        "DIAGNOSTIC | %s | "
+        "Daily=%s | 4H=%s | 1H=%s | "
+        "Direction=%s | Signal=%s | "
+        "Score=%s | Quality=%s | "
+        "Reason=%s | Strategies=%s",
+        symbol,
+        daily,
+        h4,
+        h1,
+        direction,
+        signal,
+        score,
+        quality,
+        reason,
+        strategies_text,
+    )
+
+    log_strategy_details(
+        symbol,
+        result,
+    )
 
 
 # =========================
@@ -266,37 +397,77 @@ def get_price(symbol):
 
 def signal_text(symbol, result):
 
-    direction = result.get("direction", "UNKNOWN")
+    direction = result.get(
+        "direction",
+        "UNKNOWN",
+    )
 
-    emoji = "🟢" if direction == "LONG" else "🔴"
+    emoji = (
+        "🟢"
+        if direction == "LONG"
+        else "🔴"
+    )
+
+    strategies = (
+        result.get("strategy_matches")
+        or result.get("strategies")
+        or []
+    )
 
     text = (
         f"{emoji} <b>{symbol}</b>\n\n"
-        f"🎯 Signal: <b>{direction}</b>\n"
-        f"⭐ Quality: <b>{result.get('quality')}</b>\n"
-        f"📊 Score: <b>{result.get('score')}</b>\n\n"
-        f"📅 Daily: {result.get('daily')}\n"
-        f"⏱ 4H: {result.get('4h')}\n"
-        f"🕐 1H: {result.get('1h')}\n\n"
-        f"💰 Entry: <b>{result.get('entry')}</b>\n"
-        f"🛑 SL: <b>{result.get('sl')}</b>\n\n"
-        f"🎯 TP1: <b>{result.get('tp1')}</b>\n"
-        f"🎯 TP2: <b>{result.get('tp2')}</b>\n"
-        f"🎯 TP3: <b>{result.get('tp3')}</b>\n\n"
-        f"📏 Risk: {result.get('risk')}\n"
-        f"⚖️ RR: {result.get('rr')}\n\n"
+
+        f"🎯 Signal: "
+        f"<b>{direction}</b>\n"
+
+        f"⭐ Quality: "
+        f"<b>{result.get('quality')}</b>\n"
+
+        f"📊 Score: "
+        f"<b>{result.get('score')}</b>\n\n"
+
+        f"📅 Daily: "
+        f"{result.get('daily')}\n"
+
+        f"⏱ 4H: "
+        f"{result.get('4h')}\n"
+
+        f"🕐 1H: "
+        f"{result.get('1h')}\n\n"
+
+        f"💰 Entry: "
+        f"<b>{result.get('entry')}</b>\n"
+
+        f"🛑 SL: "
+        f"<b>{result.get('sl')}</b>\n\n"
+
+        f"🎯 TP1: "
+        f"<b>{result.get('tp1')}</b>\n"
+
+        f"🎯 TP2: "
+        f"<b>{result.get('tp2')}</b>\n"
+
+        f"🎯 TP3: "
+        f"<b>{result.get('tp3')}</b>\n\n"
+
+        f"📏 Risk: "
+        f"{result.get('risk')}\n"
+
+        f"⚖️ RR: "
+        f"{result.get('rr')}\n\n"
+
         f"🧠 Strategies:\n"
-        f"{', '.join(result.get('strategy_matches', []))}"
+        f"{', '.join(str(x) for x in strategies)}"
     )
 
     return text
 
 
 # =========================
-# ANALYSIS
+# RAW ANALYSIS
 # =========================
 
-def analyze_symbol(symbol):
+def analyze_symbol_raw(symbol):
 
     market_data = get_market_data(symbol)
 
@@ -312,15 +483,33 @@ def analyze_symbol(symbol):
     if not isinstance(result, dict):
         return None
 
-    # فقط HIGH
+    return result
+
+
+# =========================
+# HIGH ANALYSIS
+# =========================
+
+def analyze_symbol(symbol):
+
+    result = analyze_symbol_raw(symbol)
+
+    if result is None:
+        return None
+
     if result.get("quality") != "HIGH":
         return None
 
-    # فقط LONG / SHORT
-    if result.get("direction") not in ("LONG", "SHORT"):
+    if result.get("direction") not in (
+        "LONG",
+        "SHORT",
+    ):
         return None
 
-    if result.get("signal") not in ("LONG", "SHORT"):
+    if result.get("signal") not in (
+        "LONG",
+        "SHORT",
+    ):
         return None
 
     return result
@@ -330,7 +519,10 @@ def analyze_symbol(symbol):
 # /START
 # =========================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
 
     await update.message.reply_text(
         "🤖 CryptoBot فعال است.\n\n"
@@ -344,22 +536,46 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # /PRICE
 # =========================
 
-async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def price(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
 
-    btc = get_price("BTC-SWAP-USDT")
-    sol = get_price("SOL-SWAP-USDT")
+    btc = get_price(
+        "BTC-SWAP-USDT"
+    )
 
-    text = "💰 <b>CryptoBot Prices</b>\n\n"
+    sol = get_price(
+        "SOL-SWAP-USDT"
+    )
+
+    text = (
+        "💰 <b>CryptoBot Prices</b>\n\n"
+    )
 
     if btc is not None:
-        text += f"₿ BTC: <b>{btc}</b>\n"
+
+        text += (
+            f"₿ BTC: <b>{btc}</b>\n"
+        )
+
     else:
-        text += "₿ BTC: unavailable\n"
+
+        text += (
+            "₿ BTC: unavailable\n"
+        )
 
     if sol is not None:
-        text += f"◎ SOL: <b>{sol}</b>\n"
+
+        text += (
+            f"◎ SOL: <b>{sol}</b>\n"
+        )
+
     else:
-        text += "◎ SOL: unavailable\n"
+
+        text += (
+            "◎ SOL: unavailable\n"
+        )
 
     await update.message.reply_text(
         text,
@@ -371,7 +587,10 @@ async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # /SIGNAL
 # =========================
 
-async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def signal(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
 
     await update.message.reply_text(
         "🔎 در حال بررسی بازار...\n"
@@ -383,19 +602,49 @@ async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for symbol in SYMBOLS:
 
         try:
+
             result = await asyncio.to_thread(
-                analyze_symbol,
+                analyze_symbol_raw,
                 symbol,
             )
 
-            if result:
+            if result is None:
+                continue
 
-                await update.message.reply_text(
-                    signal_text(symbol, result),
-                    parse_mode="HTML",
-                )
+            # Diagnostic
+            log_signal_diagnostic(
+                symbol,
+                result,
+            )
 
-                found += 1
+            # فقط HIGH
+            if (
+                result.get("quality")
+                != "HIGH"
+            ):
+                continue
+
+            if (
+                result.get("direction")
+                not in ("LONG", "SHORT")
+            ):
+                continue
+
+            if (
+                result.get("signal")
+                not in ("LONG", "SHORT")
+            ):
+                continue
+
+            await update.message.reply_text(
+                signal_text(
+                    symbol,
+                    result,
+                ),
+                parse_mode="HTML",
+            )
+
+            found += 1
 
         except Exception:
 
@@ -407,7 +656,9 @@ async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if found == 0:
 
         await update.message.reply_text(
-            "⏳ در حال حاضر هیچ سیگنال HIGH معتبری پیدا نشد."
+            "⏳ در حال حاضر هیچ "
+            "سیگنال HIGH معتبری پیدا نشد.\n\n"
+            "🔍 جزئیات تشخیص در لاگ ثبت شد."
         )
 
 
@@ -415,83 +666,157 @@ async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # AUTO SCANNER
 # =========================
 
-# =========================
-# AUTO SCANNER
-# =========================
-async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
+async def auto_signal(
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     if _scan_lock.locked():
-        logger.warning("Previous scan still running. Skipping.")
+
+        logger.warning(
+            "Previous scan still running. "
+            "Skipping."
+        )
+
         return
 
     async with _scan_lock:
 
-        logger.info("Starting automatic market scan...")
+        logger.info(
+            "Starting automatic market scan..."
+        )
 
         found = 0
 
         for symbol in SYMBOLS:
 
             try:
+
+                # مهم:
+                # نتیجه خام را می‌گیریم
+                # تا بفهمیم چرا HIGH نشده
                 result = await asyncio.to_thread(
-                    analyze_symbol,
+                    analyze_symbol_raw,
                     symbol,
                 )
 
-                if result:
+                if result is None:
 
-                    found += 1
-
-                    logger.info(
-                        "HIGH signal found: %s %s",
+                    logger.warning(
+                        "DIAGNOSTIC | %s | "
+                        "No analysis result",
                         symbol,
-                        result.get("direction"),
                     )
 
-                    chat_ids = context.application.bot_data.get(
+                    continue
+
+                # ثبت کامل وضعیت
+                log_signal_diagnostic(
+                    symbol,
+                    result,
+                )
+
+                # فقط HIGH برای ارسال
+                if (
+                    result.get("quality")
+                    != "HIGH"
+                ):
+                    continue
+
+                if (
+                    result.get("direction")
+                    not in ("LONG", "SHORT")
+                ):
+                    continue
+
+                if (
+                    result.get("signal")
+                    not in ("LONG", "SHORT")
+                ):
+                    continue
+
+                found += 1
+
+                logger.info(
+                    "HIGH SIGNAL FOUND | "
+                    "%s | %s | Score=%s",
+                    symbol,
+                    result.get(
+                        "direction"
+                    ),
+                    result.get(
+                        "score"
+                    ),
+                )
+
+                chat_ids = (
+                    context.application
+                    .bot_data
+                    .get(
                         "chat_ids",
                         set(),
                     )
+                )
 
-                    for chat_id in chat_ids:
+                for chat_id in chat_ids:
 
-                        try:
-                            await context.bot.send_message(
-                                chat_id=chat_id,
-                                text=signal_text(symbol, result),
-                                parse_mode="HTML",
-                            )
+                    try:
 
-                        except Exception:
-                            logger.exception(
-                                "Telegram send error for chat %s",
-                                chat_id,
-                            )
+                        await context.bot.send_message(
+                            chat_id=chat_id,
+                            text=signal_text(
+                                symbol,
+                                result,
+                            ),
+                            parse_mode="HTML",
+                        )
+
+                    except Exception:
+
+                        logger.exception(
+                            "Telegram send error "
+                            "for chat %s",
+                            chat_id,
+                        )
 
             except Exception:
+
                 logger.exception(
                     "Scan error %s",
                     symbol,
                 )
 
         if found == 0:
-            logger.info("No HIGH signals.")
+
+            logger.info(
+                "No HIGH signals."
+            )
+
 
 # =========================
 # SAVE CHAT ID
 # =========================
 
-async def register_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def register_chat(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
 
-    chat_ids = context.application.bot_data.setdefault(
-        "chat_ids",
-        set(),
+    chat_ids = (
+        context.application
+        .bot_data
+        .setdefault(
+            "chat_ids",
+            set(),
+        )
     )
 
-    chat_ids.add(update.effective_chat.id)
+    chat_ids.add(
+        update.effective_chat.id
+    )
 
     await update.message.reply_text(
-        "✅ این چت برای دریافت سیگنال‌های خودکار ثبت شد."
+        "✅ این چت برای دریافت "
+        "سیگنال‌های خودکار ثبت شد."
     )
 
 
@@ -502,8 +827,10 @@ async def register_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
 
     if not TOKEN:
+
         raise RuntimeError(
-            "BOT_TOKEN environment variable is missing."
+            "BOT_TOKEN environment variable "
+            "is missing."
         )
 
     application = (
@@ -513,23 +840,33 @@ def main():
     )
 
     application.add_handler(
-        CommandHandler("start", register_chat)
+        CommandHandler(
+            "start",
+            register_chat,
+        )
     )
 
     application.add_handler(
-        CommandHandler("price", price)
+        CommandHandler(
+            "price",
+            price,
+        )
     )
 
     application.add_handler(
-        CommandHandler("signal", signal)
+        CommandHandler(
+            "signal",
+            signal,
+        )
     )
 
-    # ثبت چت هنگام /start
     application.add_handler(
-        CommandHandler("register", register_chat)
+        CommandHandler(
+            "register",
+            register_chat,
+        )
     )
 
-    # Auto scanner - every 5 minutes
     application.job_queue.run_repeating(
         auto_signal,
         interval=300,
@@ -537,7 +874,8 @@ def main():
     )
 
     logger.info(
-        "Auto scanner started: every 5 minutes"
+        "Auto scanner started: "
+        "every 5 minutes"
     )
 
     logger.info(
