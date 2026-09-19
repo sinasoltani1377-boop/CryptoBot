@@ -39,6 +39,8 @@ INTERVALS = {
     "1d": "1d",
     "4h": "4h",
     "1h": "1h",
+    "15m": "15m",
+    "5m": "5m",
 }
 
 
@@ -222,13 +224,33 @@ def get_market_data(symbol):
         200,
     )
 
-    if not daily or not h4 or not h1:
+    m15 = get_klines(
+        symbol,
+        INTERVALS["15m"],
+        200,
+    )
+
+    m5 = get_klines(
+        symbol,
+        INTERVALS["5m"],
+        200,
+    )
+
+    if (
+        not daily
+        or not h4
+        or not h1
+        or not m15
+        or not m5
+    ):
         return None
 
     return {
         "1d": daily,
         "4h": h4,
         "1h": h1,
+        "15m": m15,
+        "5m": m5,
     }
 
 
@@ -288,10 +310,7 @@ def log_strategy_details(symbol, result):
 
     for name, value in details.items():
 
-        if value:
-            status = "YES"
-        else:
-            status = "NO"
+        status = "YES" if value else "NO"
 
         strategy_status.append(
             f"{name}={status}"
@@ -363,9 +382,7 @@ def log_signal_diagnostic(symbol, result):
 
     else:
 
-        strategies_text = str(
-            strategies
-        )
+        strategies_text = str(strategies)
 
     logger.info(
         "DIAGNOSTIC | %s | "
@@ -385,6 +402,17 @@ def log_signal_diagnostic(symbol, result):
         strategies_text,
     )
 
+    logger.info(
+        "FILTERS | %s | "
+        "15M_RSI=%s | "
+        "VolumeSpike=%s | "
+        "Confirmation=%s",
+        symbol,
+        result.get("rsi_15m"),
+        result.get("volume_spike"),
+        result.get("confirmation"),
+    )
+
     log_strategy_details(
         symbol,
         result,
@@ -402,11 +430,12 @@ def signal_text(symbol, result):
         "UNKNOWN",
     )
 
-    emoji = (
-        "🟢"
-        if direction == "LONG"
-        else "🔴"
-    )
+    if direction == "LONG":
+        emoji = "🟢"
+    elif direction == "SHORT":
+        emoji = "🔴"
+    else:
+        emoji = "⚪"
 
     strategies = (
         result.get("strategy_matches")
@@ -414,11 +443,20 @@ def signal_text(symbol, result):
         or []
     )
 
-    text = (
+    if not isinstance(strategies, (list, tuple)):
+        strategies = [strategies]
+
+    strategy_text = (
+        ", ".join(str(x) for x in strategies)
+        if strategies
+        else "NONE"
+    )
+
+    return (
         f"{emoji} <b>{symbol}</b>\n\n"
 
         f"🎯 Signal: "
-        f"<b>{direction}</b>\n"
+        f"<b>{result.get('signal')}</b>\n"
 
         f"⭐ Quality: "
         f"<b>{result.get('quality')}</b>\n"
@@ -433,7 +471,10 @@ def signal_text(symbol, result):
         f"{result.get('4h')}\n"
 
         f"🕐 1H: "
-        f"{result.get('1h')}\n\n"
+        f"{result.get('1h')}\n"
+
+        f"⏱ 15M RSI: "
+        f"{result.get('rsi_15m')}\n\n"
 
         f"💰 Entry: "
         f"<b>{result.get('entry')}</b>\n"
@@ -456,11 +497,12 @@ def signal_text(symbol, result):
         f"⚖️ RR: "
         f"{result.get('rr')}\n\n"
 
-        f"🧠 Strategies:\n"
-        f"{', '.join(str(x) for x in strategies)}"
-    )
+        f"🧠 Strategy:\n"
+        f"<b>{strategy_text}</b>\n\n"
 
-    return text
+        f"📝 Reason:\n"
+        f"{result.get('reason', 'N/A')}"
+    )
 
 
 # =========================
@@ -478,38 +520,11 @@ def analyze_symbol_raw(symbol):
         market_data["1d"],
         market_data["4h"],
         market_data["1h"],
+        market_data["15m"],
+        market_data["5m"],
     )
 
     if not isinstance(result, dict):
-        return None
-
-    return result
-
-
-# =========================
-# HIGH ANALYSIS
-# =========================
-
-def analyze_symbol(symbol):
-
-    result = analyze_symbol_raw(symbol)
-
-    if result is None:
-        return None
-
-    if result.get("quality") != "HIGH":
-        return None
-
-    if result.get("direction") not in (
-        "LONG",
-        "SHORT",
-    ):
-        return None
-
-    if result.get("signal") not in (
-        "LONG",
-        "SHORT",
-    ):
         return None
 
     return result
@@ -524,11 +539,25 @@ async def start(
     context: ContextTypes.DEFAULT_TYPE,
 ):
 
+    chat_ids = (
+        context.application
+        .bot_data
+        .setdefault(
+            "chat_ids",
+            set(),
+        )
+    )
+
+    chat_ids.add(
+        update.effective_chat.id
+    )
+
     await update.message.reply_text(
         "🤖 CryptoBot فعال است.\n\n"
         "دستورات:\n"
         "/price - قیمت BTC و SOL\n"
-        "/signal - بررسی سیگنال‌های HIGH"
+        "/signal - بررسی سیگنال‌های HIGH\n"
+        "/register - ثبت دریافت سیگنال خودکار"
     )
 
 
@@ -554,28 +583,14 @@ async def price(
     )
 
     if btc is not None:
-
-        text += (
-            f"₿ BTC: <b>{btc}</b>\n"
-        )
-
+        text += f"₿ BTC: <b>{btc}</b>\n"
     else:
-
-        text += (
-            "₿ BTC: unavailable\n"
-        )
+        text += "₿ BTC: unavailable\n"
 
     if sol is not None:
-
-        text += (
-            f"◎ SOL: <b>{sol}</b>\n"
-        )
-
+        text += f"◎ SOL: <b>{sol}</b>\n"
     else:
-
-        text += (
-            "◎ SOL: unavailable\n"
-        )
+        text += "◎ SOL: unavailable\n"
 
     await update.message.reply_text(
         text,
@@ -594,6 +609,7 @@ async def signal(
 
     await update.message.reply_text(
         "🔎 در حال بررسی بازار...\n"
+        "Daily → 4H → 1H → 15M → 5M\n\n"
         "فقط سیگنال‌های HIGH نمایش داده می‌شوند."
     )
 
@@ -611,28 +627,23 @@ async def signal(
             if result is None:
                 continue
 
-            # Diagnostic
             log_signal_diagnostic(
                 symbol,
                 result,
             )
 
-            # فقط HIGH
-            if (
-                result.get("quality")
-                != "HIGH"
+            if result.get("quality") != "HIGH":
+                continue
+
+            if result.get("direction") not in (
+                "LONG",
+                "SHORT",
             ):
                 continue
 
-            if (
-                result.get("direction")
-                not in ("LONG", "SHORT")
-            ):
-                continue
-
-            if (
-                result.get("signal")
-                not in ("LONG", "SHORT")
+            if result.get("signal") not in (
+                "LONG",
+                "SHORT",
             ):
                 continue
 
@@ -673,8 +684,7 @@ async def auto_signal(
     if _scan_lock.locked():
 
         logger.warning(
-            "Previous scan still running. "
-            "Skipping."
+            "Previous scan still running. Skipping."
         )
 
         return
@@ -691,9 +701,6 @@ async def auto_signal(
 
             try:
 
-                # مهم:
-                # نتیجه خام را می‌گیریم
-                # تا بفهمیم چرا HIGH نشده
                 result = await asyncio.to_thread(
                     analyze_symbol_raw,
                     symbol,
@@ -709,28 +716,23 @@ async def auto_signal(
 
                     continue
 
-                # ثبت کامل وضعیت
                 log_signal_diagnostic(
                     symbol,
                     result,
                 )
 
-                # فقط HIGH برای ارسال
-                if (
-                    result.get("quality")
-                    != "HIGH"
+                if result.get("quality") != "HIGH":
+                    continue
+
+                if result.get("direction") not in (
+                    "LONG",
+                    "SHORT",
                 ):
                     continue
 
-                if (
-                    result.get("direction")
-                    not in ("LONG", "SHORT")
-                ):
-                    continue
-
-                if (
-                    result.get("signal")
-                    not in ("LONG", "SHORT")
+                if result.get("signal") not in (
+                    "LONG",
+                    "SHORT",
                 ):
                     continue
 
@@ -740,12 +742,8 @@ async def auto_signal(
                     "HIGH SIGNAL FOUND | "
                     "%s | %s | Score=%s",
                     symbol,
-                    result.get(
-                        "direction"
-                    ),
-                    result.get(
-                        "score"
-                    ),
+                    result.get("direction"),
+                    result.get("score"),
                 )
 
                 chat_ids = (
@@ -793,7 +791,7 @@ async def auto_signal(
 
 
 # =========================
-# SAVE CHAT ID
+# /REGISTER
 # =========================
 
 async def register_chat(
@@ -842,7 +840,7 @@ def main():
     application.add_handler(
         CommandHandler(
             "start",
-            register_chat,
+            start,
         )
     )
 
@@ -874,8 +872,7 @@ def main():
     )
 
     logger.info(
-        "Auto scanner started: "
-        "every 5 minutes"
+        "Auto scanner started: every 5 minutes"
     )
 
     logger.info(
