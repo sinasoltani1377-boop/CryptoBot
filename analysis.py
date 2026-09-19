@@ -838,7 +838,61 @@ def no_trade(
 # ============================================================
 # MAIN SIGNAL ENGINE
 # ============================================================
+def strategy_diagnostic(candles):
+    """
+    Diagnostic only.
+    Does NOT change trading logic.
+    """
 
+    if not candles or len(candles) < 30:
+        return {
+            "candles": len(candles) if candles else 0,
+            "price": None,
+            "recent_high": None,
+            "recent_low": None,
+            "swing_highs": 0,
+            "swing_lows": 0,
+            "stop_hunt": None,
+            "three_tap": None,
+            "liquidity_zone": None,
+        }
+
+    current = candles[-1]
+
+    price = safe_float(current.get("close"))
+
+    recent = candles[-20:]
+
+    highs = [
+        safe_float(c.get("high"))
+        for c in recent
+        if safe_float(c.get("high")) is not None
+    ]
+
+    lows = [
+        safe_float(c.get("low"))
+        for c in recent
+        if safe_float(c.get("low")) is not None
+    ]
+
+    swing_highs = find_swing_highs(candles[-80:], 2)
+    swing_lows = find_swing_lows(candles[-80:], 2)
+
+    stop_hunt = detect_stop_hunt(candles)
+    three_tap = detect_three_tap(candles)
+    liquidity_zone = detect_liquidity_zone(candles)
+
+    return {
+        "candles": len(candles),
+        "price": price,
+        "recent_high": max(highs) if highs else None,
+        "recent_low": min(lows) if lows else None,
+        "swing_highs": len(swing_highs),
+        "swing_lows": len(swing_lows),
+        "stop_hunt": stop_hunt,
+        "three_tap": three_tap,
+        "liquidity_zone": liquidity_zone,
+    }
 def generate_signal(daily, h4, h1, m15, m5):
 
     if not all([daily, h4, h1, m15, m5]):
@@ -902,7 +956,20 @@ def generate_signal(daily, h4, h1, m15, m5):
     three_tap = detect_three_tap(m5)
 
     liquidity_zone = detect_liquidity_zone(m5)
+    diag = strategy_diagnostic(m5)
 
+    print(
+        f"5M_DIAGNOSTIC | "
+        f"candles={diag['candles']} | "
+        f"price={diag['price']} | "
+        f"recent_high={diag['recent_high']} | "
+        f"recent_low={diag['recent_low']} | "
+        f"swing_highs={diag['swing_highs']} | "
+        f"swing_lows={diag['swing_lows']} | "
+        f"STOP_HUNT={diag['stop_hunt'].get('reason')} | "
+        f"THREE_TAP={diag['three_tap'].get('reason')} | "
+        f"LIQUIDITY_ZONE={diag['liquidity_zone'].get('reason')}"
+    )
     strategy_details = {
         "STOP_HUNT": stop_hunt,
         "THREE_TAP": three_tap,
