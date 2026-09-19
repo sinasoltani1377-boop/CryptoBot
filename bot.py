@@ -298,7 +298,6 @@ def get_price(symbol):
 # =========================
 # STRATEGY DIAGNOSTIC
 # =========================
-
 def log_strategy_details(symbol, result):
 
     details = result.get("strategy_details")
@@ -310,12 +309,24 @@ def log_strategy_details(symbol, result):
 
     for name, value in details.items():
 
-        status = "YES" if value else "NO"
+        if isinstance(value, dict):
+            matched = value.get("matched", False)
+        else:
+            matched = bool(value)
+
+        status = "YES" if matched else "NO"
 
         strategy_status.append(
             f"{name}={status}"
         )
 
+    if strategy_status:
+
+        logger.info(
+            "%s | STRATEGIES | %s",
+            symbol,
+            " | ".join(strategy_status),
+            )
     if strategy_status:
 
         logger.info(
