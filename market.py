@@ -38,9 +38,11 @@ def get_candles(symbol, interval, limit=100):
 
 def get_market_data(symbol):
     return {
-        "daily": get_candles(symbol, "1d"),
-        "4h": get_candles(symbol, "4h"),
-        "1h": get_candles(symbol, "1h")
+        "daily": get_candles(symbol, "1d", 100),
+        "4h": get_candles(symbol, "4h", 100),
+        "1h": get_candles(symbol, "1h", 100),
+        "15m": get_candles(symbol, "15m", 100),
+        "5m": get_candles(symbol, "5m", 100)
     }
 
 
@@ -72,12 +74,9 @@ def get_futures_symbols():
             contract.get("status", "")
         ).upper()
 
-        # فقط قراردادهای USDT-M
         if not symbol.endswith("-SWAP-USDT"):
             continue
 
-        # اگر وضعیت مشخص شده باشد،
-        # فقط قراردادهای فعال را قبول می‌کنیم.
         if status and status not in {
             "TRADING",
             "1",
