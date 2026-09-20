@@ -656,13 +656,13 @@ async def signal(
                 "SHORT",
             ):
                 continue
-
+           
             if result.get("signal") not in (
                 "LONG",
                 "SHORT",
             ):
                 continue
-
+               trade = register_signal(symbol, result)
             await update.message.reply_text(
                 signal_text(
                     symbol,
