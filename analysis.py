@@ -1,24 +1,23 @@
 # ============================================================
-# CryptoBot - Analysis Engine v5
+# CryptoBot - Analysis Engine v6
+#
+# 1H  = Main Direction
+# 15M  = Filter
+# 5M  = Entry Trigger
 #
 # Strategies:
-#   1. STOP_HUNT
-#   2. THREE_TAP
-#   3. LIQUIDITY_ZONE
+#   STOP_HUNT
+#   THREE_TAP
+#   LIQUIDITY_ZONE
 #
-# Timeframes:
-#   Daily = context
-#   4H    = context
-#   1H    = main direction
-#   15M   = filter
-#   5M    = setup + entry trigger
+# Only HIGH signals are returned as active trades.
 # ============================================================
 
 from statistics import mean
 
 
 # ============================================================
-# BASIC HELPERS
+# HELPERS
 # ============================================================
 
 def safe_float(value, default=None):
@@ -28,12 +27,45 @@ def safe_float(value, default=None):
         return default
 
 
+def candle_values(candle):
+    return (
+        safe_float(candle.get("open")),
+        safe_float(candle.get("high")),
+        safe_float(candle.get("low")),
+        safe_float(candle.get("close")),
+    )
+
+
+def candle_body(candle):
+    o, h, l, c = candle_values(candle)
+    if None in (o, h, l, c):
+        return 0.0
+    return abs(c - o)
+
+
+def upper_wick(candle):
+    o, h, l, c = candle_values(candle)
+    if None in (o, h, l, c):
+        return 0.0
+    return h - max(o, c)
+
+
+def lower_wick(candle):
+    o, h, l, c = candle_values(candle)
+    if None in (o, h, l, c):
+        return 0.0
+    return min(o, c) - l
+
+
 def ema(values, period):
     if not values or len(values) < period:
         return None
 
-    values = [safe_float(x) for x in values]
-    values = [x for x in values if x is not None]
+    values = [
+        safe_float(x)
+        for x in values
+        if safe_float(x) is not None
+    ]
 
     if len(values) < period:
         return None
@@ -42,10 +74,14 @@ def ema(values, period):
     result = sum(values[:period]) / period
 
     for price in values[period:]:
-        result = (price - result) * multiplier + result
+        result = ((price - result) * multiplier) + result
 
     return result
 
+
+# ============================================================
+# RSI
+# ============================================================
 
 def calculate_rsi(candles, period=14):
     if not candles or len(candles) < period + 1:
@@ -79,23 +115,31 @@ def calculate_rsi(candles, period=14):
     if avg_loss == 0:
         return 100.0
 
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-
     for i in range(period, len(gains)):
-        avg_gain = ((avg_gain * (period - 1)) + gains[i]) / period
-        avg_loss = ((avg_loss * (period - 1)) + losses[i]) / period
+        avg_gain = (
+            (avg_gain * (period - 1)) + gains[i]
+        ) / period
 
-        if avg_loss == 0:
-            rsi = 100.0
-        else:
-            rs = avg_gain / avg_loss
-            rsi = 100 - (100 / (1 + rs))
+        avg_loss = (
+            (avg_loss * (period - 1)) + losses[i]
+        ) / period
 
-    return round(rsi, 2)
+    if avg_loss == 0:
+        return 100.0
+
+    rs = avg_gain / avg_loss
+
+    return round(
+        100 - (100 / (1 + rs)),
+        2
+    )
 
 
-def volume_spike(candles, lookback=20, multiplier=1.5):
+# ============================================================
+# VOLUME
+# ============================================================
+
+def volume_spike(candles, lookback=20, multiplier=1.4):
     if not candles or len(candles) < lookback + 1:
         return False
 
@@ -114,67 +158,7 @@ def volume_spike(candles, lookback=20, multiplier=1.5):
     if not previous:
         return False
 
-    average_volume = mean(previous)
-
-    return current > average_volume * multiplier
-
-
-# ============================================================
-# CANDLE HELPERS
-# ============================================================
-
-def candle_values(candle):
-    return (
-        safe_float(candle.get("open")),
-        safe_float(candle.get("high")),
-        safe_float(candle.get("low")),
-        safe_float(candle.get("close")),
-    )
-
-
-def candle_body(candle):
-    o, h, l, c = candle_values(candle)
-
-    if None in (o, h, l, c):
-        return 0.0
-
-    return abs(c - o)
-
-
-def is_bullish_candle(candle):
-    o, h, l, c = candle_values(candle)
-
-    if None in (o, h, l, c):
-        return False
-
-    return c > o
-
-
-def is_bearish_candle(candle):
-    o, h, l, c = candle_values(candle)
-
-    if None in (o, h, l, c):
-        return False
-
-    return c < o
-
-
-def upper_wick(candle):
-    o, h, l, c = candle_values(candle)
-
-    if None in (o, h, l, c):
-        return 0.0
-
-    return h - max(o, c)
-
-
-def lower_wick(candle):
-    o, h, l, c = candle_values(candle)
-
-    if None in (o, h, l, c):
-        return 0.0
-
-    return min(o, c) - l
+    return current > mean(previous) * multiplier
 
 
 # ============================================================
@@ -182,77 +166,91 @@ def lower_wick(candle):
 # ============================================================
 
 def find_swing_highs(candles, strength=2):
-    if len(candles) < strength * 2 + 1:
+    if len(candles) < (strength * 2 + 1):
         return []
 
-    swings = []
+    result = []
 
-    for i in range(strength, len(candles) - strength):
+    for i in range(
+        strength,
+        len(candles) - strength
+    ):
+        high = safe_float(
+            candles[i].get("high")
+        )
 
-        current_high = safe_float(candles[i].get("high"))
-
-        if current_high is None:
+        if high is None:
             continue
 
         valid = True
 
         for j in range(1, strength + 1):
-
-            left = safe_float(candles[i - j].get("high"))
-            right = safe_float(candles[i + j].get("high"))
+            left = safe_float(
+                candles[i - j].get("high")
+            )
+            right = safe_float(
+                candles[i + j].get("high")
+            )
 
             if left is None or right is None:
                 valid = False
                 break
 
-            if current_high <= left or current_high <= right:
+            if high <= left or high <= right:
                 valid = False
                 break
 
         if valid:
-            swings.append({
+            result.append({
                 "index": i,
-                "price": current_high
+                "price": high
             })
 
-    return swings
+    return result
 
 
 def find_swing_lows(candles, strength=2):
-    if len(candles) < strength * 2 + 1:
+    if len(candles) < (strength * 2 + 1):
         return []
 
-    swings = []
+    result = []
 
-    for i in range(strength, len(candles) - strength):
+    for i in range(
+        strength,
+        len(candles) - strength
+    ):
+        low = safe_float(
+            candles[i].get("low")
+        )
 
-        current_low = safe_float(candles[i].get("low"))
-
-        if current_low is None:
+        if low is None:
             continue
 
         valid = True
 
         for j in range(1, strength + 1):
-
-            left = safe_float(candles[i - j].get("low"))
-            right = safe_float(candles[i + j].get("low"))
+            left = safe_float(
+                candles[i - j].get("low")
+            )
+            right = safe_float(
+                candles[i + j].get("low")
+            )
 
             if left is None or right is None:
                 valid = False
                 break
 
-            if current_low >= left or current_low >= right:
+            if low >= left or low >= right:
                 valid = False
                 break
 
         if valid:
-            swings.append({
+            result.append({
                 "index": i,
-                "price": current_low
+                "price": low
             })
 
-    return swings
+    return result
 
 
 # ============================================================
@@ -260,8 +258,7 @@ def find_swing_lows(candles, strength=2):
 # ============================================================
 
 def market_structure(candles):
-
-    if not candles or len(candles) < 20:
+    if not candles or len(candles) < 30:
         return "RANGE"
 
     highs = find_swing_highs(candles, 2)
@@ -270,24 +267,33 @@ def market_structure(candles):
     if len(highs) < 2 or len(lows) < 2:
         return "RANGE"
 
-    h1 = highs[-2]["price"]
-    h2 = highs[-1]["price"]
+    previous_high = highs[-2]["price"]
+    current_high = highs[-1]["price"]
 
-    l1 = lows[-2]["price"]
-    l2 = lows[-1]["price"]
+    previous_low = lows[-2]["price"]
+    current_low = lows[-1]["price"]
 
-    if h2 > h1 and l2 > l1:
+    if (
+        current_high > previous_high
+        and current_low > previous_low
+    ):
         return "BULLISH"
 
-    if h2 < h1 and l2 < l1:
+    if (
+        current_high < previous_high
+        and current_low < previous_low
+    ):
         return "BEARISH"
 
     return "RANGE"
 
 
-def ema_direction(candles):
+# ============================================================
+# EMA DIRECTION
+# ============================================================
 
-    if not candles or len(candles) < 200:
+def ema_direction(candles):
+    if not candles:
         return "RANGE"
 
     closes = [
@@ -317,55 +323,10 @@ def ema_direction(candles):
 
 
 # ============================================================
-# 5M CONFIRMATION
+# STOP HUNT
 # ============================================================
 
-def confirmation_candle(candles, direction):
-
-    if not candles or len(candles) < 3:
-        return False
-
-    previous = candles[-2]
-    current = candles[-1]
-
-    previous_body = candle_body(previous)
-    current_body = candle_body(current)
-
-    if previous_body <= 0 or current_body <= 0:
-        return False
-
-    po, ph, pl, pc = candle_values(previous)
-    co, ch, cl, cc = candle_values(current)
-
-    if None in (po, ph, pl, pc, co, ch, cl, cc):
-        return False
-
-    # Long confirmation:
-    # current candle bullish + stronger body + closes above previous high
-    if direction == "LONG":
-        return (
-            cc > co
-            and current_body >= previous_body * 0.8
-            and cc > ph
-        )
-
-    # Short confirmation
-    if direction == "SHORT":
-        return (
-            cc < co
-            and current_body >= previous_body * 0.8
-            and cc < pl
-        )
-
-    return False
-
-
-# ============================================================
-# STRATEGY 1 — STOP HUNT
-# ============================================================
-
-def detect_stop_hunt(candles, lookback=20):
-
+def detect_stop_hunt(candles, lookback=15):
     if not candles or len(candles) < lookback + 2:
         return {
             "matched": False,
@@ -376,17 +337,17 @@ def detect_stop_hunt(candles, lookback=20):
 
     current = candles[-1]
 
-    previous_candles = candles[-lookback - 1:-1]
+    previous = candles[-lookback - 1:-1]
 
     highs = [
         safe_float(c.get("high"))
-        for c in previous_candles
+        for c in previous
         if safe_float(c.get("high")) is not None
     ]
 
     lows = [
         safe_float(c.get("low"))
-        for c in previous_candles
+        for c in previous
         if safe_float(c.get("low")) is not None
     ]
 
@@ -398,8 +359,8 @@ def detect_stop_hunt(candles, lookback=20):
             "reason": "NO_LEVEL"
         }
 
-    previous_high = max(highs)
-    previous_low = min(lows)
+    high_level = max(highs)
+    low_level = min(lows)
 
     o, h, l, c = candle_values(current)
 
@@ -414,39 +375,28 @@ def detect_stop_hunt(candles, lookback=20):
     body = candle_body(current)
 
     if body <= 0:
-        return {
-            "matched": False,
-            "direction": None,
-            "level": None,
-            "reason": "ZERO_BODY"
-        }
+        body = max(
+            abs(h - l) * 0.15,
+            0.00000001
+        )
 
-    upper = upper_wick(current)
-    lower = lower_wick(current)
-
-    # SHORT:
-    # price takes previous high and closes back below it
-    if h > previous_high and c < previous_high:
-
-        if upper >= body * 0.7:
-
+    # SHORT sweep
+    if h > high_level and c < high_level:
+        if upper_wick(current) >= body * 0.45:
             return {
                 "matched": True,
                 "direction": "SHORT",
-                "level": previous_high,
+                "level": high_level,
                 "reason": "HIGH_SWEEP_RECLAIM"
             }
 
-    # LONG:
-    # price takes previous low and closes back above it
-    if l < previous_low and c > previous_low:
-
-        if lower >= body * 0.7:
-
+    # LONG sweep
+    if l < low_level and c > low_level:
+        if lower_wick(current) >= body * 0.45:
             return {
                 "matched": True,
                 "direction": "LONG",
-                "level": previous_low,
+                "level": low_level,
                 "reason": "LOW_SWEEP_RECLAIM"
             }
 
@@ -459,12 +409,11 @@ def detect_stop_hunt(candles, lookback=20):
 
 
 # ============================================================
-# STRATEGY 2 — THREE TAP
+# THREE TAP
 # ============================================================
 
-def detect_three_tap(candles, tolerance=0.005):
-
-    if not candles or len(candles) < 30:
+def detect_three_tap(candles, tolerance=0.008):
+    if not candles or len(candles) < 35:
         return {
             "matched": False,
             "direction": None,
@@ -489,65 +438,58 @@ def detect_three_tap(candles, tolerance=0.005):
             "reason": "INVALID_CANDLE"
         }
 
-    # -------------------------
-    # Three highs = SHORT
-    # -------------------------
-
+    # Three highs
     if len(highs) >= 3:
-
         taps = highs[-3:]
-
         levels = [x["price"] for x in taps]
+        level = mean(levels)
 
-        average_level = mean(levels)
-
-        if average_level > 0:
-
+        if level > 0:
             deviation = max(
-                abs(x - average_level) / average_level
+                abs(x - level) / level
                 for x in levels
             )
 
             if deviation <= tolerance:
 
-                # Current price must interact with the level
-                # and reject it.
-                if h >= average_level * 0.999 and c < average_level:
+                # Price is near the third-tap zone
+                distance = abs(c - level) / level
 
+                if (
+                    distance <= tolerance * 1.5
+                    or h >= level
+                ):
                     return {
                         "matched": True,
                         "direction": "SHORT",
-                        "level": average_level,
+                        "level": level,
                         "reason": "THREE_HIGH_TAPS"
                     }
 
-    # -------------------------
-    # Three lows = LONG
-    # -------------------------
-
+    # Three lows
     if len(lows) >= 3:
-
         taps = lows[-3:]
-
         levels = [x["price"] for x in taps]
+        level = mean(levels)
 
-        average_level = mean(levels)
-
-        if average_level > 0:
-
+        if level > 0:
             deviation = max(
-                abs(x - average_level) / average_level
+                abs(x - level) / level
                 for x in levels
             )
 
             if deviation <= tolerance:
 
-                if l <= average_level * 1.001 and c > average_level:
+                distance = abs(c - level) / level
 
+                if (
+                    distance <= tolerance * 1.5
+                    or l <= level
+                ):
                     return {
                         "matched": True,
                         "direction": "LONG",
-                        "level": average_level,
+                        "level": level,
                         "reason": "THREE_LOW_TAPS"
                     }
 
@@ -560,12 +502,11 @@ def detect_three_tap(candles, tolerance=0.005):
 
 
 # ============================================================
-# STRATEGY 3 — LIQUIDITY ZONE
+# LIQUIDITY ZONE
 # ============================================================
 
-def detect_liquidity_zone(candles, tolerance=0.006):
-
-    if not candles or len(candles) < 30:
+def detect_liquidity_zone(candles, tolerance=0.008):
+    if not candles or len(candles) < 35:
         return {
             "matched": False,
             "direction": None,
@@ -590,61 +531,61 @@ def detect_liquidity_zone(candles, tolerance=0.006):
             "reason": "INVALID_CANDLE"
         }
 
-    # -------------------------
     # High liquidity zone
-    # -------------------------
-
     if len(highs) >= 3:
 
-        candidate_highs = [x["price"] for x in highs[-6:]]
+        candidates = [
+            x["price"]
+            for x in highs[-6:]
+        ]
 
-        zone = mean(candidate_highs)
+        # Find clusters rather than average everything blindly
+        for base in candidates:
 
-        if zone > 0:
-
-            nearby = [
-                x for x in candidate_highs
-                if abs(x - zone) / zone <= tolerance
+            cluster = [
+                x for x in candidates
+                if abs(x - base) / base <= tolerance
             ]
 
-            if len(nearby) >= 3:
+            if len(cluster) >= 3:
 
-                # Sweep + rejection
-                if h > zone and c < zone:
+                zone = mean(cluster)
+
+                if h >= zone and c <= zone:
 
                     return {
                         "matched": True,
                         "direction": "SHORT",
                         "level": zone,
-                        "reason": "HIGH_LIQUIDITY_SWEEP"
+                        "reason": "HIGH_LIQUIDITY_ZONE"
                     }
 
-    # -------------------------
     # Low liquidity zone
-    # -------------------------
-
     if len(lows) >= 3:
 
-        candidate_lows = [x["price"] for x in lows[-6:]]
+        candidates = [
+            x["price"]
+            for x in lows[-6:]
+        ]
 
-        zone = mean(candidate_lows)
+        for base in candidates:
 
-        if zone > 0:
-
-            nearby = [
-                x for x in candidate_lows
-                if abs(x - zone) / zone <= tolerance
+            cluster = [
+                x for x in candidates
+                if abs(x - base) / base <= tolerance
             ]
 
-            if len(nearby) >= 3:
+            if len(cluster) >= 3:
 
-                if l < zone and c > zone:
+                zone = mean(cluster)
+
+                if l <= zone and c >= zone:
 
                     return {
                         "matched": True,
                         "direction": "LONG",
                         "level": zone,
-                        "reason": "LOW_LIQUIDITY_SWEEP"
+                        "reason": "LOW_LIQUIDITY_ZONE"
                     }
 
     return {
@@ -656,20 +597,99 @@ def detect_liquidity_zone(candles, tolerance=0.006):
 
 
 # ============================================================
+# 5M ENTRY TRIGGER
+# ============================================================
+
+def entry_trigger(candles, direction):
+    if not candles or len(candles) < 3:
+        return False
+
+    current = candles[-1]
+    previous = candles[-2]
+
+    o, h, l, c = candle_values(current)
+    po, ph, pl, pc = candle_values(previous)
+
+    if None in (
+        o, h, l, c,
+        po, ph, pl, pc
+    ):
+        return False
+
+    body = candle_body(current)
+    previous_body = candle_body(previous)
+
+    candle_range = h - l
+
+    if candle_range <= 0:
+        return False
+
+    # LONG:
+    # bullish current candle and reasonable body
+    if direction == "LONG":
+
+        bullish = c > o
+
+        body_ok = (
+            body >= candle_range * 0.25
+        )
+
+        momentum = (
+            c >= pc
+            or c > ph
+            or c > o
+        )
+
+        return (
+            bullish
+            and body_ok
+            and momentum
+        )
+
+    # SHORT
+    if direction == "SHORT":
+
+        bearish = c < o
+
+        body_ok = (
+            body >= candle_range * 0.25
+        )
+
+        momentum = (
+            c <= pc
+            or c < pl
+            or c < o
+        )
+
+        return (
+            bearish
+            and body_ok
+            and momentum
+        )
+
+    return False
+
+
+# ============================================================
 # TRADE LEVELS
 # ============================================================
 
-def calculate_trade_levels(candles, direction, strategy_level=None):
-
+def calculate_trade_levels(
+    candles,
+    direction,
+    strategy_level=None
+):
     if not candles or len(candles) < 10:
         return None
 
-    entry = safe_float(candles[-1].get("close"))
+    entry = safe_float(
+        candles[-1].get("close")
+    )
 
     if entry is None or entry <= 0:
         return None
 
-    recent = candles[-20:]
+    recent = candles[-15:]
 
     highs = [
         safe_float(c.get("high"))
@@ -686,18 +706,17 @@ def calculate_trade_levels(candles, direction, strategy_level=None):
     if not highs or not lows:
         return None
 
-    # -------------------------
-    # LONG
-    # -------------------------
-
     if direction == "LONG":
 
         candidates = [
-            low for low in lows
-            if low < entry
+            x for x in lows
+            if x < entry
         ]
 
-        if strategy_level is not None and strategy_level < entry:
+        if (
+            strategy_level is not None
+            and strategy_level < entry
+        ):
             candidates.append(strategy_level)
 
         if not candidates:
@@ -705,31 +724,36 @@ def calculate_trade_levels(candles, direction, strategy_level=None):
 
         support = max(candidates)
 
-        risk = entry - support
+        raw_risk = entry - support
 
-        if risk <= 0:
+        if raw_risk <= 0:
             return None
 
-        sl = support - (risk * 0.10)
+        # Prevent absurdly tiny stop
+        minimum_risk = entry * 0.0015
 
-        actual_risk = entry - sl
+        risk_distance = max(
+            raw_risk,
+            minimum_risk
+        )
 
-        tp1 = entry + actual_risk * 1.5
-        tp2 = entry + actual_risk * 2.5
-        tp3 = entry + actual_risk * 3.5
+        sl = entry - risk_distance
 
-    # -------------------------
-    # SHORT
-    # -------------------------
+        tp1 = entry + risk_distance * 1.5
+        tp2 = entry + risk_distance * 2.5
+        tp3 = entry + risk_distance * 3.0
 
     elif direction == "SHORT":
 
         candidates = [
-            high for high in highs
-            if high > entry
+            x for x in highs
+            if x > entry
         ]
 
-        if strategy_level is not None and strategy_level > entry:
+        if (
+            strategy_level is not None
+            and strategy_level > entry
+        ):
             candidates.append(strategy_level)
 
         if not candidates:
@@ -737,18 +761,23 @@ def calculate_trade_levels(candles, direction, strategy_level=None):
 
         resistance = min(candidates)
 
-        risk = resistance - entry
+        raw_risk = resistance - entry
 
-        if risk <= 0:
+        if raw_risk <= 0:
             return None
 
-        sl = resistance + (risk * 0.10)
+        minimum_risk = entry * 0.0015
 
-        actual_risk = sl - entry
+        risk_distance = max(
+            raw_risk,
+            minimum_risk
+        )
 
-        tp1 = entry - actual_risk * 1.5
-        tp2 = entry - actual_risk * 2.5
-        tp3 = entry - actual_risk * 3.5
+        sl = entry + risk_distance
+
+        tp1 = entry - risk_distance * 1.5
+        tp2 = entry - risk_distance * 2.5
+        tp3 = entry - risk_distance * 3.0
 
     else:
         return None
@@ -759,8 +788,8 @@ def calculate_trade_levels(candles, direction, strategy_level=None):
         "tp1": round(tp1, 8),
         "tp2": round(tp2, 8),
         "tp3": round(tp3, 8),
-        "risk": round(actual_risk, 8),
-        "rr": "1:1.5 / 1:2.5 / 1:3.5"
+        "risk": round(risk_distance, 8),
+        "rr": "1:1.5 / 1:2.5 / 1:3"
     }
 
 
@@ -777,9 +806,7 @@ def no_trade(
     strategy_details=None,
     score=0
 ):
-
     if strategy_details is None:
-
         strategy_details = {
             "STOP_HUNT": {
                 "matched": False,
@@ -828,6 +855,7 @@ def no_trade(
         "tp1": None,
         "tp2": None,
         "tp3": None,
+
         "risk": None,
         "rr": None,
 
@@ -836,82 +864,39 @@ def no_trade(
 
 
 # ============================================================
-# MAIN SIGNAL ENGINE
+# MAIN ENGINE
 # ============================================================
-def strategy_diagnostic(candles):
-    """
-    Diagnostic only.
-    Does NOT change trading logic.
-    """
 
-    if not candles or len(candles) < 30:
-        return {
-            "candles": len(candles) if candles else 0,
-            "price": None,
-            "recent_high": None,
-            "recent_low": None,
-            "swing_highs": 0,
-            "swing_lows": 0,
-            "stop_hunt": None,
-            "three_tap": None,
-            "liquidity_zone": None,
-        }
-
-    current = candles[-1]
-
-    price = safe_float(current.get("close"))
-
-    recent = candles[-20:]
-
-    highs = [
-        safe_float(c.get("high"))
-        for c in recent
-        if safe_float(c.get("high")) is not None
-    ]
-
-    lows = [
-        safe_float(c.get("low"))
-        for c in recent
-        if safe_float(c.get("low")) is not None
-    ]
-
-    swing_highs = find_swing_highs(candles[-80:], 2)
-    swing_lows = find_swing_lows(candles[-80:], 2)
-
-    stop_hunt = detect_stop_hunt(candles)
-    three_tap = detect_three_tap(candles)
-    liquidity_zone = detect_liquidity_zone(candles)
-
-    return {
-        "candles": len(candles),
-        "price": price,
-        "recent_high": max(highs) if highs else None,
-        "recent_low": min(lows) if lows else None,
-        "swing_highs": len(swing_highs),
-        "swing_lows": len(swing_lows),
-        "stop_hunt": stop_hunt,
-        "three_tap": three_tap,
-        "liquidity_zone": liquidity_zone,
-    }
-def generate_signal(daily, h4, h1, m15, m5):
-
-    if not all([daily, h4, h1, m15, m5]):
-
+def generate_signal(
+    daily,
+    h4,
+    h1,
+    m15,
+    m5
+):
+    if not all([
+        daily,
+        h4,
+        h1,
+        m15,
+        m5
+    ]):
         return no_trade(
             "INSUFFICIENT_MARKET_DATA"
         )
 
-    # ========================================================
-    # MARKET DIRECTION
-    # ========================================================
+    # --------------------------------------------------------
+    # 1H MAIN DIRECTION
+    # --------------------------------------------------------
 
     daily_direction = market_structure(daily)
     h4_direction = market_structure(h4)
     h1_direction = market_structure(h1)
 
-    # 1H remains the main direction.
-    if h1_direction not in ("BULLISH", "BEARISH"):
-
+    if h1_direction not in (
+        "BULLISH",
+        "BEARISH"
+    ):
         return no_trade(
             "1H_RANGE",
             daily_direction,
@@ -925,9 +910,9 @@ def generate_signal(daily, h4, h1, m15, m5):
         else "SHORT"
     )
 
-    # ========================================================
+    # --------------------------------------------------------
     # CONTEXT
-    # ========================================================
+    # --------------------------------------------------------
 
     daily_ema = ema_direction(daily)
     h4_ema = ema_direction(h4)
@@ -935,41 +920,18 @@ def generate_signal(daily, h4, h1, m15, m5):
 
     rsi_15m = calculate_rsi(m15)
 
-    # RSI is a filter.
-    # Missing RSI must NOT receive a bonus.
-    rsi_passed = False
+    volume_is_spike = volume_spike(m5)
 
-    if rsi_15m is not None:
-
-        if direction == "LONG":
-            rsi_passed = rsi_15m < 75
-
-        elif direction == "SHORT":
-            rsi_passed = rsi_15m > 25
-
-    # ========================================================
+    # --------------------------------------------------------
     # STRATEGIES
-    # ========================================================
+    # --------------------------------------------------------
 
     stop_hunt = detect_stop_hunt(m5)
 
     three_tap = detect_three_tap(m5)
 
     liquidity_zone = detect_liquidity_zone(m5)
-    diag = strategy_diagnostic(m5)
 
-    print(
-        f"5M_DIAGNOSTIC | "
-        f"candles={diag['candles']} | "
-        f"price={diag['price']} | "
-        f"recent_high={diag['recent_high']} | "
-        f"recent_low={diag['recent_low']} | "
-        f"swing_highs={diag['swing_highs']} | "
-        f"swing_lows={diag['swing_lows']} | "
-        f"STOP_HUNT={diag['stop_hunt'].get('reason')} | "
-        f"THREE_TAP={diag['three_tap'].get('reason')} | "
-        f"LIQUIDITY_ZONE={diag['liquidity_zone'].get('reason')}"
-    )
     strategy_details = {
         "STOP_HUNT": stop_hunt,
         "THREE_TAP": three_tap,
@@ -982,23 +944,27 @@ def generate_signal(daily, h4, h1, m15, m5):
         stop_hunt["matched"]
         and stop_hunt["direction"] == direction
     ):
-        matching_strategies.append("STOP_HUNT")
+        matching_strategies.append(
+            "STOP_HUNT"
+        )
 
     if (
         three_tap["matched"]
         and three_tap["direction"] == direction
     ):
-        matching_strategies.append("THREE_TAP")
+        matching_strategies.append(
+            "THREE_TAP"
+        )
 
     if (
         liquidity_zone["matched"]
         and liquidity_zone["direction"] == direction
     ):
-        matching_strategies.append("LIQUIDITY_ZONE")
+        matching_strategies.append(
+            "LIQUIDITY_ZONE"
+        )
 
-    # No strategy = no trade
     if not matching_strategies:
-
         return no_trade(
             "NO_MAIN_SETUP",
             daily_direction,
@@ -1008,34 +974,45 @@ def generate_signal(daily, h4, h1, m15, m5):
             strategy_details
         )
 
-    # ========================================================
-    # 5M FILTERS
-    # ========================================================
+    # --------------------------------------------------------
+    # ENTRY TRIGGER
+    # --------------------------------------------------------
 
-    volume_is_spike = volume_spike(m5)
-
-    confirmation = confirmation_candle(
+    confirmation = entry_trigger(
         m5,
         direction
     )
 
-    # ========================================================
+    if not confirmation:
+        return no_trade(
+            "5M_ENTRY_TRIGGER_MISSING",
+            daily_direction,
+            h4_direction,
+            h1_direction,
+            rsi_15m,
+            strategy_details
+        )
+
+    # --------------------------------------------------------
     # SCORE
-    # ========================================================
+    # --------------------------------------------------------
 
     score = 0
 
     # Main strategy
     score += 5
 
-    # Multiple strategies agree
-    if len(matching_strategies) >= 2:
-        score += 1
-
     # 1H direction
     score += 2
 
-    # Daily context
+    # Entry trigger
+    score += 1
+
+    # Multiple strategies
+    if len(matching_strategies) >= 2:
+        score += 1
+
+    # Daily alignment
     if (
         direction == "LONG"
         and daily_direction == "BULLISH"
@@ -1045,7 +1022,7 @@ def generate_signal(daily, h4, h1, m15, m5):
     ):
         score += 1
 
-    # 4H context
+    # 4H alignment
     if (
         direction == "LONG"
         and h4_direction == "BULLISH"
@@ -1055,34 +1032,39 @@ def generate_signal(daily, h4, h1, m15, m5):
     ):
         score += 1
 
-    # RSI
-    if rsi_passed:
-        score += 1
+    # RSI bonus
+    if rsi_15m is not None:
 
-    # Volume
+        if direction == "LONG":
+            if 35 <= rsi_15m < 70:
+                score += 1
+
+        elif direction == "SHORT":
+            if 30 < rsi_15m <= 65:
+                score += 1
+
+    # Volume bonus
     if volume_is_spike:
         score += 1
 
-    # Confirmation
-    if confirmation:
-        score += 2
+    # --------------------------------------------------------
+    # HIGH QUALITY
+    # --------------------------------------------------------
 
-    # ========================================================
-    # QUALITY
-    # ========================================================
+    if score < 8:
+        return no_trade(
+            "SIGNAL_QUALITY_TOO_LOW",
+            daily_direction,
+            h4_direction,
+            h1_direction,
+            rsi_15m,
+            strategy_details,
+            score
+        )
 
-    if score >= 10:
-        quality = "HIGH"
-
-    elif score >= 8:
-        quality = "MEDIUM"
-
-    else:
-        quality = "LOW"
-
-    # ========================================================
-    # SELECT STRATEGY
-    # ========================================================
+    # --------------------------------------------------------
+    # STRATEGY PRIORITY
+    # --------------------------------------------------------
 
     priority = [
         "STOP_HUNT",
@@ -1094,21 +1076,22 @@ def generate_signal(daily, h4, h1, m15, m5):
 
     strategy_level = None
 
-    for strategy_name in priority:
+    for name in priority:
 
-        if strategy_name in matching_strategies:
+        if name in matching_strategies:
 
-            selected_strategy = strategy_name
+            selected_strategy = name
 
-            strategy_level = strategy_details[
-                strategy_name
-            ].get("level")
+            strategy_level = (
+                strategy_details[name]
+                .get("level")
+            )
 
             break
 
-    # ========================================================
-    # TRADE LEVELS
-    # ========================================================
+    # --------------------------------------------------------
+    # LEVELS
+    # --------------------------------------------------------
 
     levels = calculate_trade_levels(
         m5,
@@ -1117,7 +1100,6 @@ def generate_signal(daily, h4, h1, m15, m5):
     )
 
     if levels is None:
-
         return no_trade(
             "LEVEL_CALCULATION_FAILED",
             daily_direction,
@@ -1128,41 +1110,9 @@ def generate_signal(daily, h4, h1, m15, m5):
             score
         )
 
-    # ========================================================
-    # CONFIRMATION REQUIRED
-    # ========================================================
-
-    if not confirmation:
-
-        return no_trade(
-            "5M_CONFIRMATION_MISSING",
-            daily_direction,
-            h4_direction,
-            h1_direction,
-            rsi_15m,
-            strategy_details,
-            score
-        )
-
-    # ========================================================
-    # HIGH QUALITY REQUIRED
-    # ========================================================
-
-    if score < 10:
-
-        return no_trade(
-            "SIGNAL_QUALITY_TOO_LOW",
-            daily_direction,
-            h4_direction,
-            h1_direction,
-            rsi_15m,
-            strategy_details,
-            score
-        )
-
-    # ========================================================
+    # --------------------------------------------------------
     # FINAL HIGH SIGNAL
-    # ========================================================
+    # --------------------------------------------------------
 
     return {
         "signal": direction,
@@ -1180,7 +1130,6 @@ def generate_signal(daily, h4, h1, m15, m5):
         "1h_ema": h1_ema,
 
         "rsi_15m": rsi_15m,
-        "rsi_passed": rsi_passed,
 
         "volume_spike": volume_is_spike,
         "confirmation": confirmation,
@@ -1219,22 +1168,27 @@ def generate_signal(daily, h4, h1, m15, m5):
         "reason": (
             "1H_DIRECTION + "
             + selected_strategy
-            + " + "
-            + "5M_CONFIRMATION"
+            + " + 5M_ENTRY"
         )
     }
 
 
 # ============================================================
-# COMPATIBILITY HELPER
+# COMPATIBILITY
 # ============================================================
 
 def direction_to_trend(direction):
 
-    if direction in ("LONG", "BULLISH"):
+    if direction in (
+        "LONG",
+        "BULLISH"
+    ):
         return "BULLISH"
 
-    if direction in ("SHORT", "BEARISH"):
+    if direction in (
+        "SHORT",
+        "BEARISH"
+    ):
         return "BEARISH"
 
     return "RANGE"
