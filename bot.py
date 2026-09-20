@@ -11,7 +11,12 @@ from telegram.ext import (
 )
 
 from analysis import generate_signal
-
+from tracker import (
+    register_signal,
+    check_all_trades,
+    get_open_trades,
+    get_stats,
+)
 
 # =========================
 # CONFIG
