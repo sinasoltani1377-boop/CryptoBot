@@ -610,65 +610,56 @@ def entry_trigger(candles, direction):
     o, h, l, c = candle_values(current)
     po, ph, pl, pc = candle_values(previous)
 
-    if None in (
-        o, h, l, c,
-        po, ph, pl, pc
-    ):
+    if None in (o, h, l, c, po, ph, pl, pc):
         return False
 
     body = candle_body(current)
-    previous_body = candle_body(previous)
-
     candle_range = h - l
 
     if candle_range <= 0:
         return False
 
-    # LONG:
-    # bullish current candle and reasonable body
+    # ---------------------------------------------
+    # LONG
+    # ---------------------------------------------
     if direction == "LONG":
 
         bullish = c > o
 
-        body_ok = (
-            body >= candle_range * 0.25
-        )
+        # Candle must have a meaningful body
+        body_ok = body >= candle_range * 0.18
 
+        # Any one of these is enough
         momentum = (
-            c >= pc
+            c > pc
+            or c > po
             or c > ph
             or c > o
         )
 
-        return (
-            bullish
-            and body_ok
-            and momentum
-        )
+        return bullish and body_ok and momentum
 
+    # ---------------------------------------------
     # SHORT
+    # ---------------------------------------------
     if direction == "SHORT":
 
         bearish = c < o
 
-        body_ok = (
-            body >= candle_range * 0.25
-        )
+        # Candle must have a meaningful body
+        body_ok = body >= candle_range * 0.18
 
+        # Any one of these is enough
         momentum = (
-            c <= pc
+            c < pc
+            or c < po
             or c < pl
             or c < o
         )
 
-        return (
-            bearish
-            and body_ok
-            and momentum
-        )
+        return bearish and body_ok and momentum
 
     return False
-
 
 # ============================================================
 # TRADE LEVELS
