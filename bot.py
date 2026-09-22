@@ -1394,7 +1394,7 @@ def main():
 
     application.job_queue.run_repeating(
         track_open_trades,
-        interval=300,
+        interval=30,
         first=30,
     )
 
