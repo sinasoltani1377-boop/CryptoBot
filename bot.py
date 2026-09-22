@@ -1439,14 +1439,8 @@ def main():
         interval=30,
         first=30,
     )
-
-    logger.info(
-        "Auto scanner started: every 5 minutes"
-    )
-
-    logger.info(
-        "Trade tracker started: every 5 minutes"
-    )
+    logger.info("Trade tracker started: every 30 seconds")
+    logger.info("Trade tracker started: every 30 seconds")
 
     logger.info(
         "CryptoBot started successfully."
