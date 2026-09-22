@@ -5,9 +5,8 @@ from datetime import datetime, timezone
 
 TRADES_FILE = os.getenv(
     "TRADES_FILE",
-    "trades.json"
+    "/tmp/cryptobot_trades.json"
 )
-
 _lock = threading.Lock()
 
 
