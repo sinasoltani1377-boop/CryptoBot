@@ -309,15 +309,59 @@ def get_price(symbol):
 
         data = response.json()
 
+        logger.info(
+            "PRICE API | %s | %s",
+            symbol,
+            data,
+        )
+
+        # Response is a dictionary
         if isinstance(data, dict):
 
-            price = data.get("p")
-
-            if price is None:
-                price = data.get("price")
+            price = (
+                data.get("p")
+                or data.get("price")
+                or data.get("lastPrice")
+                or data.get("last")
+            )
 
             if price is not None:
                 return float(price)
+
+        # Response is a list
+        if isinstance(data, list):
+
+            for item in data:
+
+                if not isinstance(item, dict):
+                    continue
+
+                item_symbol = (
+                    item.get("symbol")
+                    or item.get("s")
+                )
+
+                if (
+                    item_symbol is not None
+                    and item_symbol != symbol
+                ):
+                    continue
+
+                price = (
+                    item.get("p")
+                    or item.get("price")
+                    or item.get("lastPrice")
+                    or item.get("last")
+                )
+
+                if price is not None:
+                    return float(price)
+
+        logger.warning(
+            "PRICE API | %s | Price not found | Response=%s",
+            symbol,
+            data,
+        )
 
         return None
 
@@ -330,8 +374,6 @@ def get_price(symbol):
         )
 
         return None
-
-
 # ============================================================
 # TRACKER HELPERS
 # ============================================================
