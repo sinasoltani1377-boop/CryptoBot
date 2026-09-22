@@ -1072,13 +1072,61 @@ async def auto_signal(
 async def track_open_trades(
     context: ContextTypes.DEFAULT_TYPE,
 ):
-
     try:
+
+        open_trades = await asyncio.to_thread(
+            get_open_trades
+        )
+
+        if not open_trades:
+            logger.info(
+                "TRACKER CHECK | No open trades"
+            )
+            return
+
+        logger.info(
+            "TRACKER CHECK | Open trades=%s",
+            len(open_trades),
+        )
 
         events = await asyncio.to_thread(
             check_all_trades,
             get_price,
         )
+
+        # Log current price of every open trade
+        for trade in open_trades:
+
+            symbol = trade.get(
+                "symbol",
+                "UNKNOWN",
+            )
+
+            direction = trade.get(
+                "direction",
+                "UNKNOWN",
+            )
+
+            current_price = await asyncio.to_thread(
+                get_price,
+                symbol,
+            )
+
+            logger.info(
+                "TRACKER CHECK | "
+                "%s | %s | "
+                "Current=%s | Entry=%s | "
+                "SL=%s | TP1=%s | "
+                "TP2=%s | TP3=%s",
+                symbol,
+                direction,
+                current_price,
+                trade.get("entry"),
+                trade.get("sl"),
+                trade.get("tp1"),
+                trade.get("tp2"),
+                trade.get("tp3"),
+            )
 
         if not events:
             return
@@ -1100,7 +1148,8 @@ async def track_open_trades(
             )
 
             result = event.get(
-                "event"
+                "event",
+                "UNKNOWN",
             )
 
             price_now = event.get(
