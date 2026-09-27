@@ -1058,13 +1058,16 @@ async def auto_signal(
                     result.get("strategy"),
                 )
 
-                chat_ids = (           
+                        chat_ids = (
+                    context.application
+                    .bot_data
+                    .get(
+                        "chat_ids",
                         set(),
                     )
                 )
 
                 for chat_id in chat_ids:
-
                     try:
 
                         await context.bot.send_message(
