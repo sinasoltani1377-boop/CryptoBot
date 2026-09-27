@@ -1055,10 +1055,9 @@ async def auto_signal(
                     symbol,
                     result.get("direction"),
                     result.get("score"),
-                    result.get("strategy"),
-                )
-
-                        chat_ids = (
+                    result.get("strategy"),            
+                ) 
+                             chat_ids = (
                     context.application
                     .bot_data
                     .get(
@@ -1069,24 +1068,15 @@ async def auto_signal(
 
                 for chat_id in chat_ids:
                     try:
-
                         await context.bot.send_message(
                             chat_id=chat_id,
-                            text=signal_text(
-                                symbol,
-                                result,
-                            ),
-                            parse_mode="HTML",
+                            text=signal_text(symbol, result),
                         )
-
                     except Exception:
-
                         logger.exception(
-                            "Telegram send error "
-                            "for chat %s",
+                            "Failed to send signal to chat %s",
                             chat_id,
-                        )
-
+                        )   
             except Exception:
 
                 logger.exception(
