@@ -1029,45 +1029,36 @@ async def auto_signal(
                     continue
 
                 # Register HIGH signal
-                # only if it is not already open.
+                # Send Telegram alert only when a NEW signal
+                # is registered. This prevents duplicate alerts.
                 trade = register_high_signal(
                     symbol,
                     result,
                 )
 
-                if trade is not None:
+                if trade is None:
 
                     logger.info(
-                        "HIGH SIGNAL REGISTERED | "
-                        "%s | %s | Score=%s",
+                        "HIGH SIGNAL | %s | %s | "
+                        "Already tracked - Telegram alert skipped",
                         symbol,
-                        result.get(
-                            "direction"
-                        ),
-                        result.get(
-                            "score"
-                        ),
+                        result.get("direction"),
                     )
+
+                    continue
 
                 found += 1
 
                 logger.info(
-                    "HIGH SIGNAL FOUND | "
-                    "%s | %s | Score=%s",
+                    "NEW HIGH SIGNAL | "
+                    "%s | %s | Score=%s | Strategy=%s",
                     symbol,
-                    result.get(
-                        "direction"
-                    ),
-                    result.get(
-                        "score"
-                    ),
+                    result.get("direction"),
+                    result.get("score"),
+                    result.get("strategy"),
                 )
 
-                chat_ids = (
-                    context.application
-                    .bot_data
-                    .get(
-                        "chat_ids",
+                chat_ids = (           
                         set(),
                     )
                 )
