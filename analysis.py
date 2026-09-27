@@ -411,8 +411,7 @@ def detect_stop_hunt(candles, lookback=15):
 # ============================================================
 # THREE TAP
 # ============================================================
-
-def detect_three_tap(candles, tolerance=0.008):
+def detect_three_tap(candles, tolerance=0.006):
     if not candles or len(candles) < 35:
         return {
             "matched": False,
@@ -438,13 +437,22 @@ def detect_three_tap(candles, tolerance=0.008):
             "reason": "INVALID_CANDLE"
         }
 
-    # Three highs
+    body = candle_body(current)
+    upper = upper_wick(current)
+    lower = lower_wick(current)
+
+    # ========================================================
+    # THREE HIGH TAPS -> SHORT
+    # ========================================================
+
     if len(highs) >= 3:
+
         taps = highs[-3:]
         levels = [x["price"] for x in taps]
         level = mean(levels)
 
         if level > 0:
+
             deviation = max(
                 abs(x - level) / level
                 for x in levels
@@ -452,27 +460,46 @@ def detect_three_tap(candles, tolerance=0.008):
 
             if deviation <= tolerance:
 
-                # Price is near the third-tap zone
-                distance = abs(c - level) / level
+                # Price must actually attack the zone
+                touched = h >= level * (1 - tolerance)
+
+                # Must reject the zone
+                rejected = c < level
+
+                # Candle must have meaningful body
+                body_ok = body >= max(
+                    (h - l) * 0.20,
+                    0.00000001
+                )
+
+                # Prefer visible upper rejection
+                wick_ok = upper >= body * 0.40
 
                 if (
-                    distance <= tolerance * 1.5
-                    or h >= level
+                    touched
+                    and rejected
+                    and body_ok
+                    and wick_ok
                 ):
                     return {
                         "matched": True,
                         "direction": "SHORT",
                         "level": level,
-                        "reason": "THREE_HIGH_TAPS"
+                        "reason": "THREE_HIGH_TAPS_REJECTION"
                     }
 
-    # Three lows
+    # ========================================================
+    # THREE LOW TAPS -> LONG
+    # ========================================================
+
     if len(lows) >= 3:
+
         taps = lows[-3:]
         levels = [x["price"] for x in taps]
         level = mean(levels)
 
         if level > 0:
+
             deviation = max(
                 abs(x - level) / level
                 for x in levels
@@ -480,17 +507,32 @@ def detect_three_tap(candles, tolerance=0.008):
 
             if deviation <= tolerance:
 
-                distance = abs(c - level) / level
+                # Price must actually attack the zone
+                touched = l <= level * (1 + tolerance)
+
+                # Must reclaim the zone
+                reclaimed = c > level
+
+                # Candle must have meaningful body
+                body_ok = body >= max(
+                    (h - l) * 0.20,
+                    0.00000001
+                )
+
+                # Prefer visible lower rejection
+                wick_ok = lower >= body * 0.40
 
                 if (
-                    distance <= tolerance * 1.5
-                    or l <= level
+                    touched
+                    and reclaimed
+                    and body_ok
+                    and wick_ok
                 ):
                     return {
                         "matched": True,
                         "direction": "LONG",
                         "level": level,
-                        "reason": "THREE_LOW_TAPS"
+                        "reason": "THREE_LOW_TAPS_REJECTION"
                     }
 
     return {
@@ -500,12 +542,11 @@ def detect_three_tap(candles, tolerance=0.008):
         "reason": "NO_THREE_TAP"
     }
 
-
 # ============================================================
 # LIQUIDITY ZONE
 # ============================================================
 
-def detect_liquidity_zone(candles, tolerance=0.008):
+def detect_liquidity_zone(candles, tolerance=0.006):
     if not candles or len(candles) < 35:
         return {
             "matched": False,
@@ -531,7 +572,14 @@ def detect_liquidity_zone(candles, tolerance=0.008):
             "reason": "INVALID_CANDLE"
         }
 
-    # High liquidity zone
+    body = candle_body(current)
+    upper = upper_wick(current)
+    lower = lower_wick(current)
+
+    # ========================================================
+    # HIGH LIQUIDITY ZONE -> SHORT
+    # ========================================================
+
     if len(highs) >= 3:
 
         candidates = [
@@ -539,11 +587,11 @@ def detect_liquidity_zone(candles, tolerance=0.008):
             for x in highs[-6:]
         ]
 
-        # Find clusters rather than average everything blindly
         for base in candidates:
 
             cluster = [
-                x for x in candidates
+                x
+                for x in candidates
                 if abs(x - base) / base <= tolerance
             ]
 
@@ -551,16 +599,38 @@ def detect_liquidity_zone(candles, tolerance=0.008):
 
                 zone = mean(cluster)
 
-                if h >= zone and c <= zone:
+                # Sweep above liquidity
+                swept = h > zone
 
+                # Close back below liquidity
+                reclaimed = c < zone
+
+                # Meaningful candle
+                body_ok = body >= max(
+                    (h - l) * 0.20,
+                    0.00000001
+                )
+
+                # Rejection from above
+                wick_ok = upper >= body * 0.40
+
+                if (
+                    swept
+                    and reclaimed
+                    and body_ok
+                    and wick_ok
+                ):
                     return {
                         "matched": True,
                         "direction": "SHORT",
                         "level": zone,
-                        "reason": "HIGH_LIQUIDITY_ZONE"
+                        "reason": "HIGH_LIQUIDITY_SWEEP_REJECTION"
                     }
 
-    # Low liquidity zone
+    # ========================================================
+    # LOW LIQUIDITY ZONE -> LONG
+    # ========================================================
+
     if len(lows) >= 3:
 
         candidates = [
@@ -571,7 +641,8 @@ def detect_liquidity_zone(candles, tolerance=0.008):
         for base in candidates:
 
             cluster = [
-                x for x in candidates
+                x
+                for x in candidates
                 if abs(x - base) / base <= tolerance
             ]
 
@@ -579,13 +650,32 @@ def detect_liquidity_zone(candles, tolerance=0.008):
 
                 zone = mean(cluster)
 
-                if l <= zone and c >= zone:
+                # Sweep below liquidity
+                swept = l < zone
 
+                # Close back above liquidity
+                reclaimed = c > zone
+
+                # Meaningful candle
+                body_ok = body >= max(
+                    (h - l) * 0.20,
+                    0.00000001
+                )
+
+                # Rejection from below
+                wick_ok = lower >= body * 0.40
+
+                if (
+                    swept
+                    and reclaimed
+                    and body_ok
+                    and wick_ok
+                ):
                     return {
                         "matched": True,
                         "direction": "LONG",
                         "level": zone,
-                        "reason": "LOW_LIQUIDITY_ZONE"
+                        "reason": "LOW_LIQUIDITY_SWEEP_REJECTION"
                     }
 
     return {
@@ -593,13 +683,11 @@ def detect_liquidity_zone(candles, tolerance=0.008):
         "direction": None,
         "level": None,
         "reason": "NO_LIQUIDITY_ZONE"
-    }
-
+}
 
 # ============================================================
 # 5M ENTRY TRIGGER
 # ============================================================
-
 def entry_trigger(candles, direction):
     if not candles or len(candles) < 3:
         return False
@@ -619,48 +707,74 @@ def entry_trigger(candles, direction):
     if candle_range <= 0:
         return False
 
-    # ---------------------------------------------
+    upper = upper_wick(current)
+    lower = lower_wick(current)
+
+    # ========================================================
     # LONG
-    # ---------------------------------------------
+    # ========================================================
+
     if direction == "LONG":
 
         bullish = c > o
 
-        # Candle must have a meaningful body
-        body_ok = body >= candle_range * 0.18
+        # Stronger body requirement
+        body_ok = body >= candle_range * 0.30
 
-        # Any one of these is enough
+        # Close should be in upper part of candle
+        close_position = (c - l) / candle_range
+        close_strong = close_position >= 0.65
+
+        # Must show actual momentum
         momentum = (
-            c > pc
-            or c > po
-            or c > ph
-            or c > o
+            c > ph
+            or c > pc
         )
 
-        return bullish and body_ok and momentum
+        # Avoid candles with excessive upper rejection
+        rejection_ok = upper <= body * 1.20
 
-    # ---------------------------------------------
+        return (
+            bullish
+            and body_ok
+            and close_strong
+            and momentum
+            and rejection_ok
+        )
+
+    # ========================================================
     # SHORT
-    # ---------------------------------------------
+    # ========================================================
+
     if direction == "SHORT":
 
         bearish = c < o
 
-        # Candle must have a meaningful body
-        body_ok = body >= candle_range * 0.18
+        # Stronger body requirement
+        body_ok = body >= candle_range * 0.30
 
-        # Any one of these is enough
+        # Close should be in lower part of candle
+        close_position = (h - c) / candle_range
+        close_strong = close_position >= 0.65
+
+        # Must show actual momentum
         momentum = (
-            c < pc
-            or c < po
-            or c < pl
-            or c < o
+            c < pl
+            or c < pc
         )
 
-        return bearish and body_ok and momentum
+        # Avoid candles with excessive lower rejection
+        rejection_ok = lower <= body * 1.20
+
+        return (
+            bearish
+            and body_ok
+            and close_strong
+            and momentum
+            and rejection_ok
+        )
 
     return False
-
 # ============================================================
 # TRADE LEVELS
 # ============================================================
