@@ -278,10 +278,6 @@ def get_open_trades():
     ]
 
 
-def get_all_trades():
-    return _load_trades()
-
-
 def get_stats():
     trades = _load_trades()
 
@@ -292,6 +288,9 @@ def get_stats():
     tp1_count = 0
     tp2_count = 0
     tp3_count = 0
+
+    strategy_stats = {}
+    symbol_stats = {}
 
     for trade in trades:
 
@@ -310,14 +309,82 @@ def get_stats():
         if trade.get("tp3_hit"):
             tp3_count += 1
 
+        # ==================================================
+        # STRATEGY STATISTICS
+        # ==================================================
+
+        strategies = trade.get("strategies")
+
+        if not strategies:
+            strategies = [trade.get("strategy", "UNKNOWN")]
+
+        if isinstance(strategies, str):
+            strategies = [strategies]
+
+        for strategy in strategies:
+
+            if not strategy:
+                strategy = "UNKNOWN"
+
+            if strategy not in strategy_stats:
+                strategy_stats[strategy] = {
+                    "signals": 0,
+                    "sl": 0,
+                    "tp3": 0,
+                    "open": 0,
+                }
+
+            strategy_stats[strategy]["signals"] += 1
+
+            if trade.get("sl_hit"):
+                strategy_stats[strategy]["sl"] += 1
+
+            if trade.get("tp3_hit"):
+                strategy_stats[strategy]["tp3"] += 1
+
+            if trade.get("status") == "OPEN":
+                strategy_stats[strategy]["open"] += 1
+
+        # ==================================================
+        # SYMBOL STATISTICS
+        # ==================================================
+
+        symbol = trade.get(
+            "symbol",
+            "UNKNOWN",
+        )
+
+        if symbol not in symbol_stats:
+            symbol_stats[symbol] = {
+                "signals": 0,
+                "sl": 0,
+                "tp3": 0,
+                "open": 0,
+            }
+
+        symbol_stats[symbol]["signals"] += 1
+
+        if trade.get("sl_hit"):
+            symbol_stats[symbol]["sl"] += 1
+
+        if trade.get("tp3_hit"):
+            symbol_stats[symbol]["tp3"] += 1
+
+        if trade.get("status") == "OPEN":
+            symbol_stats[symbol]["open"] += 1
+
     closed = total - open_count
 
     return {
         "total": total,
         "open": open_count,
         "closed": closed,
+
         "sl": sl_count,
         "tp1": tp1_count,
         "tp2": tp2_count,
         "tp3": tp3_count,
+
+        "strategies": strategy_stats,
+        "symbols": symbol_stats,
     }
