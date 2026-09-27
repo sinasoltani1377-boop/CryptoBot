@@ -857,7 +857,6 @@ def no_trade(
 # ============================================================
 # MAIN ENGINE
 # ============================================================
-
 def generate_signal(daily, h4, h1, m15, m5):
     if not all([daily, h4, h1, m15, m5]):
         return no_trade("INSUFFICIENT_MARKET_DATA")
@@ -868,17 +867,6 @@ def generate_signal(daily, h4, h1, m15, m5):
     daily_direction = market_structure(daily)
     h4_direction = market_structure(h4)
     h1_direction = market_structure(h1)
-
-    # 1H = MAIN DIRECTION
-    if h1_direction not in ("BULLISH", "BEARISH"):
-        return no_trade(
-            "1H_RANGE",
-            daily_direction,
-            h4_direction,
-            h1_direction
-        )
-
-    direction = "LONG" if h1_direction == "BULLISH" else "SHORT"
 
     # --------------------------------------------------------
     # FILTERS
@@ -904,38 +892,110 @@ def generate_signal(daily, h4, h1, m15, m5):
     }
 
     # --------------------------------------------------------
-    # FIND STRATEGIES THAT MATCH 1H DIRECTION
+    # DETECT ALL VALID STRATEGIES
+    # --------------------------------------------------------
+    valid_setups = []
+
+    for name, data in strategy_details.items():
+        if not isinstance(data, dict):
+            continue
+
+        if data.get("matched") and data.get("direction") in (
+            "LONG",
+            "SHORT"
+        ):
+            valid_setups.append(name)
+
+    # --------------------------------------------------------
+    # NO SETUP
+    # --------------------------------------------------------
+    if not valid_setups:
+        return no_trade(
+            "NO_MAIN_SETUP",
+            daily_direction,
+            h4_direction,
+            h1_direction,
+            rsi_15m,
+            strategy_details
+        )
+
+    # --------------------------------------------------------
+    # DETERMINE DIRECTION
+    #
+    # 1H BULLISH -> LONG
+    # 1H BEARISH -> SHORT
+    #
+    # 1H RANGE -> direction comes from valid setup.
+    # If multiple setups exist with different directions,
+    # do NOT guess. Reject the trade.
+    # --------------------------------------------------------
+    if h1_direction == "BULLISH":
+        direction = "LONG"
+
+    elif h1_direction == "BEARISH":
+        direction = "SHORT"
+
+    else:
+        setup_directions = []
+
+        for name in valid_setups:
+            setup_direction = strategy_details[name].get("direction")
+
+            if setup_direction in ("LONG", "SHORT"):
+                setup_directions.append(setup_direction)
+
+        unique_directions = list(set(setup_directions))
+
+        # No usable setup direction
+        if not unique_directions:
+            return no_trade(
+                "1H_RANGE_NO_DIRECTION",
+                daily_direction,
+                h4_direction,
+                h1_direction,
+                rsi_15m,
+                strategy_details
+            )
+
+        # Conflicting setups = no trade
+        if len(unique_directions) > 1:
+            return no_trade(
+                "1H_RANGE_CONFLICTING_SETUPS",
+                daily_direction,
+                h4_direction,
+                h1_direction,
+                rsi_15m,
+                strategy_details
+            )
+
+        direction = unique_directions[0]
+
+    # --------------------------------------------------------
+    # FIND STRATEGIES MATCHING FINAL DIRECTION
     # --------------------------------------------------------
     matching_strategies = []
 
-    if (
-        stop_hunt.get("matched")
-        and stop_hunt.get("direction") == direction
-    ):
-        matching_strategies.append("STOP_HUNT")
+    for name, data in strategy_details.items():
 
-    if (
-        three_tap.get("matched")
-        and three_tap.get("direction") == direction
-    ):
-        matching_strategies.append("THREE_TAP")
+        if not isinstance(data, dict):
+            continue
 
-    if (
-        liquidity_zone.get("matched")
-        and liquidity_zone.get("direction") == direction
-    ):
-        matching_strategies.append("LIQUIDITY_ZONE")
+        if not data.get("matched"):
+            continue
+
+        if data.get("direction") == direction:
+            matching_strategies.append(name)
 
     # --------------------------------------------------------
     # IMPORTANT:
-    # Strategy may exist but be opposite to 1H.
-    # Do NOT call that simply "NO STRATEGY".
+    # A strategy may exist but be opposite to final direction.
     # --------------------------------------------------------
     if not matching_strategies:
 
         opposite_strategies = []
 
         for name, data in strategy_details.items():
+
             if not isinstance(data, dict):
                 continue
 
@@ -951,11 +1011,11 @@ def generate_signal(daily, h4, h1, m15, m5):
 
         if opposite_strategies:
             reason = (
-                "STRATEGY_OPPOSITE_1H:"
+                "STRATEGY_OPPOSITE_DIRECTION:"
                 + ",".join(opposite_strategies)
             )
         else:
-            reason = "NO_MAIN_SETUP"
+            reason = "NO_MATCHING_SETUP"
 
         return no_trade(
             reason,
@@ -983,23 +1043,55 @@ def generate_signal(daily, h4, h1, m15, m5):
 
     # --------------------------------------------------------
     # SCORE
+    #
+    # IMPORTANT:
+    # We no longer start from 8.
+    #
+    # This prevents every valid setup from automatically
+    # becoming HIGH.
     # --------------------------------------------------------
     score = 0
 
-    # Main 1H direction + valid strategy
-    score += 5
+    # --------------------------------------------------------
+    # CORE SETUP
+    # --------------------------------------------------------
 
-    # Valid 5M entry trigger
+    # Valid strategy
     score += 2
 
-    # Base setup quality
-    score += 1
+    # Valid 5M entry confirmation
+    score += 2
 
-    # Multiple strategies
+    # --------------------------------------------------------
+    # 1H CONTEXT
+    # --------------------------------------------------------
+
+    if h1_direction in ("BULLISH", "BEARISH"):
+
+        # Strategy agrees with 1H
+        score += 2
+
+    else:
+        # 1H RANGE:
+        # setup itself provides the direction,
+        # therefore only a smaller bonus.
+        score += 1
+
+    # --------------------------------------------------------
+    # MULTIPLE STRATEGIES
+    # --------------------------------------------------------
+
     if len(matching_strategies) >= 2:
         score += 1
 
-    # Daily alignment = bonus only
+    if len(matching_strategies) >= 3:
+        score += 1
+
+    # --------------------------------------------------------
+    # DAILY ALIGNMENT
+    # BONUS ONLY
+    # --------------------------------------------------------
+
     if (
         (direction == "LONG" and daily_direction == "BULLISH")
         or
@@ -1007,8 +1099,13 @@ def generate_signal(daily, h4, h1, m15, m5):
     ):
         score += 1
 
-    # 4H alignment = BONUS ONLY
-    # IMPORTANT: 4H NEVER BLOCKS THE TRADE
+    # --------------------------------------------------------
+    # 4H ALIGNMENT
+    # BONUS ONLY
+    #
+    # 4H NEVER BLOCKS THE TRADE.
+    # --------------------------------------------------------
+
     if (
         (direction == "LONG" and h4_direction == "BULLISH")
         or
@@ -1016,25 +1113,62 @@ def generate_signal(daily, h4, h1, m15, m5):
     ):
         score += 1
 
-    # 15M RSI filter/bonus
+    # --------------------------------------------------------
+    # 15M RSI
+    # --------------------------------------------------------
+
     if rsi_15m is not None:
 
         if direction == "LONG":
-            if 35 <= rsi_15m < 70:
+
+            # Healthy bullish range
+            if 40 <= rsi_15m < 68:
                 score += 1
+
+            # Strongly overbought = no bonus
+            elif rsi_15m >= 68:
+                score -= 1
 
         elif direction == "SHORT":
-            if 30 < rsi_15m <= 65:
+
+            # Healthy bearish range
+            if 32 < rsi_15m <= 60:
                 score += 1
 
-    # Volume bonus
+            # Strongly oversold = no bonus
+            elif rsi_15m <= 32:
+                score -= 1
+
+    # --------------------------------------------------------
+    # VOLUME
+    # --------------------------------------------------------
+
     if volume_is_spike:
         score += 1
 
     # --------------------------------------------------------
-    # QUALITY
+    # RANGE PENALTY
+    #
+    # Range is allowed, but it must prove itself with setup.
     # --------------------------------------------------------
+
+    if h1_direction == "RANGE":
+
+        # A single setup in a range needs stronger confirmation.
+        if len(matching_strategies) == 1:
+            score -= 1
+
+        # Multiple agreeing setups are stronger.
+        elif len(matching_strategies) >= 2:
+            score += 1
+
+    # --------------------------------------------------------
+    # QUALITY GATE
+    # --------------------------------------------------------
+
+    # HIGH requires at least 8 points.
     if score < 8:
+
         return no_trade(
             "SIGNAL_QUALITY_TOO_LOW",
             daily_direction,
@@ -1062,7 +1196,10 @@ def generate_signal(daily, h4, h1, m15, m5):
         if name in matching_strategies:
 
             selected_strategy = name
-            strategy_level = strategy_details[name].get("level")
+
+            strategy_level = (
+                strategy_details[name].get("level")
+            )
 
             break
 
@@ -1076,6 +1213,7 @@ def generate_signal(daily, h4, h1, m15, m5):
     )
 
     if levels is None:
+
         return no_trade(
             "LEVEL_CALCULATION_FAILED",
             daily_direction,
@@ -1087,7 +1225,7 @@ def generate_signal(daily, h4, h1, m15, m5):
         )
 
     # --------------------------------------------------------
-    # HIGH SIGNAL
+    # FINAL HIGH SIGNAL
     # --------------------------------------------------------
     return {
         "signal": direction,
@@ -1127,8 +1265,10 @@ def generate_signal(daily, h4, h1, m15, m5):
         "rr": levels["rr"],
 
         "reason": (
-            "1H_DIRECTION + "
-            + selected_strategy
-            + " + 5M_ENTRY"
+            "1H_RANGE_SETUP + "
+            if h1_direction == "RANGE"
+            else "1H_DIRECTION + "
         )
-}
+        + selected_strategy
+        + " + 5M_ENTRY"
+    }
