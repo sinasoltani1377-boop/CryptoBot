@@ -1501,7 +1501,7 @@ def generate_signal(daily, h4, h1, m15, m5):
     # --------------------------------------------------------
     # QUALITY GATE
     # --------------------------------------------------------
-    if score < 10 or not regime_ok:
+    if score < 9 or not regime_ok:
         return no_trade(
             "SIGNAL_QUALITY_TOO_LOW",
             daily_direction, h4_direction, h1_direction,
