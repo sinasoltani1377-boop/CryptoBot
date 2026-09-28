@@ -533,7 +533,14 @@ def log_signal_diagnostic(
     symbol,
     result,
 ):
-
+logger.info(
+    "NEW_STRATEGIES | %s | "
+    "BreakerBlock=%s | "
+    "FVGFill=%s",
+    symbol,
+    result.get("breaker_block"),
+    result.get("fvg_fill"),
+    )
     if not isinstance(result, dict):
         return
 
@@ -695,7 +702,11 @@ def signal_text(
         if strategies
         else "NONE"
     )
+    f"🔷 Breaker Block: "
+    f"{result.get('breaker_block')}\n"
 
+    f"🔶 FVG Fill: "
+    f"{result.get('fvg_fill')}\n\n"
     return (
         f"{emoji} <b>{symbol}</b>\n\n"
 
