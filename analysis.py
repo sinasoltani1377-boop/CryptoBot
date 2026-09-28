@@ -1,16 +1,24 @@
 # ============================================================
-# CryptoBot - Analysis Engine v6
+# CryptoBot - Analysis Engine v8
 #
 # 1H  = Main Direction
-# 15M  = Filter
+# 15M = Filter + MTF Confirmation
 # 5M  = Entry Trigger
 #
 # Strategies:
 #   STOP_HUNT
 #   THREE_TAP
 #   LIQUIDITY_ZONE
+#   BREAKER_BLOCK   (NEW in v8)
+#   FVG_FILL        (NEW in v8)
 #
 # Only HIGH signals are returned as active trades.
+#
+# v8 Changes:
+#   - Added BREAKER_BLOCK strategy
+#   - Added FVG_FILL strategy
+#   - Updated strategy priority
+#   - All v7 filters preserved
 # ============================================================
 
 from statistics import mean
@@ -136,6 +144,77 @@ def calculate_rsi(candles, period=14):
 
 
 # ============================================================
+# ADX - MARKET REGIME FILTER
+# ============================================================
+
+def calculate_adx(candles, period=14):
+    """
+    محاسبه ADX برای تشخیص روند دار بودن بازار.
+
+    ADX > 25 : بازار روند دار
+    ADX < 20 : بازار رنج
+    """
+    if not candles or len(candles) < period * 2:
+        return None
+
+    trs = []
+    plus_dm = []
+    minus_dm = []
+
+    for i in range(1, len(candles)):
+        h = safe_float(candles[i].get("high"))
+        l = safe_float(candles[i].get("low"))
+        ph = safe_float(candles[i - 1].get("high"))
+        pl = safe_float(candles[i - 1].get("low"))
+        pc = safe_float(candles[i - 1].get("close"))
+
+        if None in (h, l, ph, pl, pc):
+            continue
+
+        tr = max(h - l, abs(h - pc), abs(l - pc))
+        trs.append(tr)
+
+        up_move = h - ph
+        down_move = pl - l
+
+        if up_move > down_move and up_move > 0:
+            plus_dm.append(up_move)
+        else:
+            plus_dm.append(0)
+
+        if down_move > up_move and down_move > 0:
+            minus_dm.append(down_move)
+        else:
+            minus_dm.append(0)
+
+    if len(trs) < period:
+        return None
+
+    atr = sum(trs[:period]) / period
+    plus_di = sum(plus_dm[:period]) / period
+    minus_di = sum(minus_dm[:period]) / period
+
+    for i in range(period, len(trs)):
+        atr = (atr * (period - 1) + trs[i]) / period
+        plus_di = (plus_di * (period - 1) + plus_dm[i]) / period
+        minus_di = (minus_di * (period - 1) + minus_dm[i]) / period
+
+    if atr == 0:
+        return None
+
+    plus_di = (plus_di / atr) * 100
+    minus_di = (minus_di / atr) * 100
+
+    di_sum = plus_di + minus_di
+    if di_sum == 0:
+        return None
+
+    dx = abs(plus_di - minus_di) / di_sum * 100
+
+    return round(dx, 2)
+
+
+# ============================================================
 # VOLUME
 # ============================================================
 
@@ -171,26 +250,16 @@ def find_swing_highs(candles, strength=2):
 
     result = []
 
-    for i in range(
-        strength,
-        len(candles) - strength
-    ):
-        high = safe_float(
-            candles[i].get("high")
-        )
-
+    for i in range(strength, len(candles) - strength):
+        high = safe_float(candles[i].get("high"))
         if high is None:
             continue
 
         valid = True
 
         for j in range(1, strength + 1):
-            left = safe_float(
-                candles[i - j].get("high")
-            )
-            right = safe_float(
-                candles[i + j].get("high")
-            )
+            left = safe_float(candles[i - j].get("high"))
+            right = safe_float(candles[i + j].get("high"))
 
             if left is None or right is None:
                 valid = False
@@ -201,10 +270,7 @@ def find_swing_highs(candles, strength=2):
                 break
 
         if valid:
-            result.append({
-                "index": i,
-                "price": high
-            })
+            result.append({"index": i, "price": high})
 
     return result
 
@@ -215,26 +281,16 @@ def find_swing_lows(candles, strength=2):
 
     result = []
 
-    for i in range(
-        strength,
-        len(candles) - strength
-    ):
-        low = safe_float(
-            candles[i].get("low")
-        )
-
+    for i in range(strength, len(candles) - strength):
+        low = safe_float(candles[i].get("low"))
         if low is None:
             continue
 
         valid = True
 
         for j in range(1, strength + 1):
-            left = safe_float(
-                candles[i - j].get("low")
-            )
-            right = safe_float(
-                candles[i + j].get("low")
-            )
+            left = safe_float(candles[i - j].get("low"))
+            right = safe_float(candles[i + j].get("low"))
 
             if left is None or right is None:
                 valid = False
@@ -245,10 +301,7 @@ def find_swing_lows(candles, strength=2):
                 break
 
         if valid:
-            result.append({
-                "index": i,
-                "price": low
-            })
+            result.append({"index": i, "price": low})
 
     return result
 
@@ -273,16 +326,10 @@ def market_structure(candles):
     previous_low = lows[-2]["price"]
     current_low = lows[-1]["price"]
 
-    if (
-        current_high > previous_high
-        and current_low > previous_low
-    ):
+    if current_high > previous_high and current_low > previous_low:
         return "BULLISH"
 
-    if (
-        current_high < previous_high
-        and current_low < previous_low
-    ):
+    if current_high < previous_high and current_low < previous_low:
         return "BEARISH"
 
     return "RANGE"
@@ -323,7 +370,42 @@ def ema_direction(candles):
 
 
 # ============================================================
-# STOP HUNT
+# 15M MTF CONFIRMATION
+# ============================================================
+
+def mtf_confirmation(m15, direction):
+    """بررسی تأیید 15M با EMA 9 و 21"""
+    if not m15 or len(m15) < 30:
+        return False
+
+    closes = [
+        safe_float(c.get("close"))
+        for c in m15[-50:]
+        if safe_float(c.get("close")) is not None
+    ]
+
+    if len(closes) < 21:
+        return False
+
+    ema_fast = ema(closes, 9)
+    ema_slow = ema(closes, 21)
+
+    if ema_fast is None or ema_slow is None:
+        return False
+
+    price = closes[-1]
+
+    if direction == "LONG":
+        return price > ema_fast > ema_slow
+
+    if direction == "SHORT":
+        return price < ema_fast < ema_slow
+
+    return False
+
+
+# ============================================================
+# STRATEGY 1: STOP HUNT
 # ============================================================
 
 def detect_stop_hunt(candles, lookback=15):
@@ -336,7 +418,6 @@ def detect_stop_hunt(candles, lookback=15):
         }
 
     current = candles[-1]
-
     previous = candles[-lookback - 1:-1]
 
     highs = [
@@ -373,12 +454,8 @@ def detect_stop_hunt(candles, lookback=15):
         }
 
     body = candle_body(current)
-
     if body <= 0:
-        body = max(
-            abs(h - l) * 0.15,
-            0.00000001
-        )
+        body = max(abs(h - l) * 0.15, 0.00000001)
 
     # SHORT sweep
     if h > high_level and c < high_level:
@@ -409,8 +486,9 @@ def detect_stop_hunt(candles, lookback=15):
 
 
 # ============================================================
-# THREE TAP
+# STRATEGY 2: THREE TAP
 # ============================================================
+
 def detect_three_tap(candles, tolerance=0.006):
     if not candles or len(candles) < 35:
         return {
@@ -421,12 +499,10 @@ def detect_three_tap(candles, tolerance=0.006):
         }
 
     recent = candles[-80:]
-
     highs = find_swing_highs(recent, 2)
     lows = find_swing_lows(recent, 2)
 
     current = candles[-1]
-
     o, h, l, c = candle_values(current)
 
     if None in (o, h, l, c):
@@ -441,46 +517,22 @@ def detect_three_tap(candles, tolerance=0.006):
     upper = upper_wick(current)
     lower = lower_wick(current)
 
-    # ========================================================
     # THREE HIGH TAPS -> SHORT
-    # ========================================================
-
     if len(highs) >= 3:
-
         taps = highs[-3:]
         levels = [x["price"] for x in taps]
         level = mean(levels)
 
         if level > 0:
-
-            deviation = max(
-                abs(x - level) / level
-                for x in levels
-            )
+            deviation = max(abs(x - level) / level for x in levels)
 
             if deviation <= tolerance:
-
-                # Price must actually attack the zone
                 touched = h >= level * (1 - tolerance)
-
-                # Must reject the zone
                 rejected = c < level
-
-                # Candle must have meaningful body
-                body_ok = body >= max(
-                    (h - l) * 0.20,
-                    0.00000001
-                )
-
-                # Prefer visible upper rejection
+                body_ok = body >= max((h - l) * 0.20, 0.00000001)
                 wick_ok = upper >= body * 0.40
 
-                if (
-                    touched
-                    and rejected
-                    and body_ok
-                    and wick_ok
-                ):
+                if touched and rejected and body_ok and wick_ok:
                     return {
                         "matched": True,
                         "direction": "SHORT",
@@ -488,46 +540,22 @@ def detect_three_tap(candles, tolerance=0.006):
                         "reason": "THREE_HIGH_TAPS_REJECTION"
                     }
 
-    # ========================================================
     # THREE LOW TAPS -> LONG
-    # ========================================================
-
     if len(lows) >= 3:
-
         taps = lows[-3:]
         levels = [x["price"] for x in taps]
         level = mean(levels)
 
         if level > 0:
-
-            deviation = max(
-                abs(x - level) / level
-                for x in levels
-            )
+            deviation = max(abs(x - level) / level for x in levels)
 
             if deviation <= tolerance:
-
-                # Price must actually attack the zone
                 touched = l <= level * (1 + tolerance)
-
-                # Must reclaim the zone
                 reclaimed = c > level
-
-                # Candle must have meaningful body
-                body_ok = body >= max(
-                    (h - l) * 0.20,
-                    0.00000001
-                )
-
-                # Prefer visible lower rejection
+                body_ok = body >= max((h - l) * 0.20, 0.00000001)
                 wick_ok = lower >= body * 0.40
 
-                if (
-                    touched
-                    and reclaimed
-                    and body_ok
-                    and wick_ok
-                ):
+                if touched and reclaimed and body_ok and wick_ok:
                     return {
                         "matched": True,
                         "direction": "LONG",
@@ -542,8 +570,9 @@ def detect_three_tap(candles, tolerance=0.006):
         "reason": "NO_THREE_TAP"
     }
 
+
 # ============================================================
-# LIQUIDITY ZONE
+# STRATEGY 3: LIQUIDITY ZONE
 # ============================================================
 
 def detect_liquidity_zone(candles, tolerance=0.006):
@@ -556,12 +585,10 @@ def detect_liquidity_zone(candles, tolerance=0.006):
         }
 
     recent = candles[-80:]
-
     highs = find_swing_highs(recent, 2)
     lows = find_swing_lows(recent, 2)
 
     current = candles[-1]
-
     o, h, l, c = candle_values(current)
 
     if None in (o, h, l, c):
@@ -576,50 +603,24 @@ def detect_liquidity_zone(candles, tolerance=0.006):
     upper = upper_wick(current)
     lower = lower_wick(current)
 
-    # ========================================================
     # HIGH LIQUIDITY ZONE -> SHORT
-    # ========================================================
-
     if len(highs) >= 3:
-
-        candidates = [
-            x["price"]
-            for x in highs[-6:]
-        ]
+        candidates = [x["price"] for x in highs[-6:]]
 
         for base in candidates:
-
             cluster = [
-                x
-                for x in candidates
+                x for x in candidates
                 if abs(x - base) / base <= tolerance
             ]
 
             if len(cluster) >= 3:
-
                 zone = mean(cluster)
-
-                # Sweep above liquidity
                 swept = h > zone
-
-                # Close back below liquidity
                 reclaimed = c < zone
-
-                # Meaningful candle
-                body_ok = body >= max(
-                    (h - l) * 0.20,
-                    0.00000001
-                )
-
-                # Rejection from above
+                body_ok = body >= max((h - l) * 0.20, 0.00000001)
                 wick_ok = upper >= body * 0.40
 
-                if (
-                    swept
-                    and reclaimed
-                    and body_ok
-                    and wick_ok
-                ):
+                if swept and reclaimed and body_ok and wick_ok:
                     return {
                         "matched": True,
                         "direction": "SHORT",
@@ -627,50 +628,24 @@ def detect_liquidity_zone(candles, tolerance=0.006):
                         "reason": "HIGH_LIQUIDITY_SWEEP_REJECTION"
                     }
 
-    # ========================================================
     # LOW LIQUIDITY ZONE -> LONG
-    # ========================================================
-
     if len(lows) >= 3:
-
-        candidates = [
-            x["price"]
-            for x in lows[-6:]
-        ]
+        candidates = [x["price"] for x in lows[-6:]]
 
         for base in candidates:
-
             cluster = [
-                x
-                for x in candidates
+                x for x in candidates
                 if abs(x - base) / base <= tolerance
             ]
 
             if len(cluster) >= 3:
-
                 zone = mean(cluster)
-
-                # Sweep below liquidity
                 swept = l < zone
-
-                # Close back above liquidity
                 reclaimed = c > zone
-
-                # Meaningful candle
-                body_ok = body >= max(
-                    (h - l) * 0.20,
-                    0.00000001
-                )
-
-                # Rejection from below
+                body_ok = body >= max((h - l) * 0.20, 0.00000001)
                 wick_ok = lower >= body * 0.40
 
-                if (
-                    swept
-                    and reclaimed
-                    and body_ok
-                    and wick_ok
-                ):
+                if swept and reclaimed and body_ok and wick_ok:
                     return {
                         "matched": True,
                         "direction": "LONG",
@@ -683,11 +658,383 @@ def detect_liquidity_zone(candles, tolerance=0.006):
         "direction": None,
         "level": None,
         "reason": "NO_LIQUIDITY_ZONE"
-}
+    }
+
+
+# ============================================================
+# STRATEGY 4: BREAKER BLOCK (NEW)
+# ============================================================
+
+def detect_breaker_block(candles, lookback=40, tolerance=0.004):
+    """
+    Breaker Block:
+    یک Order Block که قیمت آن را با قدرت شکسته و حالا نقشش برعکس شده.
+    برگشت قیمت به این منطقه = فرصت ورود در جهت مخالف.
+
+    SHORT: Bullish OB شکسته شده + FVG + برگشت به منطقه + کندل نزولی
+    LONG : Bearish OB شکسته شده + FVG + برگشت به منطقه + کندل صعودی
+    """
+    if not candles or len(candles) < lookback + 5:
+        return {
+            "matched": False,
+            "direction": None,
+            "level": None,
+            "reason": "INSUFFICIENT_DATA"
+        }
+
+    recent = candles[-lookback:]
+    current = candles[-1]
+
+    o, h, l, c = candle_values(current)
+    if None in (o, h, l, c):
+        return {
+            "matched": False,
+            "direction": None,
+            "level": None,
+            "reason": "INVALID_CANDLE"
+        }
+
+    body = candle_body(current)
+    upper = upper_wick(current)
+    lower = lower_wick(current)
+
+    # ---- SHORT: Bullish OB -> شکسته شده ----
+    for i in range(2, len(recent) - 3):
+        ob = recent[i]
+        ob_o, ob_h, ob_l, ob_c = candle_values(ob)
+
+        if None in (ob_o, ob_h, ob_l, ob_c):
+            continue
+
+        # Bullish OB: کندل نزولی
+        if ob_c >= ob_o:
+            continue
+
+        ob_high = max(ob_o, ob_c)
+        ob_low = ob_l
+
+        # بررسی شکست با قدرت
+        broken = False
+        break_index = None
+
+        for j in range(i + 1, min(i + 8, len(recent))):
+            nxt = recent[j]
+            nxt_o, nxt_h, nxt_l, nxt_c = candle_values(nxt)
+
+            if None in (nxt_o, nxt_h, nxt_l, nxt_c):
+                continue
+
+            # شکست نزولی قوی: بسته شدن زیر OB low
+            if nxt_c < ob_low and nxt_c < nxt_o:
+                broken = True
+                break_index = j
+                break
+
+        if not broken:
+            continue
+
+        # بررسی FVG در شکست
+        fvg_present = False
+        if break_index is not None and break_index + 2 < len(recent):
+            k1 = recent[break_index]
+            k3 = recent[break_index + 2]
+
+            _, k1_h, _, _ = candle_values(k1)
+            _, _, k3_l, _ = candle_values(k3)
+
+            if k1_h is not None and k3_l is not None:
+                if k1_h < k3_l:
+                    fvg_present = True
+
+        # برگشت قیمت به منطقه Breaker (OB high/low سابق)
+        zone_top = ob_high
+        zone_bottom = ob_low
+
+        # قیمت باید به منطقه برگشته باشد
+        touched = h >= zone_bottom and l <= zone_top
+
+        if not touched:
+            continue
+
+        # کندل نزولی با رد شدن از منطقه
+        bearish_rejection = (
+            c < o
+            and c < zone_top
+            and upper >= body * 0.35
+        )
+
+        body_ok = body >= max((h - l) * 0.20, 0.00000001)
+
+        if bearish_rejection and body_ok:
+            return {
+                "matched": True,
+                "direction": "SHORT",
+                "level": zone_top,
+                "reason": (
+                    "BREAKER_BLOCK_SHORT"
+                    + ("_FVG" if fvg_present else "")
+                )
+            }
+
+    # ---- LONG: Bearish OB -> شکسته شده ----
+    for i in range(2, len(recent) - 3):
+        ob = recent[i]
+        ob_o, ob_h, ob_l, ob_c = candle_values(ob)
+
+        if None in (ob_o, ob_h, ob_l, ob_c):
+            continue
+
+        # Bearish OB: کندل صعودی
+        if ob_c <= ob_o:
+            continue
+
+        ob_high = ob_h
+        ob_low = min(ob_o, ob_c)
+
+        broken = False
+        break_index = None
+
+        for j in range(i + 1, min(i + 8, len(recent))):
+            nxt = recent[j]
+            nxt_o, nxt_h, nxt_l, nxt_c = candle_values(nxt)
+
+            if None in (nxt_o, nxt_h, nxt_l, nxt_c):
+                continue
+
+            # شکست صعودی قوی: بسته شدن بالای OB high
+            if nxt_c > ob_high and nxt_c > nxt_o:
+                broken = True
+                break_index = j
+                break
+
+        if not broken:
+            continue
+
+        # FVG در شکست
+        fvg_present = False
+        if break_index is not None and break_index + 2 < len(recent):
+            k1 = recent[break_index]
+            k3 = recent[break_index + 2]
+
+            _, _, k1_l, _ = candle_values(k1)
+            _, k3_h, _, _ = candle_values(k3)
+
+            if k1_l is not None and k3_h is not None:
+                if k1_l > k3_h:
+                    fvg_present = True
+
+        zone_top = ob_high
+        zone_bottom = ob_low
+
+        touched = h >= zone_bottom and l <= zone_top
+
+        if not touched:
+            continue
+
+        bullish_rejection = (
+            c > o
+            and c > zone_bottom
+            and lower >= body * 0.35
+        )
+
+        body_ok = body >= max((h - l) * 0.20, 0.00000001)
+
+        if bullish_rejection and body_ok:
+            return {
+                "matched": True,
+                "direction": "LONG",
+                "level": zone_bottom,
+                "reason": (
+                    "BREAKER_BLOCK_LONG"
+                    + ("_FVG" if fvg_present else "")
+                )
+            }
+
+    return {
+        "matched": False,
+        "direction": None,
+        "level": None,
+        "reason": "NO_BREAKER_BLOCK"
+    }
+
+
+# ============================================================
+# STRATEGY 5: FVG FILL (NEW)
+# ============================================================
+
+def find_fvgs(candles, lookback=50):
+    """
+    پیدا کردن تمام FVGها در بازه اخیر.
+    خروجی: لیست دیکشنری با top, bottom, direction, index, filled
+    """
+    fvgs = []
+
+    if not candles or len(candles) < 5:
+        return fvgs
+
+    recent = candles[-lookback:]
+
+    for i in range(1, len(recent) - 1):
+        k1 = recent[i - 1]
+        k2 = recent[i]
+        k3 = recent[i + 1]
+
+        _, k1_h, k1_l, _ = candle_values(k1)
+        _, _, _, _ = candle_values(k2)
+        _, k3_h, k3_l, _ = candle_values(k3)
+
+        if None in (k1_h, k1_l, k3_h, k3_l):
+            continue
+
+        # Bullish FVG: k1.high < k3.low
+        if k1_h < k3_l:
+            fvgs.append({
+                "index": i,
+                "top": k3_l,
+                "bottom": k1_h,
+                "direction": "LONG",
+                "ce": (k3_l + k1_h) / 2,
+                "filled": False,
+                "touch_count": 0,
+            })
+
+        # Bearish FVG: k1.low > k3.high
+        if k1_l > k3_h:
+            fvgs.append({
+                "index": i,
+                "top": k1_l,
+                "bottom": k3_h,
+                "direction": "SHORT",
+                "ce": (k1_l + k3_h) / 2,
+                "filled": False,
+                "touch_count": 0,
+            })
+
+    return fvgs
+
+
+def detect_fvg_fill(candles, lookback=50):
+    """
+    FVG Fill:
+    قیمت به یک FVG برمی‌گردد و به 50% آن (CE) واکنش نشان می‌دهد.
+    فقط لمس اول و دوم معتبر است.
+    """
+    if not candles or len(candles) < 10:
+        return {
+            "matched": False,
+            "direction": None,
+            "level": None,
+            "reason": "INSUFFICIENT_DATA"
+        }
+
+    fvgs = find_fvgs(candles, lookback)
+
+    if not fvgs:
+        return {
+            "matched": False,
+            "direction": None,
+            "level": None,
+            "reason": "NO_FVG"
+        }
+
+    current = candles[-1]
+    o, h, l, c = candle_values(current)
+
+    if None in (o, h, l, c):
+        return {
+            "matched": False,
+            "direction": None,
+            "level": None,
+            "reason": "INVALID_CANDLE"
+        }
+
+    body = candle_body(current)
+    upper = upper_wick(current)
+    lower = lower_wick(current)
+
+    # جدیدترین FVGها را اول بررسی کن
+    for fvg in reversed(fvgs[-15:]):
+
+        top = fvg["top"]
+        bottom = fvg["bottom"]
+        ce = fvg["ce"]
+        direction = fvg["direction"]
+
+        # شمارش لمس‌ها
+        touch_count = 0
+        for k in candles[-30:]:
+            _, kh, kl, _ = candle_values(k)
+            if kh is None or kl is None:
+                continue
+            if kh >= bottom and kl <= top:
+                touch_count += 1
+
+        fvg["touch_count"] = touch_count
+
+        # فقط لمس اول و دوم معتبر
+        if touch_count > 2:
+            continue
+
+        # ---- LONG: Bullish FVG ----
+        if direction == "LONG":
+            # قیمت باید به CE رسیده باشد
+            reached_ce = l <= ce <= h or l <= bottom
+
+            if not reached_ce:
+                continue
+
+            # کندل صعودی با رد از پایین
+            bullish_rejection = (
+                c > o
+                and c > bottom
+                and lower >= body * 0.30
+            )
+
+            body_ok = body >= max((h - l) * 0.20, 0.00000001)
+
+            if bullish_rejection and body_ok:
+                return {
+                    "matched": True,
+                    "direction": "LONG",
+                    "level": ce,
+                    "reason": f"FVG_FILL_LONG_TOUCH{touch_count}"
+                }
+
+        # ---- SHORT: Bearish FVG ----
+        if direction == "SHORT":
+            reached_ce = l <= ce <= h or h >= top
+
+            if not reached_ce:
+                continue
+
+            bearish_rejection = (
+                c < o
+                and c < top
+                and upper >= body * 0.30
+            )
+
+            body_ok = body >= max((h - l) * 0.20, 0.00000001)
+
+            if bearish_rejection and body_ok:
+                return {
+                    "matched": True,
+                    "direction": "SHORT",
+                    "level": ce,
+                    "reason": f"FVG_FILL_SHORT_TOUCH{touch_count}"
+                }
+
+    return {
+        "matched": False,
+        "direction": None,
+        "level": None,
+        "reason": "NO_FVG_FILL"
+    }
+
 
 # ============================================================
 # 5M ENTRY TRIGGER
 # ============================================================
+
 def entry_trigger(candles, direction):
     if not candles or len(candles) < 3:
         return False
@@ -710,86 +1057,46 @@ def entry_trigger(candles, direction):
     upper = upper_wick(current)
     lower = lower_wick(current)
 
-    # ========================================================
-    # LONG
-    # ========================================================
-
     if direction == "LONG":
-
         bullish = c > o
-
-        # Stronger body requirement
         body_ok = body >= candle_range * 0.30
-
-        # Close should be in upper part of candle
         close_position = (c - l) / candle_range
         close_strong = close_position >= 0.65
-
-        # Must show actual momentum
-        momentum = (
-            c > ph
-            or c > pc
-        )
-
-        # Avoid candles with excessive upper rejection
+        momentum = (c > ph or c > pc)
         rejection_ok = upper <= body * 1.20
 
         return (
-            bullish
-            and body_ok
-            and close_strong
-            and momentum
+            bullish and body_ok
+            and close_strong and momentum
             and rejection_ok
         )
 
-    # ========================================================
-    # SHORT
-    # ========================================================
-
     if direction == "SHORT":
-
         bearish = c < o
-
-        # Stronger body requirement
         body_ok = body >= candle_range * 0.30
-
-        # Close should be in lower part of candle
         close_position = (h - c) / candle_range
         close_strong = close_position >= 0.65
-
-        # Must show actual momentum
-        momentum = (
-            c < pl
-            or c < pc
-        )
-
-        # Avoid candles with excessive lower rejection
+        momentum = (c < pl or c < pc)
         rejection_ok = lower <= body * 1.20
 
         return (
-            bearish
-            and body_ok
-            and close_strong
-            and momentum
+            bearish and body_ok
+            and close_strong and momentum
             and rejection_ok
         )
 
     return False
+
+
 # ============================================================
 # TRADE LEVELS
 # ============================================================
 
-def calculate_trade_levels(
-    candles,
-    direction,
-    strategy_level=None
-):
+def calculate_trade_levels(candles, direction, strategy_level=None):
     if not candles or len(candles) < 10:
         return None
 
-    entry = safe_float(
-        candles[-1].get("close")
-    )
+    entry = safe_float(candles[-1].get("close"))
 
     if entry is None or entry <= 0:
         return None
@@ -812,74 +1119,47 @@ def calculate_trade_levels(
         return None
 
     if direction == "LONG":
+        candidates = [x for x in lows if x < entry]
 
-        candidates = [
-            x for x in lows
-            if x < entry
-        ]
-
-        if (
-            strategy_level is not None
-            and strategy_level < entry
-        ):
+        if strategy_level is not None and strategy_level < entry:
             candidates.append(strategy_level)
 
         if not candidates:
             return None
 
         support = max(candidates)
-
         raw_risk = entry - support
 
         if raw_risk <= 0:
             return None
 
-        # Prevent absurdly tiny stop
         minimum_risk = entry * 0.0015
-
-        risk_distance = max(
-            raw_risk,
-            minimum_risk
-        )
+        risk_distance = max(raw_risk, minimum_risk)
 
         sl = entry - risk_distance
-
         tp1 = entry + risk_distance * 1.5
         tp2 = entry + risk_distance * 2.5
         tp3 = entry + risk_distance * 3.0
 
     elif direction == "SHORT":
+        candidates = [x for x in highs if x > entry]
 
-        candidates = [
-            x for x in highs
-            if x > entry
-        ]
-
-        if (
-            strategy_level is not None
-            and strategy_level > entry
-        ):
+        if strategy_level is not None and strategy_level > entry:
             candidates.append(strategy_level)
 
         if not candidates:
             return None
 
         resistance = min(candidates)
-
         raw_risk = resistance - entry
 
         if raw_risk <= 0:
             return None
 
         minimum_risk = entry * 0.0015
-
-        risk_distance = max(
-            raw_risk,
-            minimum_risk
-        )
+        risk_distance = max(raw_risk, minimum_risk)
 
         sl = entry + risk_distance
-
         tp1 = entry - risk_distance * 1.5
         tp2 = entry - risk_distance * 2.5
         tp3 = entry - risk_distance * 3.0
@@ -909,25 +1189,18 @@ def no_trade(
     h1="RANGE",
     rsi_15m=None,
     strategy_details=None,
-    score=0
+    score=0,
+    adx_1h=None,
+    adx_15m=None,
+    mtf_confirmed=False,
 ):
     if strategy_details is None:
         strategy_details = {
-            "STOP_HUNT": {
-                "matched": False,
-                "direction": None,
-                "reason": "NOT_CHECKED"
-            },
-            "THREE_TAP": {
-                "matched": False,
-                "direction": None,
-                "reason": "NOT_CHECKED"
-            },
-            "LIQUIDITY_ZONE": {
-                "matched": False,
-                "direction": None,
-                "reason": "NOT_CHECKED"
-            }
+            "STOP_HUNT": {"matched": False, "direction": None, "reason": "NOT_CHECKED"},
+            "THREE_TAP": {"matched": False, "direction": None, "reason": "NOT_CHECKED"},
+            "LIQUIDITY_ZONE": {"matched": False, "direction": None, "reason": "NOT_CHECKED"},
+            "BREAKER_BLOCK": {"matched": False, "direction": None, "reason": "NOT_CHECKED"},
+            "FVG_FILL": {"matched": False, "direction": None, "reason": "NOT_CHECKED"},
         }
 
     return {
@@ -941,6 +1214,9 @@ def no_trade(
         "1h": h1,
 
         "rsi_15m": rsi_15m,
+        "adx_1h": adx_1h,
+        "adx_15m": adx_15m,
+        "mtf_confirmed": mtf_confirmed,
 
         "volume_spike": False,
         "confirmation": False,
@@ -954,6 +1230,8 @@ def no_trade(
         "stop_hunt": False,
         "three_tap": False,
         "liquidity_zone": False,
+        "breaker_block": False,
+        "fvg_fill": False,
 
         "entry": None,
         "sl": None,
@@ -971,7 +1249,9 @@ def no_trade(
 # ============================================================
 # MAIN ENGINE
 # ============================================================
+
 def generate_signal(daily, h4, h1, m15, m5):
+
     if not all([daily, h4, h1, m15, m5]):
         return no_trade("INSUFFICIENT_MARKET_DATA")
 
@@ -993,16 +1273,26 @@ def generate_signal(daily, h4, h1, m15, m5):
     volume_is_spike = volume_spike(m5)
 
     # --------------------------------------------------------
-    # STRATEGIES
+    # ADX REGIME
+    # --------------------------------------------------------
+    adx_1h = calculate_adx(h1)
+    adx_15m = calculate_adx(m15)
+
+    # --------------------------------------------------------
+    # STRATEGIES (5M)
     # --------------------------------------------------------
     stop_hunt = detect_stop_hunt(m5)
     three_tap = detect_three_tap(m5)
     liquidity_zone = detect_liquidity_zone(m5)
+    breaker_block = detect_breaker_block(m5)
+    fvg_fill = detect_fvg_fill(m5)
 
     strategy_details = {
         "STOP_HUNT": stop_hunt,
         "THREE_TAP": three_tap,
-        "LIQUIDITY_ZONE": liquidity_zone
+        "LIQUIDITY_ZONE": liquidity_zone,
+        "BREAKER_BLOCK": breaker_block,
+        "FVG_FILL": fvg_fill,
     }
 
     # --------------------------------------------------------
@@ -1014,10 +1304,7 @@ def generate_signal(daily, h4, h1, m15, m5):
         if not isinstance(data, dict):
             continue
 
-        if data.get("matched") and data.get("direction") in (
-            "LONG",
-            "SHORT"
-        ):
+        if data.get("matched") and data.get("direction") in ("LONG", "SHORT"):
             valid_setups.append(name)
 
     # --------------------------------------------------------
@@ -1030,18 +1317,13 @@ def generate_signal(daily, h4, h1, m15, m5):
             h4_direction,
             h1_direction,
             rsi_15m,
-            strategy_details
+            strategy_details,
+            adx_1h=adx_1h,
+            adx_15m=adx_15m,
         )
 
     # --------------------------------------------------------
     # DETERMINE DIRECTION
-    #
-    # 1H BULLISH -> LONG
-    # 1H BEARISH -> SHORT
-    #
-    # 1H RANGE -> direction comes from valid setup.
-    # If multiple setups exist with different directions,
-    # do NOT guess. Reject the trade.
     # --------------------------------------------------------
     if h1_direction == "BULLISH":
         direction = "LONG"
@@ -1060,84 +1342,59 @@ def generate_signal(daily, h4, h1, m15, m5):
 
         unique_directions = list(set(setup_directions))
 
-        # No usable setup direction
         if not unique_directions:
             return no_trade(
                 "1H_RANGE_NO_DIRECTION",
-                daily_direction,
-                h4_direction,
-                h1_direction,
-                rsi_15m,
-                strategy_details
+                daily_direction, h4_direction, h1_direction,
+                rsi_15m, strategy_details,
+                adx_1h=adx_1h, adx_15m=adx_15m,
             )
 
-        # Conflicting setups = no trade
         if len(unique_directions) > 1:
             return no_trade(
                 "1H_RANGE_CONFLICTING_SETUPS",
-                daily_direction,
-                h4_direction,
-                h1_direction,
-                rsi_15m,
-                strategy_details
+                daily_direction, h4_direction, h1_direction,
+                rsi_15m, strategy_details,
+                adx_1h=adx_1h, adx_15m=adx_15m,
             )
 
         direction = unique_directions[0]
 
     # --------------------------------------------------------
-    # FIND STRATEGIES MATCHING FINAL DIRECTION
+    # MATCHING STRATEGIES
     # --------------------------------------------------------
     matching_strategies = []
 
     for name, data in strategy_details.items():
-
         if not isinstance(data, dict):
             continue
-
         if not data.get("matched"):
             continue
-
         if data.get("direction") == direction:
             matching_strategies.append(name)
 
-    # --------------------------------------------------------
-    # IMPORTANT:
-    # A strategy may exist but be opposite to final direction.
-    # --------------------------------------------------------
     if not matching_strategies:
-
         opposite_strategies = []
 
         for name, data in strategy_details.items():
-
             if not isinstance(data, dict):
                 continue
-
             if not data.get("matched"):
                 continue
-
             strategy_direction = data.get("direction")
-
             if strategy_direction:
-                opposite_strategies.append(
-                    f"{name}_{strategy_direction}"
-                )
+                opposite_strategies.append(f"{name}_{strategy_direction}")
 
         if opposite_strategies:
-            reason = (
-                "STRATEGY_OPPOSITE_DIRECTION:"
-                + ",".join(opposite_strategies)
-            )
+            reason = "STRATEGY_OPPOSITE_DIRECTION:" + ",".join(opposite_strategies)
         else:
             reason = "NO_MATCHING_SETUP"
 
         return no_trade(
             reason,
-            daily_direction,
-            h4_direction,
-            h1_direction,
-            rsi_15m,
-            strategy_details
+            daily_direction, h4_direction, h1_direction,
+            rsi_15m, strategy_details,
+            adx_1h=adx_1h, adx_15m=adx_15m,
         )
 
     # --------------------------------------------------------
@@ -1148,194 +1405,143 @@ def generate_signal(daily, h4, h1, m15, m5):
     if not confirmation:
         return no_trade(
             "5M_ENTRY_TRIGGER_MISSING",
-            daily_direction,
-            h4_direction,
-            h1_direction,
-            rsi_15m,
-            strategy_details
+            daily_direction, h4_direction, h1_direction,
+            rsi_15m, strategy_details,
+            adx_1h=adx_1h, adx_15m=adx_15m,
+        )
+
+    # --------------------------------------------------------
+    # 15M MTF CONFIRMATION
+    # --------------------------------------------------------
+    mtf_confirmed = mtf_confirmation(m15, direction)
+
+    if not mtf_confirmed:
+        return no_trade(
+            "MTF_15M_NOT_CONFIRMED",
+            daily_direction, h4_direction, h1_direction,
+            rsi_15m, strategy_details,
+            adx_1h=adx_1h, adx_15m=adx_15m,
+            mtf_confirmed=False,
         )
 
     # --------------------------------------------------------
     # SCORE
-    #
-    # IMPORTANT:
-    # We no longer start from 8.
-    #
-    # This prevents every valid setup from automatically
-    # becoming HIGH.
     # --------------------------------------------------------
     score = 0
 
-    # --------------------------------------------------------
-    # CORE SETUP
-    # --------------------------------------------------------
+    # CORE SETUP (max 4)
+    score += 2  # valid strategy
+    score += 2  # valid 5M entry
 
-    # Valid strategy
-    score += 2
-
-    # Valid 5M entry confirmation
-    score += 2
-
-    # --------------------------------------------------------
-    # 1H CONTEXT
-    # --------------------------------------------------------
-
+    # 1H CONTEXT (max 2)
     if h1_direction in ("BULLISH", "BEARISH"):
-
-        # Strategy agrees with 1H
         score += 2
-
     else:
-        # 1H RANGE:
-        # setup itself provides the direction,
-        # therefore only a smaller bonus.
         score += 1
 
-    # --------------------------------------------------------
-    # MULTIPLE STRATEGIES
-    # --------------------------------------------------------
-
+    # MULTIPLE STRATEGIES (max 2)
     if len(matching_strategies) >= 2:
         score += 1
-
     if len(matching_strategies) >= 3:
         score += 1
 
-    # --------------------------------------------------------
-    # DAILY ALIGNMENT
-    # BONUS ONLY
-    # --------------------------------------------------------
-
+    # DAILY + 4H ALIGNMENT (max 2)
     if (
         (direction == "LONG" and daily_direction == "BULLISH")
-        or
-        (direction == "SHORT" and daily_direction == "BEARISH")
+        or (direction == "SHORT" and daily_direction == "BEARISH")
     ):
         score += 1
-
-    # --------------------------------------------------------
-    # 4H ALIGNMENT
-    # BONUS ONLY
-    #
-    # 4H NEVER BLOCKS THE TRADE.
-    # --------------------------------------------------------
 
     if (
         (direction == "LONG" and h4_direction == "BULLISH")
-        or
-        (direction == "SHORT" and h4_direction == "BEARISH")
+        or (direction == "SHORT" and h4_direction == "BEARISH")
     ):
         score += 1
 
-    # --------------------------------------------------------
-    # 15M RSI
-    # --------------------------------------------------------
-
+    # RSI (max 1)
     if rsi_15m is not None:
-
         if direction == "LONG":
-
-            # Healthy bullish range
             if 40 <= rsi_15m < 68:
                 score += 1
-
-            # Strongly overbought = no bonus
             elif rsi_15m >= 68:
                 score -= 1
-
         elif direction == "SHORT":
-
-            # Healthy bearish range
             if 32 < rsi_15m <= 60:
                 score += 1
-
-            # Strongly oversold = no bonus
             elif rsi_15m <= 32:
                 score -= 1
 
-    # --------------------------------------------------------
-    # VOLUME
-    # --------------------------------------------------------
-
+    # VOLUME (max 1)
     if volume_is_spike:
         score += 1
 
-    # --------------------------------------------------------
+    # MTF BONUS
+    if mtf_confirmed:
+        score += 1
+
+    # ADX REGIME FILTER
+    regime_ok = True
+
+    if adx_1h is not None:
+        if adx_1h < 18:
+            regime_ok = False
+            score -= 3
+        elif adx_1h < 25:
+            score -= 1
+        elif adx_1h > 40:
+            score += 1
+
     # RANGE PENALTY
-    #
-    # Range is allowed, but it must prove itself with setup.
-    # --------------------------------------------------------
-
     if h1_direction == "RANGE":
-
-        # A single setup in a range needs stronger confirmation.
         if len(matching_strategies) == 1:
             score -= 1
-
-        # Multiple agreeing setups are stronger.
         elif len(matching_strategies) >= 2:
             score += 1
 
     # --------------------------------------------------------
     # QUALITY GATE
     # --------------------------------------------------------
-
-    # HIGH requires at least 8 points.
-    if score < 8:
-
+    if score < 10 or not regime_ok:
         return no_trade(
             "SIGNAL_QUALITY_TOO_LOW",
-            daily_direction,
-            h4_direction,
-            h1_direction,
-            rsi_15m,
-            strategy_details,
-            score
+            daily_direction, h4_direction, h1_direction,
+            rsi_15m, strategy_details, score,
+            adx_1h=adx_1h, adx_15m=adx_15m,
+            mtf_confirmed=mtf_confirmed,
         )
 
     # --------------------------------------------------------
     # STRATEGY PRIORITY
     # --------------------------------------------------------
     priority = [
+        "BREAKER_BLOCK",
         "STOP_HUNT",
         "LIQUIDITY_ZONE",
-        "THREE_TAP"
+        "FVG_FILL",
+        "THREE_TAP",
     ]
 
     selected_strategy = None
     strategy_level = None
 
     for name in priority:
-
         if name in matching_strategies:
-
             selected_strategy = name
-
-            strategy_level = (
-                strategy_details[name].get("level")
-            )
-
+            strategy_level = strategy_details[name].get("level")
             break
 
     # --------------------------------------------------------
     # TRADE LEVELS
     # --------------------------------------------------------
-    levels = calculate_trade_levels(
-        m5,
-        direction,
-        strategy_level
-    )
+    levels = calculate_trade_levels(m5, direction, strategy_level)
 
     if levels is None:
-
         return no_trade(
             "LEVEL_CALCULATION_FAILED",
-            daily_direction,
-            h4_direction,
-            h1_direction,
-            rsi_15m,
-            strategy_details,
-            score
+            daily_direction, h4_direction, h1_direction,
+            rsi_15m, strategy_details, score,
+            adx_1h=adx_1h, adx_15m=adx_15m,
+            mtf_confirmed=mtf_confirmed,
         )
 
     # --------------------------------------------------------
@@ -1357,6 +1563,10 @@ def generate_signal(daily, h4, h1, m15, m5):
         "1h_ema": h1_ema,
 
         "rsi_15m": rsi_15m,
+        "adx_1h": adx_1h,
+        "adx_15m": adx_15m,
+        "mtf_confirmed": mtf_confirmed,
+
         "volume_spike": volume_is_spike,
         "confirmation": confirmation,
 
@@ -1368,6 +1578,8 @@ def generate_signal(daily, h4, h1, m15, m5):
         "stop_hunt": "STOP_HUNT" in matching_strategies,
         "three_tap": "THREE_TAP" in matching_strategies,
         "liquidity_zone": "LIQUIDITY_ZONE" in matching_strategies,
+        "breaker_block": "BREAKER_BLOCK" in matching_strategies,
+        "fvg_fill": "FVG_FILL" in matching_strategies,
 
         "entry": levels["entry"],
         "sl": levels["sl"],
@@ -1384,5 +1596,5 @@ def generate_signal(daily, h4, h1, m15, m5):
             else "1H_DIRECTION + "
         )
         + selected_strategy
-        + " + 5M_ENTRY"
+        + " + 5M_ENTRY + MTF_15M"
     }
