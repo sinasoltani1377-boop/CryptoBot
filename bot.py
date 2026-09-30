@@ -131,8 +131,10 @@ def load_symbols(min_volume_usdt=10_000_000, max_symbols=30):
             except Exception:
                 continue
 
+        # مرتب‌سازی بر اساس حجم (نزولی)
         candidates.sort(key=lambda x: x[1], reverse=True)
 
+        # انتخاب top N
         selected = [s for s, _ in candidates[:max_symbols]]
 
         logger.info(
