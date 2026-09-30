@@ -12,6 +12,8 @@ from telegram.ext import (
 
 from analysis import generate_signal
 
+from market import get_futures_symbols
+
 from tracker import (
     register_signal,
     check_all_trades,
@@ -20,24 +22,154 @@ from tracker import (
 )
 
 
+# ============================================================
+# CONFIG
+# ============================================================
+
 TOKEN = os.getenv("BOT_TOKEN")
 
 TOOBIT_KLINES_URL = "https://api.toobit.com/quote/v1/klines"
-TOOBIT_TICKER_URL = "https://api.toobit.com/quote/v1/contract/ticker/price"
+
+TOOBIT_TICKER_URL = (
+    "https://api.toobit.com/quote/v1/contract/ticker/price"
+)
+
+TOOBIT_TICKER_24H_URL = (
+    "https://api.toobit.com/quote/v1/contract/ticker/24hr"
+)
 
 
-SYMBOLS = [
-    "BTC-SWAP-USDT",
-    "ETH-SWAP-USDT",
-    "SOL-SWAP-USDT",
-    "BNB-SWAP-USDT",
-    "XRP-SWAP-USDT",
-    "DOGE-SWAP-USDT",
-    "ADA-SWAP-USDT",
-    "AVAX-SWAP-USDT",
-    "LINK-SWAP-USDT",
-    "DOT-SWAP-USDT",
-]
+# ============================================================
+# LOGGING
+# ============================================================
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+
+logger = logging.getLogger(__name__)
+
+_scan_lock = asyncio.Lock()
+
+
+# ============================================================
+# SYMBOLS - AUTO FETCH FROM TOOBIT WITH LIQUIDITY FILTER
+# ============================================================
+
+def load_symbols(min_volume_usdt=1_000_000):
+    """
+    دریافت خودکار ارزهای فیوچرز توبیت با فیلتر نقدینگی.
+
+    min_volume_usdt: حداقل حجم 24 ساعته به دلار
+    """
+    try:
+        all_symbols = get_futures_symbols()
+
+        if not all_symbols:
+            logger.warning("No symbols returned from Toobit")
+            return []
+
+        logger.info(
+            "Fetched %s symbols from Toobit",
+            len(all_symbols),
+        )
+
+        filtered = []
+
+        for symbol in all_symbols:
+            try:
+                response = requests.get(
+                    TOOBIT_TICKER_24H_URL,
+                    params={"symbol": symbol},
+                    timeout=5,
+                )
+
+                if response.status_code != 200:
+                    continue
+
+                data = response.json()
+
+                volume = 0.0
+
+                if isinstance(data, dict):
+                    raw = (
+                        data.get("quoteVolume")
+                        or data.get("volume")
+                        or data.get("q")
+                        or data.get("v")
+                        or 0
+                    )
+                    volume = float(raw) if raw else 0.0
+
+                elif isinstance(data, list):
+                    for item in data:
+                        if not isinstance(item, dict):
+                            continue
+
+                        item_symbol = (
+                            item.get("symbol")
+                            or item.get("s")
+                        )
+
+                        if item_symbol and item_symbol != symbol:
+                            continue
+
+                        raw = (
+                            item.get("quoteVolume")
+                            or item.get("volume")
+                            or item.get("q")
+                            or item.get("v")
+                            or 0
+                        )
+                        volume = float(raw) if raw else 0.0
+                        break
+
+                if volume >= min_volume_usdt:
+                    filtered.append(symbol)
+
+            except Exception as e:
+                logger.debug(
+                    "Volume check failed for %s: %s",
+                    symbol,
+                    e,
+                )
+                continue
+
+        logger.info(
+            "Filtered %s/%s symbols with volume > %s USDT",
+            len(filtered),
+            len(all_symbols),
+            min_volume_usdt,
+        )
+
+        if filtered:
+            return filtered
+
+        logger.warning(
+            "No symbols passed liquidity filter. "
+            "Falling back to top symbols."
+        )
+
+    except Exception as e:
+        logger.error("Failed to load symbols: %s", e)
+
+    logger.warning("Using fallback symbol list")
+    return [
+        "BTC-SWAP-USDT",
+        "ETH-SWAP-USDT",
+        "SOL-SWAP-USDT",
+        "BNB-SWAP-USDT",
+        "XRP-SWAP-USDT",
+        "DOGE-SWAP-USDT",
+        "ADA-SWAP-USDT",
+        "AVAX-SWAP-USDT",
+        "LINK-SWAP-USDT",
+        "DOT-SWAP-USDT",
+    ]
+
+
+SYMBOLS = load_symbols(min_volume_usdt=1_000_000)
 
 
 INTERVALS = {
@@ -49,15 +181,9 @@ INTERVALS = {
 }
 
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-)
-
-logger = logging.getLogger(__name__)
-
-_scan_lock = asyncio.Lock()
-
+# ============================================================
+# CANDLE NORMALIZATION
+# ============================================================
 
 def safe_number(value):
     try:
@@ -129,6 +255,10 @@ def normalize_candles(data):
     return candles
 
 
+# ============================================================
+# TOOBIT MARKET DATA
+# ============================================================
+
 def get_klines(symbol, interval, limit=200):
     try:
         params = {"symbol": symbol, "interval": interval, "limit": limit}
@@ -165,6 +295,10 @@ def get_market_data(symbol):
 
     return {"1d": daily, "4h": h4, "1h": h1, "15m": m15, "5m": m5}
 
+
+# ============================================================
+# PRICE
+# ============================================================
 
 def get_price(symbol):
     try:
@@ -214,6 +348,10 @@ def get_price(symbol):
         return None
 
 
+# ============================================================
+# TRACKER HELPERS
+# ============================================================
+
 def already_tracking(symbol, direction):
     try:
         open_trades = get_open_trades()
@@ -261,6 +399,10 @@ def register_high_signal(symbol, result):
     return trade
 
 
+# ============================================================
+# STRATEGY DIAGNOSTIC
+# ============================================================
+
 def log_strategy_details(symbol, result):
     details = result.get("strategy_details")
 
@@ -290,6 +432,10 @@ def log_strategy_details(symbol, result):
             " | ".join(strategy_status),
         )
 
+
+# ============================================================
+# FULL DIAGNOSTIC
+# ============================================================
 
 def log_signal_diagnostic(symbol, result):
     if not isinstance(result, dict):
@@ -341,6 +487,10 @@ def log_signal_diagnostic(symbol, result):
     log_strategy_details(symbol, result)
 
 
+# ============================================================
+# SIGNAL TEXT
+# ============================================================
+
 def signal_text(symbol, result):
     direction = result.get("direction", "UNKNOWN")
 
@@ -388,6 +538,10 @@ def signal_text(symbol, result):
     )
 
 
+# ============================================================
+# RAW ANALYSIS
+# ============================================================
+
 def analyze_symbol_raw(symbol):
     market_data = get_market_data(symbol)
 
@@ -408,18 +562,28 @@ def analyze_symbol_raw(symbol):
     return result
 
 
+# ============================================================
+# /START
+# ============================================================
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_ids = context.application.bot_data.setdefault("chat_ids", set())
     chat_ids.add(update.effective_chat.id)
 
     await update.message.reply_text(
-        "🤖 CryptoBot فعال است.\n\n"
+        f"🤖 CryptoBot فعال است.\n"
+        f"📊 تعداد ارزهای در حال اسکن: {len(SYMBOLS)}\n\n"
         "دستورات:\n"
         "/price - قیمت BTC و SOL\n"
         "/signal - بررسی سیگنال‌های HIGH\n"
-        "/register - ثبت دریافت سیگنال خودکار"
+        "/register - ثبت دریافت سیگنال خودکار\n"
+        "/stats - آمار تریدها"
     )
 
+
+# ============================================================
+# /PRICE
+# ============================================================
 
 async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     btc = get_price("BTC-SWAP-USDT")
@@ -440,11 +604,16 @@ async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="HTML")
 
 
+# ============================================================
+# /SIGNAL
+# ============================================================
+
 async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🔎 در حال بررسی بازار...\n"
+        f"🔎 در حال بررسی {len(SYMBOLS)} ارز...\n"
         "Daily → 4H → 1H → 15M → 5M\n\n"
-        "فقط سیگنال‌های HIGH نمایش داده می‌شوند."
+        "فقط سیگنال‌های HIGH نمایش داده می‌شوند.\n"
+        "این ممکن است چند دقیقه طول بکشد."
     )
 
     found = 0
@@ -484,10 +653,14 @@ async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if found == 0:
         await update.message.reply_text(
-            "⏳ در حال حاضر هیچ سیگنال HIGH معتبری پیدا نشد.\n\n"
+            f"⏳ هیچ سیگنال HIGH در {len(SYMBOLS)} ارز پیدا نشد.\n\n"
             "🔍 جزئیات تشخیص در لاگ ثبت شد."
         )
 
+
+# ============================================================
+# AUTO SCANNER
+# ============================================================
 
 async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
     if _scan_lock.locked():
@@ -495,7 +668,10 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
         return
 
     async with _scan_lock:
-        logger.info("Starting automatic market scan...")
+        logger.info(
+            "Starting automatic market scan across %s symbols...",
+            len(SYMBOLS),
+        )
         found = 0
 
         for symbol in SYMBOLS:
@@ -552,6 +728,10 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
         if found == 0:
             logger.info("No HIGH signals.")
 
+
+# ============================================================
+# TRACK OPEN TRADES
+# ============================================================
 
 async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -622,6 +802,10 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
         logger.exception("Tracker error")
 
 
+# ============================================================
+# /REGISTER
+# ============================================================
+
 async def register_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_ids = context.application.bot_data.setdefault("chat_ids", set())
     chat_ids.add(update.effective_chat.id)
@@ -630,6 +814,10 @@ async def register_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✅ این چت برای دریافت سیگنال‌های خودکار ثبت شد."
     )
 
+
+# ============================================================
+# TRACKER STATS
+# ============================================================
 
 async def tracker_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -653,26 +841,52 @@ async def tracker_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ خطا در دریافت آمار Tracker.")
 
 
+# ============================================================
+# MAIN
+# ============================================================
+
 def main():
     if not TOKEN:
         raise RuntimeError("BOT_TOKEN environment variable is missing.")
 
+    logger.info("=" * 60)
+    logger.info("CryptoBot starting...")
+    logger.info("Symbols to scan: %s", len(SYMBOLS))
+    logger.info("=" * 60)
+
     application = Application.builder().token(TOKEN).build()
 
+    # COMMANDS
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("price", price))
     application.add_handler(CommandHandler("signal", signal))
     application.add_handler(CommandHandler("register", register_chat))
     application.add_handler(CommandHandler("stats", tracker_stats))
 
-    application.job_queue.run_repeating(auto_signal, interval=300, first=10)
-    application.job_queue.run_repeating(track_open_trades, interval=30, first=30)
+    # AUTO SIGNAL SCANNER
+    application.job_queue.run_repeating(
+        auto_signal,
+        interval=300,
+        first=10,
+    )
+
+    # TRADE TRACKER
+    application.job_queue.run_repeating(
+        track_open_trades,
+        interval=30,
+        first=30,
+    )
 
     logger.info("Trade tracker started: every 30 seconds")
+    logger.info("Auto signal scanner started: every 5 minutes")
     logger.info("CryptoBot started successfully.")
 
     application.run_polling(drop_pending_updates=True)
 
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
 
 if __name__ == "__main__":
     main()
