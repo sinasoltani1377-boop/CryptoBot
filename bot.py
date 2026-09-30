@@ -171,7 +171,7 @@ def load_symbols(min_volume_usdt=10_000_000, max_symbols=30):
 
 
 SYMBOLS = load_symbols(
-    min_volume_usdt=10_000_000,
+    min_volume_usdt=50_000_000,
     max_symbols=30,
 )
 
