@@ -1058,32 +1058,50 @@ def entry_trigger(candles, direction):
     lower = lower_wick(current)
 
     if direction == "LONG":
-        bullish = c > o
-        body_ok = body >= candle_range * 0.30
-        close_position = (c - l) / candle_range
-        close_strong = close_position >= 0.65
-        momentum = (c > ph or c > pc)
-        rejection_ok = upper <= body * 1.20
 
-        return (
-            bullish and body_ok
-            and close_strong and momentum
-            and rejection_ok
-        )
+    bullish = c > o
+    body_ok = body >= candle_range * 0.45
+
+    close_position = (c - l) / candle_range
+    close_strong = close_position >= 0.70
+
+    momentum = (
+        c > ph
+        or c > pc
+    )
+
+    rejection_ok = upper <= body * 1.20
+
+    return (
+        bullish
+        and body_ok
+        and close_strong
+        and momentum
+        and rejection_ok
+    )
 
     if direction == "SHORT":
-        bearish = c < o
-        body_ok = body >= candle_range * 0.30
-        close_position = (h - c) / candle_range
-        close_strong = close_position >= 0.65
-        momentum = (c < pl or c < pc)
-        rejection_ok = lower <= body * 1.20
 
-        return (
-            bearish and body_ok
-            and close_strong and momentum
-            and rejection_ok
-        )
+    bearish = c < o
+    body_ok = body >= candle_range * 0.45
+
+    close_position = (h - c) / candle_range
+    close_strong = close_position >= 0.70
+
+    momentum = (
+        c < pl
+        or c < pc
+    )
+
+    rejection_ok = lower <= body * 1.20
+
+    return (
+        bearish
+        and body_ok
+        and close_strong
+        and momentum
+        and rejection_ok
+    )
 
     return False
 
@@ -1133,14 +1151,17 @@ def calculate_trade_levels(candles, direction, strategy_level=None):
         if raw_risk <= 0:
             return None
 
-        minimum_risk = entry * 0.0015
-        risk_distance = max(raw_risk, minimum_risk)
+        minimum_risk = entry * 0.004  # 0.4%
+
+        risk_distance = max(
+        raw_risk,
+        minimum_risk )
 
         sl = entry - risk_distance
+
         tp1 = entry + risk_distance * 1.5
         tp2 = entry + risk_distance * 2.5
         tp3 = entry + risk_distance * 3.0
-
     elif direction == "SHORT":
         candidates = [x for x in highs if x > entry]
 
@@ -1156,14 +1177,18 @@ def calculate_trade_levels(candles, direction, strategy_level=None):
         if raw_risk <= 0:
             return None
 
-        minimum_risk = entry * 0.0015
-        risk_distance = max(raw_risk, minimum_risk)
+        minimum_risk = entry * 0.004  # 0.4%
+
+        risk_distance = max(
+        raw_risk,
+        minimum_risk
+        )
 
         sl = entry + risk_distance
+
         tp1 = entry - risk_distance * 1.5
         tp2 = entry - risk_distance * 2.5
-        tp3 = entry - risk_distance * 3.0
-
+        tp3 = entry - risk_distance * 3.0 
     else:
         return None
 
@@ -1281,12 +1306,39 @@ def generate_signal(daily, h4, h1, m15, m5):
     # --------------------------------------------------------
     # STRATEGIES (5M)
     # --------------------------------------------------------
+
+# ADX 15M FILTER FOR SWEEP STRATEGIES
+# --------------------------------------------------------
+# در رنج شدید (ADX_15M < 15)، استراتژی‌های سوییپ کاذب‌اند
+# فقط BREAKER_BLOCK و FVG_FILL معتبر می‌مانند
+adx_m15_for_filter = calculate_adx(m15)
+
+if adx_m15_for_filter is not None and adx_m15_for_filter < 15:
+    stop_hunt = {
+        "matched": False,
+        "direction": None,
+        "level": None,
+        "reason": "ADX_15M_LOW_RANGE",
+    }
+    three_tap = {
+        "matched": False,
+        "direction": None,
+        "level": None,
+        "reason": "ADX_15M_LOW_RANGE",
+    }
+    liquidity_zone = {
+        "matched": False,
+        "direction": None,
+        "level": None,
+        "reason": "ADX_15M_LOW_RANGE",
+    }
+else:
     stop_hunt = detect_stop_hunt(m5)
     three_tap = detect_three_tap(m5)
     liquidity_zone = detect_liquidity_zone(m5)
-    breaker_block = detect_breaker_block(m5)
-    fvg_fill = detect_fvg_fill(m5)
 
+breaker_block = detect_breaker_block(m5)
+fvg_fill = detect_fvg_fill(m5)
     strategy_details = {
         "STOP_HUNT": stop_hunt,
         "THREE_TAP": three_tap,
