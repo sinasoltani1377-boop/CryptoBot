@@ -20,17 +20,10 @@ from tracker import (
 )
 
 
-# ============================================================
-# CONFIG
-# ============================================================
-
 TOKEN = os.getenv("BOT_TOKEN")
 
 TOOBIT_KLINES_URL = "https://api.toobit.com/quote/v1/klines"
-
-TOOBIT_TICKER_URL = (
-    "https://api.toobit.com/quote/v1/contract/ticker/price"
-)
+TOOBIT_TICKER_URL = "https://api.toobit.com/quote/v1/contract/ticker/price"
 
 
 SYMBOLS = [
@@ -56,15 +49,8 @@ INTERVALS = {
 }
 
 
-# ============================================================
-# LOGGING
-# ============================================================
-
 logging.basicConfig(
-    format=(
-        "%(asctime)s - %(name)s - "
-        "%(levelname)s - %(message)s"
-    ),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
 
@@ -72,10 +58,6 @@ logger = logging.getLogger(__name__)
 
 _scan_lock = asyncio.Lock()
 
-
-# ============================================================
-# CANDLE NORMALIZATION
-# ============================================================
 
 def safe_number(value):
     try:
@@ -105,11 +87,7 @@ def normalize_candle(candle):
             "high": safe_number(candle[2]),
             "low": safe_number(candle[3]),
             "close": safe_number(candle[4]),
-            "volume": (
-                safe_number(candle[5])
-                if len(candle) > 5
-                else None
-            ),
+            "volume": safe_number(candle[5]) if len(candle) > 5 else None,
         }
 
     return None
@@ -151,24 +129,11 @@ def normalize_candles(data):
     return candles
 
 
-# ============================================================
-# TOOBIT MARKET DATA
-# ============================================================
-
 def get_klines(symbol, interval, limit=200):
     try:
-        params = {
-            "symbol": symbol,
-            "interval": interval,
-            "limit": limit,
-        }
+        params = {"symbol": symbol, "interval": interval, "limit": limit}
 
-        response = requests.get(
-            TOOBIT_KLINES_URL,
-            params=params,
-            timeout=15,
-        )
-
+        response = requests.get(TOOBIT_KLINES_URL, params=params, timeout=15)
         response.raise_for_status()
 
         data = response.json()
@@ -177,21 +142,14 @@ def get_klines(symbol, interval, limit=200):
         if len(candles) < 50:
             logger.warning(
                 "%s %s: insufficient candles: %s",
-                symbol,
-                interval,
-                len(candles),
+                symbol, interval, len(candles),
             )
             return []
 
         return candles
 
     except Exception as e:
-        logger.error(
-            "Kline error %s %s: %s",
-            symbol,
-            interval,
-            e,
-        )
+        logger.error("Kline error %s %s: %s", symbol, interval, e)
         return []
 
 
@@ -205,18 +163,8 @@ def get_market_data(symbol):
     if not daily or not h4 or not h1 or not m15 or not m5:
         return None
 
-    return {
-        "1d": daily,
-        "4h": h4,
-        "1h": h1,
-        "15m": m15,
-        "5m": m5,
-    }
+    return {"1d": daily, "4h": h4, "1h": h1, "15m": m15, "5m": m5}
 
-
-# ============================================================
-# PRICE
-# ============================================================
 
 def get_price(symbol):
     try:
@@ -225,7 +173,6 @@ def get_price(symbol):
             params={"symbol": symbol},
             timeout=10,
         )
-
         response.raise_for_status()
 
         data = response.json()
@@ -259,21 +206,13 @@ def get_price(symbol):
                 if price is not None:
                     return float(price)
 
-        logger.warning(
-            "PRICE API | %s | Price not found | Response=%s",
-            symbol,
-            data,
-        )
+        logger.warning("PRICE API | %s | Price not found", symbol)
         return None
 
     except Exception as e:
         logger.error("Price error %s: %s", symbol, e)
         return None
 
-
-# ============================================================
-# TRACKER HELPERS
-# ============================================================
 
 def already_tracking(symbol, direction):
     try:
@@ -306,34 +245,21 @@ def register_high_signal(symbol, result):
         return None
 
     if already_tracking(symbol, direction):
-        logger.info(
-            "TRACKER | ALREADY OPEN | %s | %s",
-            symbol,
-            direction,
-        )
+        logger.info("TRACKER | ALREADY OPEN | %s | %s", symbol, direction)
         return None
 
     trade = register_signal(symbol, result)
 
     if trade:
         logger.info(
-            "TRACKER | REGISTERED | %s | %s | Entry=%s | "
-            "SL=%s | TP1=%s | TP2=%s | TP3=%s",
-            symbol,
-            direction,
-            result.get("entry"),
-            result.get("sl"),
-            result.get("tp1"),
-            result.get("tp2"),
-            result.get("tp3"),
+            "TRACKER | REGISTERED | %s | %s | Entry=%s | SL=%s | TP1=%s | TP2=%s | TP3=%s",
+            symbol, direction,
+            result.get("entry"), result.get("sl"),
+            result.get("tp1"), result.get("tp2"), result.get("tp3"),
         )
 
     return trade
 
-
-# ============================================================
-# STRATEGY DIAGNOSTIC
-# ============================================================
 
 def log_strategy_details(symbol, result):
     details = result.get("strategy_details")
@@ -365,10 +291,6 @@ def log_strategy_details(symbol, result):
         )
 
 
-# ============================================================
-# FULL DIAGNOSTIC
-# ============================================================
-
 def log_signal_diagnostic(symbol, result):
     if not isinstance(result, dict):
         return
@@ -380,10 +302,7 @@ def log_signal_diagnostic(symbol, result):
     signal = result.get("signal", "UNKNOWN")
     score = result.get("score", "UNKNOWN")
     quality = result.get("quality", "UNKNOWN")
-    reason = result.get(
-        "reason",
-        result.get("blocked_reason", "UNKNOWN"),
-    )
+    reason = result.get("reason", result.get("blocked_reason", "UNKNOWN"))
 
     strategies = (
         result.get("strategy_matches")
@@ -392,40 +311,17 @@ def log_signal_diagnostic(symbol, result):
     )
 
     if isinstance(strategies, (list, tuple)):
-        strategies_text = (
-            ", ".join(str(x) for x in strategies)
-            if strategies
-            else "NONE"
-        )
+        strategies_text = ", ".join(str(x) for x in strategies) if strategies else "NONE"
     else:
         strategies_text = str(strategies)
 
     logger.info(
-        "DIAGNOSTIC | %s | "
-        "Daily=%s | 4H=%s | 1H=%s | "
-        "Direction=%s | Signal=%s | "
-        "Score=%s | Quality=%s | "
-        "Reason=%s | Strategies=%s",
-        symbol,
-        daily,
-        h4,
-        h1,
-        direction,
-        signal,
-        score,
-        quality,
-        reason,
-        strategies_text,
+        "DIAGNOSTIC | %s | Daily=%s | 4H=%s | 1H=%s | Direction=%s | Signal=%s | Score=%s | Quality=%s | Reason=%s | Strategies=%s",
+        symbol, daily, h4, h1, direction, signal, score, quality, reason, strategies_text,
     )
 
     logger.info(
-        "FILTERS | %s | "
-        "15M_RSI=%s | "
-        "ADX_1H=%s | "
-        "ADX_15M=%s | "
-        "MTF_15M=%s | "
-        "VolumeSpike=%s | "
-        "Confirmation=%s",
+        "FILTERS | %s | 15M_RSI=%s | ADX_1H=%s | ADX_15M=%s | MTF_15M=%s | VolumeSpike=%s | Confirmation=%s",
         symbol,
         result.get("rsi_15m"),
         result.get("adx_1h"),
@@ -444,10 +340,6 @@ def log_signal_diagnostic(symbol, result):
 
     log_strategy_details(symbol, result)
 
-
-# ============================================================
-# SIGNAL TEXT
-# ============================================================
 
 def signal_text(symbol, result):
     direction = result.get("direction", "UNKNOWN")
@@ -468,19 +360,13 @@ def signal_text(symbol, result):
     if not isinstance(strategies, (list, tuple)):
         strategies = [strategies]
 
-    strategy_text = (
-        ", ".join(str(x) for x in strategies)
-        if strategies
-        else "NONE"
-    )
+    strategy_text = ", ".join(str(x) for x in strategies) if strategies else "NONE"
 
     return (
         f"{emoji} <b>{symbol}</b>\n\n"
-
         f"🎯 Signal: <b>{result.get('signal')}</b>\n"
         f"⭐ Quality: <b>{result.get('quality')}</b>\n"
         f"📊 Score: <b>{result.get('score')}</b>\n\n"
-
         f"📅 Daily: {result.get('daily')}\n"
         f"⏱ 4H: {result.get('4h')}\n"
         f"🕐 1H: {result.get('1h')}\n"
@@ -488,28 +374,19 @@ def signal_text(symbol, result):
         f"📊 ADX 1H: {result.get('adx_1h')}\n"
         f"📊 ADX 15M: {result.get('adx_15m')}\n"
         f"✅ MTF 15M: {result.get('mtf_confirmed')}\n\n"
-
         f"💰 Entry: <b>{result.get('entry')}</b>\n"
         f"🛑 SL: <b>{result.get('sl')}</b>\n\n"
-
         f"🎯 TP1: <b>{result.get('tp1')}</b>\n"
         f"🎯 TP2: <b>{result.get('tp2')}</b>\n"
         f"🎯 TP3: <b>{result.get('tp3')}</b>\n\n"
-
         f"📏 Risk: {result.get('risk')}\n"
         f"⚖️ RR: {result.get('rr')}\n\n"
-
         f"🧠 Strategy:\n<b>{strategy_text}</b>\n\n"
         f"🔷 Breaker Block: {result.get('breaker_block')}\n"
         f"🔶 FVG Fill: {result.get('fvg_fill')}\n\n"
-
         f"📝 Reason:\n{result.get('reason', 'N/A')}"
     )
 
-
-# ============================================================
-# RAW ANALYSIS
-# ============================================================
 
 def analyze_symbol_raw(symbol):
     market_data = get_market_data(symbol)
@@ -531,10 +408,6 @@ def analyze_symbol_raw(symbol):
     return result
 
 
-# ============================================================
-# /START
-# ============================================================
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_ids = context.application.bot_data.setdefault("chat_ids", set())
     chat_ids.add(update.effective_chat.id)
@@ -547,10 +420,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/register - ثبت دریافت سیگنال خودکار"
     )
 
-
-# ============================================================
-# /PRICE
-# ============================================================
 
 async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     btc = get_price("BTC-SWAP-USDT")
@@ -571,10 +440,6 @@ async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="HTML")
 
 
-# ============================================================
-# /SIGNAL
-# ============================================================
-
 async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🔎 در حال بررسی بازار...\n"
@@ -586,10 +451,7 @@ async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for symbol in SYMBOLS:
         try:
-            result = await asyncio.to_thread(
-                analyze_symbol_raw,
-                symbol,
-            )
+            result = await asyncio.to_thread(analyze_symbol_raw, symbol)
 
             if result is None:
                 continue
@@ -608,10 +470,7 @@ async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
             trade = register_high_signal(symbol, result)
 
             if trade is not None:
-                logger.info(
-                    "Manual signal registered | %s",
-                    symbol,
-                )
+                logger.info("Manual signal registered | %s", symbol)
 
             await update.message.reply_text(
                 signal_text(symbol, result),
@@ -625,15 +484,10 @@ async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if found == 0:
         await update.message.reply_text(
-            "⏳ در حال حاضر هیچ "
-            "سیگنال HIGH معتبری پیدا نشد.\n\n"
+            "⏳ در حال حاضر هیچ سیگنال HIGH معتبری پیدا نشد.\n\n"
             "🔍 جزئیات تشخیص در لاگ ثبت شد."
         )
 
-
-# ============================================================
-# AUTO SCANNER
-# ============================================================
 
 async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
     if _scan_lock.locked():
@@ -646,16 +500,10 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
 
         for symbol in SYMBOLS:
             try:
-                result = await asyncio.to_thread(
-                    analyze_symbol_raw,
-                    symbol,
-                )
+                result = await asyncio.to_thread(analyze_symbol_raw, symbol)
 
                 if result is None:
-                    logger.warning(
-                        "DIAGNOSTIC | %s | No analysis result",
-                        symbol,
-                    )
+                    logger.warning("DIAGNOSTIC | %s | No analysis result", symbol)
                     continue
 
                 log_signal_diagnostic(symbol, result)
@@ -673,10 +521,8 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
 
                 if trade is None:
                     logger.info(
-                        "HIGH SIGNAL | %s | %s | "
-                        "Already tracked - Telegram alert skipped",
-                        symbol,
-                        result.get("direction"),
+                        "HIGH SIGNAL | %s | %s | Already tracked - Telegram alert skipped",
+                        symbol, result.get("direction"),
                     )
                     continue
 
@@ -684,16 +530,11 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
 
                 logger.info(
                     "NEW HIGH SIGNAL | %s | %s | Score=%s | Strategy=%s",
-                    symbol,
-                    result.get("direction"),
-                    result.get("score"),
-                    result.get("strategy"),
+                    symbol, result.get("direction"),
+                    result.get("score"), result.get("strategy"),
                 )
 
-                chat_ids = context.application.bot_data.get(
-                    "chat_ids",
-                    set(),
-                )
+                chat_ids = context.application.bot_data.get("chat_ids", set())
 
                 for chat_id in chat_ids:
                     try:
@@ -703,10 +544,7 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
                             parse_mode="HTML",
                         )
                     except Exception:
-                        logger.exception(
-                            "Telegram send error for chat %s",
-                            chat_id,
-                        )
+                        logger.exception("Telegram send error for chat %s", chat_id)
 
             except Exception:
                 logger.exception("Scan error %s", symbol)
@@ -714,10 +552,6 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
         if found == 0:
             logger.info("No HIGH signals.")
 
-
-# ============================================================
-# TRACK OPEN TRADES
-# ============================================================
 
 async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -727,37 +561,21 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
             logger.info("TRACKER CHECK | No open trades")
             return
 
-        logger.info(
-            "TRACKER CHECK | Open trades=%s",
-            len(open_trades),
-        )
+        logger.info("TRACKER CHECK | Open trades=%s", len(open_trades))
 
-        events = await asyncio.to_thread(
-            check_all_trades,
-            get_price,
-        )
+        events = await asyncio.to_thread(check_all_trades, get_price)
 
         for trade in open_trades:
             symbol = trade.get("symbol", "UNKNOWN")
             direction = trade.get("direction", "UNKNOWN")
 
-            current_price = await asyncio.to_thread(
-                get_price,
-                symbol,
-            )
+            current_price = await asyncio.to_thread(get_price, symbol)
 
             logger.info(
-                "TRACKER CHECK | %s | %s | "
-                "Current=%s | Entry=%s | "
-                "SL=%s | TP1=%s | TP2=%s | TP3=%s",
-                symbol,
-                direction,
-                current_price,
-                trade.get("entry"),
-                trade.get("sl"),
-                trade.get("tp1"),
-                trade.get("tp2"),
-                trade.get("tp3"),
+                "TRACKER CHECK | %s | %s | Current=%s | Entry=%s | SL=%s | TP1=%s | TP2=%s | TP3=%s",
+                symbol, direction, current_price,
+                trade.get("entry"), trade.get("sl"),
+                trade.get("tp1"), trade.get("tp2"), trade.get("tp3"),
             )
 
         if not events:
@@ -776,19 +594,15 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
 
             message = (
                 "📊 <b>TRACKER UPDATE</b>\n\n"
-
                 f"🪙 {symbol}\n"
                 f"📈 Direction: <b>{direction}</b>\n"
                 f"🧠 Strategy: <b>{strategy}</b>\n\n"
-
                 f"💰 Current Price: <b>{price_now}</b>\n\n"
-
                 f"📌 Entry: {trade.get('entry')}\n"
                 f"🛑 SL: {trade.get('sl')}\n"
                 f"🎯 TP1: {trade.get('tp1')}\n"
                 f"🎯 TP2: {trade.get('tp2')}\n"
                 f"🎯 TP3: {trade.get('tp3')}\n\n"
-
                 f"📍 RESULT: <b>{result}</b>"
             )
 
@@ -800,25 +614,13 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
                         parse_mode="HTML",
                     )
                 except Exception:
-                    logger.exception(
-                        "Tracker Telegram error for chat %s",
-                        chat_id,
-                    )
+                    logger.exception("Tracker Telegram error for chat %s", chat_id)
 
-            logger.info(
-                "TRACKER | %s | %s | Price=%s",
-                symbol,
-                result,
-                price_now,
-            )
+            logger.info("TRACKER | %s | %s | Price=%s", symbol, result, price_now)
 
     except Exception:
         logger.exception("Tracker error")
 
-
-# ============================================================
-# /REGISTER
-# ============================================================
 
 async def register_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_ids = context.application.bot_data.setdefault("chat_ids", set())
@@ -829,21 +631,15 @@ async def register_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ============================================================
-# TRACKER STATS
-# ============================================================
-
 async def tracker_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         stats = await asyncio.to_thread(get_stats)
 
         message = (
             "📊 <b>Tracker Statistics</b>\n\n"
-
             f"📌 Total Signals: {stats.get('total', 0)}\n"
             f"⏳ Open: {stats.get('open', 0)}\n"
             f"🔒 Closed: {stats.get('closed', 0)}\n\n"
-
             f"🎯 TP1 Hit: {stats.get('tp1', 0)}\n"
             f"🎯 TP2 Hit: {stats.get('tp2', 0)}\n"
             f"🎯 TP3 Hit: {stats.get('tp3', 0)}\n"
@@ -857,48 +653,26 @@ async def tracker_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ خطا در دریافت آمار Tracker.")
 
 
-# ============================================================
-# MAIN
-# ============================================================
-
 def main():
     if not TOKEN:
-        raise RuntimeError(
-            "BOT_TOKEN environment variable is missing."
-        )
+        raise RuntimeError("BOT_TOKEN environment variable is missing.")
 
     application = Application.builder().token(TOKEN).build()
 
-    # COMMANDS
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("price", price))
     application.add_handler(CommandHandler("signal", signal))
     application.add_handler(CommandHandler("register", register_chat))
     application.add_handler(CommandHandler("stats", tracker_stats))
 
-    # AUTO SIGNAL SCANNER
-    application.job_queue.run_repeating(
-        auto_signal,
-        interval=300,
-        first=10,
-    )
-
-    # TRADE TRACKER
-    application.job_queue.run_repeating(
-        track_open_trades,
-        interval=30,
-        first=30,
-    )
+    application.job_queue.run_repeating(auto_signal, interval=300, first=10)
+    application.job_queue.run_repeating(track_open_trades, interval=30, first=30)
 
     logger.info("Trade tracker started: every 30 seconds")
     logger.info("CryptoBot started successfully.")
 
     application.run_polling(drop_pending_updates=True)
 
-
-# ============================================================
-# ENTRY POINT
-# ============================================================
 
 if __name__ == "__main__":
     main()
