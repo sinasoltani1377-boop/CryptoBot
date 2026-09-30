@@ -57,11 +57,12 @@ _scan_lock = asyncio.Lock()
 # SYMBOLS - AUTO FETCH FROM TOOBIT WITH LIQUIDITY FILTER
 # ============================================================
 
-def load_symbols(min_volume_usdt=1_000_000):
+def load_symbols(min_volume_usdt=10_000_000, max_symbols=30):
     """
     دریافت خودکار ارزهای فیوچرز توبیت با فیلتر نقدینگی.
 
     min_volume_usdt: حداقل حجم 24 ساعته به دلار
+    max_symbols: حداکثر تعداد ارزها برای اسکن
     """
     try:
         all_symbols = get_futures_symbols()
@@ -75,7 +76,7 @@ def load_symbols(min_volume_usdt=1_000_000):
             len(all_symbols),
         )
 
-        filtered = []
+        candidates = []
 
         for symbol in all_symbols:
             try:
@@ -89,7 +90,6 @@ def load_symbols(min_volume_usdt=1_000_000):
                     continue
 
                 data = response.json()
-
                 volume = 0.0
 
                 if isinstance(data, dict):
@@ -126,25 +126,24 @@ def load_symbols(min_volume_usdt=1_000_000):
                         break
 
                 if volume >= min_volume_usdt:
-                    filtered.append(symbol)
+                    candidates.append((symbol, volume))
 
-            except Exception as e:
-                logger.debug(
-                    "Volume check failed for %s: %s",
-                    symbol,
-                    e,
-                )
+            except Exception:
                 continue
 
+        candidates.sort(key=lambda x: x[1], reverse=True)
+
+        selected = [s for s, _ in candidates[:max_symbols]]
+
         logger.info(
-            "Filtered %s/%s symbols with volume > %s USDT",
-            len(filtered),
+            "Filtered %s/%s symbols, selected top %s",
+            len(candidates),
             len(all_symbols),
-            min_volume_usdt,
+            len(selected),
         )
 
-        if filtered:
-            return filtered
+        if selected:
+            return selected
 
         logger.warning(
             "No symbols passed liquidity filter. "
@@ -169,7 +168,10 @@ def load_symbols(min_volume_usdt=1_000_000):
     ]
 
 
-SYMBOLS = load_symbols(min_volume_usdt=1_000_000)
+SYMBOLS = load_symbols(
+    min_volume_usdt=10_000_000,
+    max_symbols=30,
+)
 
 
 INTERVALS = {
