@@ -1243,7 +1243,7 @@ def generate_signal(daily, h4, h1, m15, m5):
     # --------------------------------------------------------
     # ADX_15M FILTER FOR SWEEP STRATEGIES (v8.1)
     # --------------------------------------------------------
-    if adx_15m is not None and adx_15m < 15:
+    if adx_15m is not None and adx_15m < 30:
         stop_hunt = {
             "matched": False,
             "direction": None,
