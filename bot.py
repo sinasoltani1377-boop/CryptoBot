@@ -417,21 +417,22 @@ def log_signal_diagnostic(symbol, result):
         reason,
         strategies_text,
     )
-
-    logger.info(
+     logger.info(
     "FILTERS | %s | "
     "15M_RSI=%s | "
     "ADX_1H=%s | "
+    "ADX_15M=%s | "
     "MTF_15M=%s | "
     "VolumeSpike=%s | "
     "Confirmation=%s",
     symbol,
     result.get("rsi_15m"),
     result.get("adx_1h"),
+    result.get("adx_15m"),
     result.get("mtf_confirmed"),
     result.get("volume_spike"),
     result.get("confirmation"),
-    )
+)
     logger.info(
         "NEW_STRATEGIES | %s | BreakerBlock=%s | FVGFill=%s",
         symbol,
