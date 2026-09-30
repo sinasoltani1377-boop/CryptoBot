@@ -1,5 +1,5 @@
 # ============================================================
-# CryptoBot - Analysis Engine v8
+# CryptoBot - Analysis Engine v8.1
 #
 # 1H  = Main Direction
 # 15M = Filter + MTF Confirmation
@@ -9,16 +9,14 @@
 #   STOP_HUNT
 #   THREE_TAP
 #   LIQUIDITY_ZONE
-#   BREAKER_BLOCK   (NEW in v8)
-#   FVG_FILL        (NEW in v8)
+#   BREAKER_BLOCK
+#   FVG_FILL
 #
-# Only HIGH signals are returned as active trades.
-#
-# v8 Changes:
-#   - Added BREAKER_BLOCK strategy
-#   - Added FVG_FILL strategy
-#   - Updated strategy priority
-#   - All v7 filters preserved
+# v8.1 Changes:
+#   - Minimum SL raised from 0.15% to 0.4%
+#   - ADX_15M filter blocks sweep strategies in chop
+#   - Stricter entry_trigger (body 0.45, close 0.70)
+#   - All v8 filters preserved
 # ============================================================
 
 from statistics import mean
@@ -144,16 +142,10 @@ def calculate_rsi(candles, period=14):
 
 
 # ============================================================
-# ADX - MARKET REGIME FILTER
+# ADX
 # ============================================================
 
 def calculate_adx(candles, period=14):
-    """
-    محاسبه ADX برای تشخیص روند دار بودن بازار.
-
-    ADX > 25 : بازار روند دار
-    ADX < 20 : بازار رنج
-    """
     if not candles or len(candles) < period * 2:
         return None
 
@@ -374,7 +366,6 @@ def ema_direction(candles):
 # ============================================================
 
 def mtf_confirmation(m15, direction):
-    """بررسی تأیید 15M با EMA 9 و 21"""
     if not m15 or len(m15) < 30:
         return False
 
@@ -405,7 +396,7 @@ def mtf_confirmation(m15, direction):
 
 
 # ============================================================
-# STRATEGY 1: STOP HUNT
+# STOP HUNT
 # ============================================================
 
 def detect_stop_hunt(candles, lookback=15):
@@ -457,7 +448,6 @@ def detect_stop_hunt(candles, lookback=15):
     if body <= 0:
         body = max(abs(h - l) * 0.15, 0.00000001)
 
-    # SHORT sweep
     if h > high_level and c < high_level:
         if upper_wick(current) >= body * 0.45:
             return {
@@ -467,7 +457,6 @@ def detect_stop_hunt(candles, lookback=15):
                 "reason": "HIGH_SWEEP_RECLAIM"
             }
 
-    # LONG sweep
     if l < low_level and c > low_level:
         if lower_wick(current) >= body * 0.45:
             return {
@@ -486,7 +475,7 @@ def detect_stop_hunt(candles, lookback=15):
 
 
 # ============================================================
-# STRATEGY 2: THREE TAP
+# THREE TAP
 # ============================================================
 
 def detect_three_tap(candles, tolerance=0.006):
@@ -517,7 +506,6 @@ def detect_three_tap(candles, tolerance=0.006):
     upper = upper_wick(current)
     lower = lower_wick(current)
 
-    # THREE HIGH TAPS -> SHORT
     if len(highs) >= 3:
         taps = highs[-3:]
         levels = [x["price"] for x in taps]
@@ -540,7 +528,6 @@ def detect_three_tap(candles, tolerance=0.006):
                         "reason": "THREE_HIGH_TAPS_REJECTION"
                     }
 
-    # THREE LOW TAPS -> LONG
     if len(lows) >= 3:
         taps = lows[-3:]
         levels = [x["price"] for x in taps]
@@ -572,7 +559,7 @@ def detect_three_tap(candles, tolerance=0.006):
 
 
 # ============================================================
-# STRATEGY 3: LIQUIDITY ZONE
+# LIQUIDITY ZONE
 # ============================================================
 
 def detect_liquidity_zone(candles, tolerance=0.006):
@@ -603,7 +590,6 @@ def detect_liquidity_zone(candles, tolerance=0.006):
     upper = upper_wick(current)
     lower = lower_wick(current)
 
-    # HIGH LIQUIDITY ZONE -> SHORT
     if len(highs) >= 3:
         candidates = [x["price"] for x in highs[-6:]]
 
@@ -628,7 +614,6 @@ def detect_liquidity_zone(candles, tolerance=0.006):
                         "reason": "HIGH_LIQUIDITY_SWEEP_REJECTION"
                     }
 
-    # LOW LIQUIDITY ZONE -> LONG
     if len(lows) >= 3:
         candidates = [x["price"] for x in lows[-6:]]
 
@@ -662,18 +647,10 @@ def detect_liquidity_zone(candles, tolerance=0.006):
 
 
 # ============================================================
-# STRATEGY 4: BREAKER BLOCK (NEW)
+# BREAKER BLOCK
 # ============================================================
 
 def detect_breaker_block(candles, lookback=40, tolerance=0.004):
-    """
-    Breaker Block:
-    یک Order Block که قیمت آن را با قدرت شکسته و حالا نقشش برعکس شده.
-    برگشت قیمت به این منطقه = فرصت ورود در جهت مخالف.
-
-    SHORT: Bullish OB شکسته شده + FVG + برگشت به منطقه + کندل نزولی
-    LONG : Bearish OB شکسته شده + FVG + برگشت به منطقه + کندل صعودی
-    """
     if not candles or len(candles) < lookback + 5:
         return {
             "matched": False,
@@ -698,7 +675,7 @@ def detect_breaker_block(candles, lookback=40, tolerance=0.004):
     upper = upper_wick(current)
     lower = lower_wick(current)
 
-    # ---- SHORT: Bullish OB -> شکسته شده ----
+    # SHORT: Bullish OB broken
     for i in range(2, len(recent) - 3):
         ob = recent[i]
         ob_o, ob_h, ob_l, ob_c = candle_values(ob)
@@ -706,14 +683,12 @@ def detect_breaker_block(candles, lookback=40, tolerance=0.004):
         if None in (ob_o, ob_h, ob_l, ob_c):
             continue
 
-        # Bullish OB: کندل نزولی
         if ob_c >= ob_o:
             continue
 
         ob_high = max(ob_o, ob_c)
         ob_low = ob_l
 
-        # بررسی شکست با قدرت
         broken = False
         break_index = None
 
@@ -724,7 +699,6 @@ def detect_breaker_block(candles, lookback=40, tolerance=0.004):
             if None in (nxt_o, nxt_h, nxt_l, nxt_c):
                 continue
 
-            # شکست نزولی قوی: بسته شدن زیر OB low
             if nxt_c < ob_low and nxt_c < nxt_o:
                 broken = True
                 break_index = j
@@ -733,7 +707,6 @@ def detect_breaker_block(candles, lookback=40, tolerance=0.004):
         if not broken:
             continue
 
-        # بررسی FVG در شکست
         fvg_present = False
         if break_index is not None and break_index + 2 < len(recent):
             k1 = recent[break_index]
@@ -746,17 +719,14 @@ def detect_breaker_block(candles, lookback=40, tolerance=0.004):
                 if k1_h < k3_l:
                     fvg_present = True
 
-        # برگشت قیمت به منطقه Breaker (OB high/low سابق)
         zone_top = ob_high
         zone_bottom = ob_low
 
-        # قیمت باید به منطقه برگشته باشد
         touched = h >= zone_bottom and l <= zone_top
 
         if not touched:
             continue
 
-        # کندل نزولی با رد شدن از منطقه
         bearish_rejection = (
             c < o
             and c < zone_top
@@ -776,7 +746,7 @@ def detect_breaker_block(candles, lookback=40, tolerance=0.004):
                 )
             }
 
-    # ---- LONG: Bearish OB -> شکسته شده ----
+    # LONG: Bearish OB broken
     for i in range(2, len(recent) - 3):
         ob = recent[i]
         ob_o, ob_h, ob_l, ob_c = candle_values(ob)
@@ -784,7 +754,6 @@ def detect_breaker_block(candles, lookback=40, tolerance=0.004):
         if None in (ob_o, ob_h, ob_l, ob_c):
             continue
 
-        # Bearish OB: کندل صعودی
         if ob_c <= ob_o:
             continue
 
@@ -801,7 +770,6 @@ def detect_breaker_block(candles, lookback=40, tolerance=0.004):
             if None in (nxt_o, nxt_h, nxt_l, nxt_c):
                 continue
 
-            # شکست صعودی قوی: بسته شدن بالای OB high
             if nxt_c > ob_high and nxt_c > nxt_o:
                 broken = True
                 break_index = j
@@ -810,7 +778,6 @@ def detect_breaker_block(candles, lookback=40, tolerance=0.004):
         if not broken:
             continue
 
-        # FVG در شکست
         fvg_present = False
         if break_index is not None and break_index + 2 < len(recent):
             k1 = recent[break_index]
@@ -859,14 +826,10 @@ def detect_breaker_block(candles, lookback=40, tolerance=0.004):
 
 
 # ============================================================
-# STRATEGY 5: FVG FILL (NEW)
+# FVG FILL
 # ============================================================
 
 def find_fvgs(candles, lookback=50):
-    """
-    پیدا کردن تمام FVGها در بازه اخیر.
-    خروجی: لیست دیکشنری با top, bottom, direction, index, filled
-    """
     fvgs = []
 
     if not candles or len(candles) < 5:
@@ -886,7 +849,6 @@ def find_fvgs(candles, lookback=50):
         if None in (k1_h, k1_l, k3_h, k3_l):
             continue
 
-        # Bullish FVG: k1.high < k3.low
         if k1_h < k3_l:
             fvgs.append({
                 "index": i,
@@ -898,7 +860,6 @@ def find_fvgs(candles, lookback=50):
                 "touch_count": 0,
             })
 
-        # Bearish FVG: k1.low > k3.high
         if k1_l > k3_h:
             fvgs.append({
                 "index": i,
@@ -914,11 +875,6 @@ def find_fvgs(candles, lookback=50):
 
 
 def detect_fvg_fill(candles, lookback=50):
-    """
-    FVG Fill:
-    قیمت به یک FVG برمی‌گردد و به 50% آن (CE) واکنش نشان می‌دهد.
-    فقط لمس اول و دوم معتبر است.
-    """
     if not candles or len(candles) < 10:
         return {
             "matched": False,
@@ -952,15 +908,12 @@ def detect_fvg_fill(candles, lookback=50):
     upper = upper_wick(current)
     lower = lower_wick(current)
 
-    # جدیدترین FVGها را اول بررسی کن
     for fvg in reversed(fvgs[-15:]):
-
         top = fvg["top"]
         bottom = fvg["bottom"]
         ce = fvg["ce"]
         direction = fvg["direction"]
 
-        # شمارش لمس‌ها
         touch_count = 0
         for k in candles[-30:]:
             _, kh, kl, _ = candle_values(k)
@@ -969,21 +922,15 @@ def detect_fvg_fill(candles, lookback=50):
             if kh >= bottom and kl <= top:
                 touch_count += 1
 
-        fvg["touch_count"] = touch_count
-
-        # فقط لمس اول و دوم معتبر
         if touch_count > 2:
             continue
 
-        # ---- LONG: Bullish FVG ----
         if direction == "LONG":
-            # قیمت باید به CE رسیده باشد
             reached_ce = l <= ce <= h or l <= bottom
 
             if not reached_ce:
                 continue
 
-            # کندل صعودی با رد از پایین
             bullish_rejection = (
                 c > o
                 and c > bottom
@@ -1000,7 +947,6 @@ def detect_fvg_fill(candles, lookback=50):
                     "reason": f"FVG_FILL_LONG_TOUCH{touch_count}"
                 }
 
-        # ---- SHORT: Bearish FVG ----
         if direction == "SHORT":
             reached_ce = l <= ce <= h or h >= top
 
@@ -1032,7 +978,7 @@ def detect_fvg_fill(candles, lookback=50):
 
 
 # ============================================================
-# 5M ENTRY TRIGGER
+# 5M ENTRY TRIGGER (v8.1 - stricter)
 # ============================================================
 
 def entry_trigger(candles, direction):
@@ -1059,55 +1005,55 @@ def entry_trigger(candles, direction):
 
     if direction == "LONG":
 
-    bullish = c > o
-    body_ok = body >= candle_range * 0.45
+        bullish = c > o
+        body_ok = body >= candle_range * 0.45
 
-    close_position = (c - l) / candle_range
-    close_strong = close_position >= 0.70
+        close_position = (c - l) / candle_range
+        close_strong = close_position >= 0.70
 
-    momentum = (
-        c > ph
-        or c > pc
-    )
+        momentum = (
+            c > ph
+            or c > pc
+        )
 
-    rejection_ok = upper <= body * 1.20
+        rejection_ok = upper <= body * 1.20
 
-    return (
-        bullish
-        and body_ok
-        and close_strong
-        and momentum
-        and rejection_ok
-    )
+        return (
+            bullish
+            and body_ok
+            and close_strong
+            and momentum
+            and rejection_ok
+        )
 
     if direction == "SHORT":
 
-    bearish = c < o
-    body_ok = body >= candle_range * 0.45
+        bearish = c < o
+        body_ok = body >= candle_range * 0.45
 
-    close_position = (h - c) / candle_range
-    close_strong = close_position >= 0.70
+        close_position = (h - c) / candle_range
+        close_strong = close_position >= 0.70
 
-    momentum = (
-        c < pl
-        or c < pc
-    )
+        momentum = (
+            c < pl
+            or c < pc
+        )
 
-    rejection_ok = lower <= body * 1.20
+        rejection_ok = lower <= body * 1.20
 
-    return (
-        bearish
-        and body_ok
-        and close_strong
-        and momentum
-        and rejection_ok
-    )
+        return (
+            bearish
+            and body_ok
+            and close_strong
+            and momentum
+            and rejection_ok
+        )
 
     return False
 
 
 # ============================================================
-# TRADE LEVELS
+# TRADE LEVELS (v8.1 - min SL 0.4%)
 # ============================================================
 
 def calculate_trade_levels(candles, direction, strategy_level=None):
@@ -1153,15 +1099,14 @@ def calculate_trade_levels(candles, direction, strategy_level=None):
 
         minimum_risk = entry * 0.004  # 0.4%
 
-        risk_distance = max(
-        raw_risk,
-        minimum_risk )
+        risk_distance = max(raw_risk, minimum_risk)
 
         sl = entry - risk_distance
 
         tp1 = entry + risk_distance * 1.5
         tp2 = entry + risk_distance * 2.5
         tp3 = entry + risk_distance * 3.0
+
     elif direction == "SHORT":
         candidates = [x for x in highs if x > entry]
 
@@ -1179,16 +1124,14 @@ def calculate_trade_levels(candles, direction, strategy_level=None):
 
         minimum_risk = entry * 0.004  # 0.4%
 
-        risk_distance = max(
-        raw_risk,
-        minimum_risk
-        )
+        risk_distance = max(raw_risk, minimum_risk)
 
         sl = entry + risk_distance
 
         tp1 = entry - risk_distance * 1.5
         tp2 = entry - risk_distance * 2.5
-        tp3 = entry - risk_distance * 3.0 
+        tp3 = entry - risk_distance * 3.0
+
     else:
         return None
 
@@ -1280,16 +1223,12 @@ def generate_signal(daily, h4, h1, m15, m5):
     if not all([daily, h4, h1, m15, m5]):
         return no_trade("INSUFFICIENT_MARKET_DATA")
 
-    # --------------------------------------------------------
     # MARKET CONTEXT
-    # --------------------------------------------------------
     daily_direction = market_structure(daily)
     h4_direction = market_structure(h4)
     h1_direction = market_structure(h1)
 
-    # --------------------------------------------------------
     # FILTERS
-    # --------------------------------------------------------
     daily_ema = ema_direction(daily)
     h4_ema = ema_direction(h4)
     h1_ema = ema_direction(h1)
@@ -1297,48 +1236,40 @@ def generate_signal(daily, h4, h1, m15, m5):
     rsi_15m = calculate_rsi(m15)
     volume_is_spike = volume_spike(m5)
 
-    # --------------------------------------------------------
-    # ADX REGIME
-    # --------------------------------------------------------
+    # ADX
     adx_1h = calculate_adx(h1)
     adx_15m = calculate_adx(m15)
 
     # --------------------------------------------------------
-    # STRATEGIES (5M)
+    # ADX_15M FILTER FOR SWEEP STRATEGIES (v8.1)
     # --------------------------------------------------------
+    if adx_15m is not None and adx_15m < 15:
+        stop_hunt = {
+            "matched": False,
+            "direction": None,
+            "level": None,
+            "reason": "ADX_15M_LOW_RANGE",
+        }
+        three_tap = {
+            "matched": False,
+            "direction": None,
+            "level": None,
+            "reason": "ADX_15M_LOW_RANGE",
+        }
+        liquidity_zone = {
+            "matched": False,
+            "direction": None,
+            "level": None,
+            "reason": "ADX_15M_LOW_RANGE",
+        }
+    else:
+        stop_hunt = detect_stop_hunt(m5)
+        three_tap = detect_three_tap(m5)
+        liquidity_zone = detect_liquidity_zone(m5)
 
-# ADX 15M FILTER FOR SWEEP STRATEGIES
-# --------------------------------------------------------
-# در رنج شدید (ADX_15M < 15)، استراتژی‌های سوییپ کاذب‌اند
-# فقط BREAKER_BLOCK و FVG_FILL معتبر می‌مانند
-adx_m15_for_filter = calculate_adx(m15)
+    breaker_block = detect_breaker_block(m5)
+    fvg_fill = detect_fvg_fill(m5)
 
-if adx_m15_for_filter is not None and adx_m15_for_filter < 15:
-    stop_hunt = {
-        "matched": False,
-        "direction": None,
-        "level": None,
-        "reason": "ADX_15M_LOW_RANGE",
-    }
-    three_tap = {
-        "matched": False,
-        "direction": None,
-        "level": None,
-        "reason": "ADX_15M_LOW_RANGE",
-    }
-    liquidity_zone = {
-        "matched": False,
-        "direction": None,
-        "level": None,
-        "reason": "ADX_15M_LOW_RANGE",
-    }
-else:
-    stop_hunt = detect_stop_hunt(m5)
-    three_tap = detect_three_tap(m5)
-    liquidity_zone = detect_liquidity_zone(m5)
-
-breaker_block = detect_breaker_block(m5)
-fvg_fill = detect_fvg_fill(m5)
     strategy_details = {
         "STOP_HUNT": stop_hunt,
         "THREE_TAP": three_tap,
@@ -1347,9 +1278,7 @@ fvg_fill = detect_fvg_fill(m5)
         "FVG_FILL": fvg_fill,
     }
 
-    # --------------------------------------------------------
-    # DETECT ALL VALID STRATEGIES
-    # --------------------------------------------------------
+    # VALID SETUPS
     valid_setups = []
 
     for name, data in strategy_details.items():
@@ -1359,9 +1288,6 @@ fvg_fill = detect_fvg_fill(m5)
         if data.get("matched") and data.get("direction") in ("LONG", "SHORT"):
             valid_setups.append(name)
 
-    # --------------------------------------------------------
-    # NO SETUP
-    # --------------------------------------------------------
     if not valid_setups:
         return no_trade(
             "NO_MAIN_SETUP",
@@ -1374,9 +1300,7 @@ fvg_fill = detect_fvg_fill(m5)
             adx_15m=adx_15m,
         )
 
-    # --------------------------------------------------------
-    # DETERMINE DIRECTION
-    # --------------------------------------------------------
+    # DIRECTION
     if h1_direction == "BULLISH":
         direction = "LONG"
 
@@ -1412,9 +1336,7 @@ fvg_fill = detect_fvg_fill(m5)
 
         direction = unique_directions[0]
 
-    # --------------------------------------------------------
     # MATCHING STRATEGIES
-    # --------------------------------------------------------
     matching_strategies = []
 
     for name, data in strategy_details.items():
@@ -1449,9 +1371,7 @@ fvg_fill = detect_fvg_fill(m5)
             adx_1h=adx_1h, adx_15m=adx_15m,
         )
 
-    # --------------------------------------------------------
     # 5M ENTRY TRIGGER
-    # --------------------------------------------------------
     confirmation = entry_trigger(m5, direction)
 
     if not confirmation:
@@ -1462,9 +1382,7 @@ fvg_fill = detect_fvg_fill(m5)
             adx_1h=adx_1h, adx_15m=adx_15m,
         )
 
-    # --------------------------------------------------------
     # 15M MTF CONFIRMATION
-    # --------------------------------------------------------
     mtf_confirmed = mtf_confirmation(m15, direction)
 
     if not mtf_confirmed:
@@ -1476,28 +1394,26 @@ fvg_fill = detect_fvg_fill(m5)
             mtf_confirmed=False,
         )
 
-    # --------------------------------------------------------
     # SCORE
-    # --------------------------------------------------------
     score = 0
 
-    # CORE SETUP (max 4)
-    score += 2  # valid strategy
-    score += 2  # valid 5M entry
+    # CORE SETUP
+    score += 2
+    score += 2
 
-    # 1H CONTEXT (max 2)
+    # 1H CONTEXT
     if h1_direction in ("BULLISH", "BEARISH"):
         score += 2
     else:
         score += 1
 
-    # MULTIPLE STRATEGIES (max 2)
+    # MULTIPLE STRATEGIES
     if len(matching_strategies) >= 2:
         score += 1
     if len(matching_strategies) >= 3:
         score += 1
 
-    # DAILY + 4H ALIGNMENT (max 2)
+    # DAILY + 4H ALIGNMENT
     if (
         (direction == "LONG" and daily_direction == "BULLISH")
         or (direction == "SHORT" and daily_direction == "BEARISH")
@@ -1510,7 +1426,7 @@ fvg_fill = detect_fvg_fill(m5)
     ):
         score += 1
 
-    # RSI (max 1)
+    # RSI
     if rsi_15m is not None:
         if direction == "LONG":
             if 40 <= rsi_15m < 68:
@@ -1523,7 +1439,7 @@ fvg_fill = detect_fvg_fill(m5)
             elif rsi_15m <= 32:
                 score -= 1
 
-    # VOLUME (max 1)
+    # VOLUME
     if volume_is_spike:
         score += 1
 
@@ -1531,7 +1447,7 @@ fvg_fill = detect_fvg_fill(m5)
     if mtf_confirmed:
         score += 1
 
-    # ADX REGIME FILTER
+    # ADX REGIME
     regime_ok = True
 
     if adx_1h is not None:
@@ -1550,10 +1466,8 @@ fvg_fill = detect_fvg_fill(m5)
         elif len(matching_strategies) >= 2:
             score += 1
 
-    # --------------------------------------------------------
     # QUALITY GATE
-    # --------------------------------------------------------
-    if score < 9 or not regime_ok:
+    if score < 10 or not regime_ok:
         return no_trade(
             "SIGNAL_QUALITY_TOO_LOW",
             daily_direction, h4_direction, h1_direction,
@@ -1562,9 +1476,7 @@ fvg_fill = detect_fvg_fill(m5)
             mtf_confirmed=mtf_confirmed,
         )
 
-    # --------------------------------------------------------
     # STRATEGY PRIORITY
-    # --------------------------------------------------------
     priority = [
         "BREAKER_BLOCK",
         "STOP_HUNT",
@@ -1582,9 +1494,7 @@ fvg_fill = detect_fvg_fill(m5)
             strategy_level = strategy_details[name].get("level")
             break
 
-    # --------------------------------------------------------
     # TRADE LEVELS
-    # --------------------------------------------------------
     levels = calculate_trade_levels(m5, direction, strategy_level)
 
     if levels is None:
@@ -1596,9 +1506,7 @@ fvg_fill = detect_fvg_fill(m5)
             mtf_confirmed=mtf_confirmed,
         )
 
-    # --------------------------------------------------------
     # FINAL HIGH SIGNAL
-    # --------------------------------------------------------
     return {
         "signal": direction,
         "direction": direction,
