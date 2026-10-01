@@ -1,8 +1,8 @@
 # ============================================================
-# CryptoBot - Analysis Engine v8.1
+# CryptoBot - Analysis Engine v8.2
 #
 # 1H  = Main Direction
-# 15M = Filter + MTF Confirmation
+# 15M = Filter + MTF Confirmation + Breaker/FVG
 # 5M  = Entry Trigger
 #
 # Strategies:
@@ -12,11 +12,11 @@
 #   BREAKER_BLOCK
 #   FVG_FILL
 #
-# v8.1 Changes:
-#   - Minimum SL raised from 0.15% to 0.4%
-#   - ADX_15M filter blocks sweep strategies in chop
-#   - Stricter entry_trigger (body 0.45, close 0.70)
-#   - All v8 filters preserved
+# v8.2 Changes:
+#   - BREAKER_BLOCK moved from 5M to 15M (less noise)
+#   - FVG_FILL moved from 5M to 15M
+#   - Minimum SL raised from 0.4% to 0.6%
+#   - Added is_breakout_valid filter (anti fake breakout)
 # ============================================================
 
 from statistics import mean
@@ -396,6 +396,54 @@ def mtf_confirmation(m15, direction):
 
 
 # ============================================================
+# FAKE BREAKOUT FILTER (NEW in v8.2)
+# ============================================================
+
+def is_breakout_valid(candles, break_index, direction, tolerance=0.01):
+    """
+    بررسی می‌کند که شکست قبلی، واقعی بوده یا جعلی (fake breakout).
+
+    اگر در 20 کندل بعد از شکست، قیمت بیش از tolerance به سطح شکست
+    برگردد، یعنی شکست جعلی بوده.
+
+    tolerance=0.01 یعنی 1% برگشت مجاز است.
+    """
+    if break_index is None:
+        return False
+
+    if break_index < 0 or break_index >= len(candles):
+        return False
+
+    break_candle = candles[break_index]
+    _, _, _, break_close = candle_values(break_candle)
+
+    if break_close is None or break_close <= 0:
+        return False
+
+    end = min(break_index + 20, len(candles))
+
+    if direction == "LONG":
+        # برای شکست صعودی: قیمت نباید خیلی زیر سطح شکست برگردد
+        min_allowed = break_close * (1 - tolerance)
+
+        for i in range(break_index + 1, end):
+            _, _, low, _ = candle_values(candles[i])
+            if low is not None and low < min_allowed:
+                return False
+
+    else:  # SHORT
+        # برای شکست نزولی: قیمت نباید خیلی بالای سطح شکست برگردد
+        max_allowed = break_close * (1 + tolerance)
+
+        for i in range(break_index + 1, end):
+            _, high, _, _ = candle_values(candles[i])
+            if high is not None and high > max_allowed:
+                return False
+
+    return True
+
+
+# ============================================================
 # STOP HUNT
 # ============================================================
 
@@ -647,7 +695,7 @@ def detect_liquidity_zone(candles, tolerance=0.006):
 
 
 # ============================================================
-# BREAKER BLOCK
+# BREAKER BLOCK (v8.2 - with fake breakout filter)
 # ============================================================
 
 def detect_breaker_block(candles, lookback=40, tolerance=0.004):
@@ -675,7 +723,7 @@ def detect_breaker_block(candles, lookback=40, tolerance=0.004):
     upper = upper_wick(current)
     lower = lower_wick(current)
 
-    # SHORT: Bullish OB broken
+    # ---- SHORT: Bullish OB broken ----
     for i in range(2, len(recent) - 3):
         ob = recent[i]
         ob_o, ob_h, ob_l, ob_c = candle_values(ob)
@@ -705,6 +753,10 @@ def detect_breaker_block(candles, lookback=40, tolerance=0.004):
                 break
 
         if not broken:
+            continue
+
+        # NEW: بررسی fake breakout
+        if not is_breakout_valid(recent, break_index, "SHORT"):
             continue
 
         fvg_present = False
@@ -746,7 +798,7 @@ def detect_breaker_block(candles, lookback=40, tolerance=0.004):
                 )
             }
 
-    # LONG: Bearish OB broken
+    # ---- LONG: Bearish OB broken ----
     for i in range(2, len(recent) - 3):
         ob = recent[i]
         ob_o, ob_h, ob_l, ob_c = candle_values(ob)
@@ -776,6 +828,10 @@ def detect_breaker_block(candles, lookback=40, tolerance=0.004):
                 break
 
         if not broken:
+            continue
+
+        # NEW: بررسی fake breakout
+        if not is_breakout_valid(recent, break_index, "LONG"):
             continue
 
         fvg_present = False
@@ -978,7 +1034,7 @@ def detect_fvg_fill(candles, lookback=50):
 
 
 # ============================================================
-# 5M ENTRY TRIGGER (v8.1 - stricter)
+# 5M ENTRY TRIGGER
 # ============================================================
 
 def entry_trigger(candles, direction):
@@ -1053,7 +1109,7 @@ def entry_trigger(candles, direction):
 
 
 # ============================================================
-# TRADE LEVELS (v8.1 - min SL 0.4%)
+# TRADE LEVELS (v8.2 - min SL 0.6%)
 # ============================================================
 
 def calculate_trade_levels(candles, direction, strategy_level=None):
@@ -1097,7 +1153,7 @@ def calculate_trade_levels(candles, direction, strategy_level=None):
         if raw_risk <= 0:
             return None
 
-        minimum_risk = entry * 0.004  # 0.4%
+        minimum_risk = entry * 0.006  # 0.6%
 
         risk_distance = max(raw_risk, minimum_risk)
 
@@ -1122,7 +1178,7 @@ def calculate_trade_levels(candles, direction, strategy_level=None):
         if raw_risk <= 0:
             return None
 
-        minimum_risk = entry * 0.004  # 0.4%
+        minimum_risk = entry * 0.006  # 0.6%
 
         risk_distance = max(raw_risk, minimum_risk)
 
@@ -1241,7 +1297,7 @@ def generate_signal(daily, h4, h1, m15, m5):
     adx_15m = calculate_adx(m15)
 
     # --------------------------------------------------------
-    # ADX_15M FILTER FOR SWEEP STRATEGIES (v8.1)
+    # ADX_15M FILTER FOR SWEEP STRATEGIES
     # --------------------------------------------------------
     if adx_15m is not None and adx_15m < 30:
         stop_hunt = {
@@ -1267,8 +1323,11 @@ def generate_signal(daily, h4, h1, m15, m5):
         three_tap = detect_three_tap(m5)
         liquidity_zone = detect_liquidity_zone(m5)
 
-    breaker_block = detect_breaker_block(m5)
-    fvg_fill = detect_fvg_fill(m5)
+    # --------------------------------------------------------
+    # BREAKER_BLOCK and FVG_FILL on 15M (v8.2)
+    # --------------------------------------------------------
+    breaker_block = detect_breaker_block(m15)
+    fvg_fill = detect_fvg_fill(m15)
 
     strategy_details = {
         "STOP_HUNT": stop_hunt,
