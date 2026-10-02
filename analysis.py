@@ -1299,7 +1299,7 @@ def generate_signal(daily, h4, h1, m15, m5):
     # --------------------------------------------------------
     # ADX_15M FILTER FOR SWEEP STRATEGIES
     # --------------------------------------------------------
-    if adx_15m is not None and adx_15m < 30:
+    if adx_15m is not None and adx_15m < 25:
         stop_hunt = {
             "matched": False,
             "direction": None,
@@ -1510,7 +1510,7 @@ def generate_signal(daily, h4, h1, m15, m5):
     regime_ok = True
 
     if adx_1h is not None:
-        if adx_1h < 18:
+        if adx_1h < 15:
             regime_ok = False
             score -= 3
         elif adx_1h < 25:
@@ -1526,7 +1526,7 @@ def generate_signal(daily, h4, h1, m15, m5):
             score += 1
 
     # QUALITY GATE
-    if score < 10 or not regime_ok:
+    if score < 9 or not regime_ok:
         return no_trade(
             "SIGNAL_QUALITY_TOO_LOW",
             daily_direction, h4_direction, h1_direction,
