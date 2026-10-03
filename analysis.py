@@ -1,29 +1,31 @@
 # ============================================================
-# CryptoBot - Analysis Engine v10
+# CryptoBot - Analysis Engine v11
 #
-# 5 Strategies ONLY:
-#   1. Trend Following
-#   2. Pullback
-#   3. Breakout
-#   4. Reversal
-#   5. Range Trading
+# Main timeframe structure:
+#   1H  = Main Direction
+#   15M = Setup / Filter
+#   5M  = Entry Confirmation
 #
-# Timeframes:
-#   1H  = Main structure / direction
-#   15M = Setup confirmation
-#   5M  = Entry trigger
+# Strategies:
+#   1. TREND_FOLLOWING
+#   2. PULLBACK
+#   3. BREAKOUT
+#   4. REVERSAL
+#   5. RANGE_TRADING
 #
-# IMPORTANT:
-#   - Only HIGH signals are active
-#   - No score-only HIGH
-#   - Closed candles only
-#   - Strong confirmation required
-#   - SL/TP calculation kept compatible with previous version
+# v11 FIXES:
+#   - Closed candles handled consistently
+#   - EMA direction works with ~200 candles
+#   - Standard Wilder ADX
+#   - MTF confirmation less unnecessarily restrictive
+#   - Stronger 5M confirmation
+#   - HIGH cannot be created by score alone
+#   - Old strategy names removed
+#   - SL / TP model kept compatible with v9/v10
 # ============================================================
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
 import math
 
 
@@ -35,45 +37,70 @@ def safe_float(value, default=0.0):
     try:
         if value is None:
             return default
+
         x = float(value)
+
         if not math.isfinite(x):
             return default
+
         return x
+
     except Exception:
         return default
 
 
-def candle_values(c):
-    if isinstance(c, dict):
-        o = safe_float(c.get("open", c.get("o")))
-        h = safe_float(c.get("high", c.get("h")))
-        l = safe_float(c.get("low", c.get("l")))
-        cl = safe_float(c.get("close", c.get("c")))
-        v = safe_float(c.get("volume", c.get("v")))
-        return o, h, l, cl, v
+def candle_values(candle):
 
-    if isinstance(c, (list, tuple)) and len(c) >= 5:
-        return (
-            safe_float(c[0]),
-            safe_float(c[1]),
-            safe_float(c[2]),
-            safe_float(c[3]),
-            safe_float(c[4]),
+    if isinstance(candle, dict):
+
+        o = safe_float(
+            candle.get("open", candle.get("o", candle.get("Open", 0)))
         )
+
+        h = safe_float(
+            candle.get("high", candle.get("h", candle.get("High", 0)))
+        )
+
+        l = safe_float(
+            candle.get("low", candle.get("l", candle.get("Low", 0)))
+        )
+
+        c = safe_float(
+            candle.get("close", candle.get("c", candle.get("Close", 0)))
+        )
+
+        v = safe_float(
+            candle.get("volume", candle.get("v", candle.get("Volume", 0)))
+        )
+
+        return o, h, l, c, v
+
+    if isinstance(candle, (list, tuple)) and len(candle) >= 5:
+
+        o = safe_float(candle[1])
+        h = safe_float(candle[2])
+        l = safe_float(candle[3])
+        c = safe_float(candle[4])
+
+        v = safe_float(candle[5]) if len(candle) > 5 else 0.0
+
+        return o, h, l, c, v
 
     return 0.0, 0.0, 0.0, 0.0, 0.0
 
 
 def normalize_candles(candles):
-    if not candles:
-        return []
 
     result = []
 
-    for c in candles:
-        o, h, l, cl, v = candle_values(c)
+    if not isinstance(candles, list):
+        return result
 
-        if h <= 0 or l <= 0 or cl <= 0:
+    for candle in candles:
+
+        o, h, l, close, v = candle_values(candle)
+
+        if h <= 0 or l <= 0 or close <= 0:
             continue
 
         if h < l:
@@ -83,43 +110,49 @@ def normalize_candles(candles):
             "open": o,
             "high": h,
             "low": l,
-            "close": cl,
+            "close": close,
             "volume": v,
         })
 
     return result
 
 
-def closed_candles(candles):
-    """
-    Remove the currently forming candle.
-    """
-    candles = normalize_candles(candles)
+def closed(candles, count=1):
 
-    if len(candles) <= 2:
-        return candles
+    c = normalize_candles(candles)
 
-    return candles[:-1]
+    if len(c) <= count:
+        return c
+
+    return c[:-count]
 
 
 def candle_body(c):
-    o, h, l, cl, v = candle_values(c)
-    return abs(cl - o)
+    return abs(c["close"] - c["open"])
 
 
 def candle_range(c):
-    o, h, l, cl, v = candle_values(c)
-    return max(h - l, 0.0)
+    return max(c["high"] - c["low"], 1e-12)
 
 
 def upper_wick(c):
-    o, h, l, cl, v = candle_values(c)
-    return max(h - max(o, cl), 0.0)
+    return c["high"] - max(c["open"], c["close"])
 
 
 def lower_wick(c):
-    o, h, l, cl, v = candle_values(c)
-    return max(min(o, cl) - l, 0.0)
+    return min(c["open"], c["close"]) - c["low"]
+
+
+def bullish(c):
+    return c["close"] > c["open"]
+
+
+def bearish(c):
+    return c["close"] < c["open"]
+
+
+def body_ratio(c):
+    return candle_body(c) / candle_range(c)
 
 
 # ============================================================
@@ -127,37 +160,61 @@ def lower_wick(c):
 # ============================================================
 
 def ema(values, period):
-    values = [safe_float(x) for x in values if safe_float(x) > 0]
+
+    values = [
+        safe_float(x)
+        for x in values
+        if safe_float(x) > 0
+    ]
 
     if len(values) < period:
         return None
 
     multiplier = 2.0 / (period + 1.0)
 
-    result = sum(values[:period]) / period
+    current = sum(values[:period]) / period
 
     for price in values[period:]:
-        result = (price - result) * multiplier + result
+        current = (
+            (price - current) * multiplier
+            + current
+        )
 
-    return result
+    return current
 
 
 def ema_direction(candles):
-    candles = closed_candles(candles)
 
-    if len(candles) < 60:
+    c = normalize_candles(candles)
+
+    if len(c) < 55:
         return "RANGE"
 
-    closes = [c["close"] for c in candles]
+    closes = [x["close"] for x in c]
 
     e20 = ema(closes, 20)
     e50 = ema(closes, 50)
+    e200 = ema(closes, 200)
 
     if e20 is None or e50 is None:
         return "RANGE"
 
     last = closes[-1]
 
+    # If EMA200 is available, use full alignment.
+    if e200 is not None:
+
+        if last > e20 > e50 > e200:
+            return "BULLISH"
+
+        if last < e20 < e50 < e200:
+            return "BEARISH"
+
+        return "RANGE"
+
+    # With ~200 candles, EMA200 may not be available
+    # after removing the currently forming candle.
+    # Use EMA20/EMA50 alignment instead.
     if last > e20 > e50:
         return "BULLISH"
 
@@ -172,39 +229,47 @@ def ema_direction(candles):
 # ============================================================
 
 def calculate_rsi(candles, period=14):
-    candles = closed_candles(candles)
 
-    if len(candles) < period + 2:
+    c = normalize_candles(candles)
+
+    if len(c) < period + 2:
         return 50.0
 
-    closes = [c["close"] for c in candles]
+    closes = [x["close"] for x in c]
 
     gains = []
     losses = []
 
     for i in range(1, len(closes)):
+
         change = closes[i] - closes[i - 1]
 
-        if change > 0:
-            gains.append(change)
-            losses.append(0.0)
-        else:
-            gains.append(0.0)
-            losses.append(abs(change))
+        gains.append(max(change, 0.0))
+        losses.append(max(-change, 0.0))
 
     avg_gain = sum(gains[:period]) / period
     avg_loss = sum(losses[:period]) / period
 
     for i in range(period, len(gains)):
-        avg_gain = ((avg_gain * (period - 1)) + gains[i]) / period
-        avg_loss = ((avg_loss * (period - 1)) + losses[i]) / period
+
+        avg_gain = (
+            (avg_gain * (period - 1))
+            + gains[i]
+        ) / period
+
+        avg_loss = (
+            (avg_loss * (period - 1))
+            + losses[i]
+        ) / period
 
     if avg_loss == 0:
         return 100.0
 
     rs = avg_gain / avg_loss
 
-    return 100.0 - (100.0 / (1.0 + rs))
+    return 100.0 - (
+        100.0 / (1.0 + rs)
+    )
 
 
 # ============================================================
@@ -212,21 +277,24 @@ def calculate_rsi(candles, period=14):
 # ============================================================
 
 def calculate_atr(candles, period=14):
-    candles = closed_candles(candles)
 
-    if len(candles) < period + 2:
+    c = normalize_candles(candles)
+
+    if len(c) < period + 2:
         return 0.0
 
     trs = []
 
-    for i in range(1, len(candles)):
-        current = candles[i]
-        previous = candles[i - 1]
+    for i in range(1, len(c)):
+
+        high = c[i]["high"]
+        low = c[i]["low"]
+        prev_close = c[i - 1]["close"]
 
         tr = max(
-            current["high"] - current["low"],
-            abs(current["high"] - previous["close"]),
-            abs(current["low"] - previous["close"]),
+            high - low,
+            abs(high - prev_close),
+            abs(low - prev_close),
         )
 
         trs.append(tr)
@@ -237,7 +305,11 @@ def calculate_atr(candles, period=14):
     atr = sum(trs[:period]) / period
 
     for tr in trs[period:]:
-        atr = ((atr * (period - 1)) + tr) / period
+
+        atr = (
+            (atr * (period - 1))
+            + tr
+        ) / period
 
     return atr
 
@@ -247,68 +319,95 @@ def calculate_atr(candles, period=14):
 # ============================================================
 
 def calculate_adx(candles, period=14):
-    candles = closed_candles(candles)
 
-    if len(candles) < (period * 2) + 2:
+    c = normalize_candles(candles)
+
+    if len(c) < (period * 2) + 5:
         return 0.0
 
     tr_list = []
-    plus_dm = []
-    minus_dm = []
+    plus_dm_list = []
+    minus_dm_list = []
 
-    for i in range(1, len(candles)):
-        cur = candles[i]
-        prev = candles[i - 1]
+    for i in range(1, len(c)):
 
-        high_diff = cur["high"] - prev["high"]
-        low_diff = prev["low"] - cur["low"]
+        high = c[i]["high"]
+        low = c[i]["low"]
 
-        if high_diff > low_diff and high_diff > 0:
-            pdm = high_diff
-        else:
-            pdm = 0.0
+        prev_high = c[i - 1]["high"]
+        prev_low = c[i - 1]["low"]
+        prev_close = c[i - 1]["close"]
 
-        if low_diff > high_diff and low_diff > 0:
-            mdm = low_diff
-        else:
-            mdm = 0.0
+        up_move = high - prev_high
+        down_move = prev_low - low
+
+        plus_dm = (
+            up_move
+            if up_move > down_move and up_move > 0
+            else 0.0
+        )
+
+        minus_dm = (
+            down_move
+            if down_move > up_move and down_move > 0
+            else 0.0
+        )
 
         tr = max(
-            cur["high"] - cur["low"],
-            abs(cur["high"] - prev["close"]),
-            abs(cur["low"] - prev["close"]),
+            high - low,
+            abs(high - prev_close),
+            abs(low - prev_close),
         )
 
         tr_list.append(tr)
-        plus_dm.append(pdm)
-        minus_dm.append(mdm)
+        plus_dm_list.append(plus_dm)
+        minus_dm_list.append(minus_dm)
 
     if len(tr_list) < period:
         return 0.0
 
     atr = sum(tr_list[:period])
-    p_dm = sum(plus_dm[:period])
-    m_dm = sum(minus_dm[:period])
+    plus_dm = sum(plus_dm_list[:period])
+    minus_dm = sum(minus_dm_list[:period])
 
     dx_values = []
 
     for i in range(period, len(tr_list)):
-        atr = atr - (atr / period) + tr_list[i]
-        p_dm = p_dm - (p_dm / period) + plus_dm[i]
-        m_dm = m_dm - (m_dm / period) + minus_dm[i]
+
+        atr = (
+            atr
+            - (atr / period)
+            + tr_list[i]
+        )
+
+        plus_dm = (
+            plus_dm
+            - (plus_dm / period)
+            + plus_dm_list[i]
+        )
+
+        minus_dm = (
+            minus_dm
+            - (minus_dm / period)
+            + minus_dm_list[i]
+        )
 
         if atr <= 0:
             continue
 
-        plus_di = 100.0 * (p_dm / atr)
-        minus_di = 100.0 * (m_dm / atr)
+        plus_di = 100.0 * (plus_dm / atr)
+        minus_di = 100.0 * (minus_dm / atr)
 
         denominator = plus_di + minus_di
 
         if denominator <= 0:
-            continue
-
-        dx = 100.0 * abs(plus_di - minus_di) / denominator
+            dx = 0.0
+        else:
+            dx = (
+                100.0
+                * abs(plus_di - minus_di)
+                / denominator
+            )
 
         dx_values.append(dx)
 
@@ -318,35 +417,50 @@ def calculate_adx(candles, period=14):
     adx = sum(dx_values[:period]) / period
 
     for dx in dx_values[period:]:
-        adx = ((adx * (period - 1)) + dx) / period
 
-    return round(adx, 2)
+        adx = (
+            (adx * (period - 1))
+            + dx
+        ) / period
+
+    return max(
+        0.0,
+        min(100.0, adx)
+    )
 
 
 # ============================================================
 # VOLUME
 # ============================================================
 
-def volume_spike(candles, multiplier=1.30):
-    candles = closed_candles(candles)
+def volume_spike(
+    candles,
+    multiplier=1.30,
+    lookback=20
+):
 
-    if len(candles) < 25:
+    c = normalize_candles(candles)
+
+    if len(c) < lookback + 2:
         return False
 
-    current_volume = candles[-1]["volume"]
+    current = c[-1]["volume"]
 
-    previous_volumes = [
-        c["volume"]
-        for c in candles[-21:-1]
-        if c["volume"] > 0
+    previous = [
+        x["volume"]
+        for x in c[-lookback - 1:-1]
+        if x["volume"] > 0
     ]
 
-    if not previous_volumes:
+    if len(previous) < 10:
         return False
 
-    avg_volume = sum(previous_volumes) / len(previous_volumes)
+    average = sum(previous) / len(previous)
 
-    return current_volume >= avg_volume * multiplier
+    if average <= 0:
+        return False
+
+    return current >= average * multiplier
 
 
 # ============================================================
@@ -354,64 +468,87 @@ def volume_spike(candles, multiplier=1.30):
 # ============================================================
 
 def swing_highs(candles, strength=2):
-    candles = closed_candles(candles)
 
-    result = []
+    c = normalize_candles(candles)
 
-    if len(candles) < strength * 2 + 1:
-        return result
+    highs = []
 
-    for i in range(strength, len(candles) - strength):
-        high = candles[i]["high"]
+    for i in range(
+        strength,
+        len(c) - strength
+    ):
+
+        current = c[i]["high"]
 
         left = [
-            candles[j]["high"]
-            for j in range(i - strength, i)
+            c[j]["high"]
+            for j in range(
+                i - strength,
+                i
+            )
         ]
 
         right = [
-            candles[j]["high"]
-            for j in range(i + 1, i + strength + 1)
+            c[j]["high"]
+            for j in range(
+                i + 1,
+                i + strength + 1
+            )
         ]
 
-        if high > max(left) and high >= max(right):
-            result.append((i, high))
+        if (
+            current > max(left)
+            and current > max(right)
+        ):
+            highs.append((i, current))
 
-    return result
+    return highs
 
 
 def swing_lows(candles, strength=2):
-    candles = closed_candles(candles)
 
-    result = []
+    c = normalize_candles(candles)
 
-    if len(candles) < strength * 2 + 1:
-        return result
+    lows = []
 
-    for i in range(strength, len(candles) - strength):
-        low = candles[i]["low"]
+    for i in range(
+        strength,
+        len(c) - strength
+    ):
+
+        current = c[i]["low"]
 
         left = [
-            candles[j]["low"]
-            for j in range(i - strength, i)
+            c[j]["low"]
+            for j in range(
+                i - strength,
+                i
+            )
         ]
 
         right = [
-            candles[j]["low"]
-            for j in range(i + 1, i + strength + 1)
+            c[j]["low"]
+            for j in range(
+                i + 1,
+                i + strength + 1
+            )
         ]
 
-        if low < min(left) and low <= min(right):
-            result.append((i, low))
+        if (
+            current < min(left)
+            and current < min(right)
+        ):
+            lows.append((i, current))
 
-    return result
+    return lows
 
 
 def market_structure(candles):
-    candles = closed_candles(candles)
 
-    highs = swing_highs(candles)
-    lows = swing_lows(candles)
+    c = normalize_candles(candles)
+
+    highs = swing_highs(c, 2)
+    lows = swing_lows(c, 2)
 
     if len(highs) < 2 or len(lows) < 2:
         return "RANGE"
@@ -436,353 +573,531 @@ def market_structure(candles):
 # ============================================================
 
 def trend_strength(candles):
-    candles = closed_candles(candles)
-
-    if len(candles) < 60:
-        return "WEAK"
 
     adx = calculate_adx(candles)
 
-    if adx >= 25:
+    if adx >= 30:
         return "STRONG"
 
-    if adx >= 18:
+    if adx >= 22:
         return "MODERATE"
 
     return "WEAK"
 
 
 # ============================================================
-# MTF CONFIRMATION
+# 15M MTF CONFIRMATION
 # ============================================================
 
 def mtf_confirmation(m15, direction):
-    m15 = closed_candles(m15)
 
-    if len(m15) < 25:
+    if direction not in ("LONG", "SHORT"):
         return False
 
-    structure = market_structure(m15)
-    ema_dir = ema_direction(m15)
+    c = normalize_candles(m15)
+
+    if len(c) < 20:
+        return False
+
+    structure = market_structure(c)
+    ema_dir = ema_direction(c)
+
+    last = c[-1]
+    prev = c[-2]
 
     if direction == "LONG":
-        return (
+
+        structure_ok = (
             structure == "BULLISH"
-            and ema_dir == "BULLISH"
+            or ema_dir == "BULLISH"
         )
 
-    if direction == "SHORT":
-        return (
-            structure == "BEARISH"
-            and ema_dir == "BEARISH"
+        candle_ok = (
+            bullish(last)
+            or (
+                bullish(prev)
+                and last["close"] >= prev["close"]
+            )
         )
 
-    return False
+        return structure_ok and candle_ok
+
+    structure_ok = (
+        structure == "BEARISH"
+        or ema_dir == "BEARISH"
+    )
+
+    candle_ok = (
+        bearish(last)
+        or (
+            bearish(prev)
+            and last["close"] <= prev["close"]
+        )
+    )
+
+    return structure_ok and candle_ok
 
 
 # ============================================================
-# 5M CONFIRMATION
+# 5M ENTRY CONFIRMATION
 # ============================================================
 
-def confirmation_trigger(m5, direction):
-    candles = closed_candles(m5)
+def entry_trigger(m5, direction):
 
-    if len(candles) < 8:
+    c = normalize_candles(m5)
+
+    if len(c) < 8:
         return False
 
-    a = candles[-1]
-    b = candles[-2]
+    last = c[-1]
+    prev = c[-2]
 
-    body_a = candle_body(a)
-    range_a = candle_range(a)
-
-    body_b = candle_body(b)
-    range_b = candle_range(b)
-
-    if range_a <= 0 or range_b <= 0:
+    if body_ratio(last) < 0.45:
         return False
-
-    strong_a = body_a / range_a >= 0.55
-    strong_b = body_b / range_b >= 0.40
 
     if direction == "LONG":
-        bullish_a = a["close"] > a["open"]
-        bullish_b = b["close"] > b["open"]
 
-        structure_break = a["close"] > b["high"]
+        if not bullish(last):
+            return False
 
-        return (
-            bullish_a
-            and strong_a
-            and bullish_b
-            and strong_b
-            and structure_break
+        # Previous candle cannot be a strong bearish rejection.
+        if (
+            bearish(prev)
+            and body_ratio(prev) > 0.75
+        ):
+            return False
+
+        recent_high = max(
+            x["high"]
+            for x in c[-7:-1]
         )
+
+        # Either break recent micro high
+        # OR strong continuation candle.
+        breakout_ok = last["close"] > recent_high
+
+        continuation_ok = (
+            last["close"] > prev["high"]
+            and body_ratio(last) >= 0.55
+        )
+
+        return breakout_ok or continuation_ok
 
     if direction == "SHORT":
-        bearish_a = a["close"] < a["open"]
-        bearish_b = b["close"] < b["open"]
 
-        structure_break = a["close"] < b["low"]
+        if not bearish(last):
+            return False
 
-        return (
-            bearish_a
-            and strong_a
-            and bearish_b
-            and strong_b
-            and structure_break
+        if (
+            bullish(prev)
+            and body_ratio(prev) > 0.75
+        ):
+            return False
+
+        recent_low = min(
+            x["low"]
+            for x in c[-7:-1]
         )
+
+        breakout_ok = last["close"] < recent_low
+
+        continuation_ok = (
+            last["close"] < prev["low"]
+            and body_ratio(last) >= 0.55
+        )
+
+        return breakout_ok or continuation_ok
 
     return False
 
 
 # ============================================================
-# REJECTION CANDLE
+# REJECTION
 # ============================================================
 
-def bullish_rejection(c):
-    body = candle_body(c)
-    lower = lower_wick(c)
-    rng = candle_range(c)
+def rejection_candle(candles, direction):
+
+    c = normalize_candles(candles)
+
+    if not c:
+        return False
+
+    last = c[-1]
+
+    rng = candle_range(last)
+    body = candle_body(last)
 
     if rng <= 0:
         return False
 
-    return (
-        c["close"] > c["open"]
-        and lower >= body * 1.2
-        and lower / rng >= 0.30
-    )
+    if direction == "LONG":
 
+        return (
+            lower_wick(last) >= body * 1.0
+            and last["close"]
+            >= last["low"] + rng * 0.55
+        )
 
-def bearish_rejection(c):
-    body = candle_body(c)
-    upper = upper_wick(c)
-    rng = candle_range(c)
+    if direction == "SHORT":
 
-    if rng <= 0:
-        return False
+        return (
+            upper_wick(last) >= body * 1.0
+            and last["close"]
+            <= last["high"] - rng * 0.55
+        )
 
-    return (
-        c["close"] < c["open"]
-        and upper >= body * 1.2
-        and upper / rng >= 0.30
-    )
+    return False
 
 
 # ============================================================
 # TREND FOLLOWING
 # ============================================================
 
-def detect_trend_following(h1, m15, m5, direction):
-    if direction not in ("LONG", "SHORT"):
-        return False
+def detect_trend_following(h1, m15, m5):
 
-    h1 = closed_candles(h1)
+    h1_structure = market_structure(h1)
+    h1_ema = ema_direction(h1)
 
-    if len(h1) < 60:
-        return False
+    if h1_structure not in (
+        "BULLISH",
+        "BEARISH"
+    ):
+        return None
 
-    structure = market_structure(h1)
-    ema_dir = ema_direction(h1)
+    # Structure and EMA should agree.
+    if h1_structure != h1_ema:
+        return None
 
-    if direction == "LONG":
-        if structure != "BULLISH" or ema_dir != "BULLISH":
-            return False
+    direction = (
+        "LONG"
+        if h1_structure == "BULLISH"
+        else "SHORT"
+    )
 
-    if direction == "SHORT":
-        if structure != "BEARISH" or ema_dir != "BEARISH":
-            return False
+    adx = calculate_adx(h1)
 
-    if not mtf_confirmation(m15, direction):
-        return False
+    if adx < 22:
+        return None
 
-    if not confirmation_trigger(m5, direction):
-        return False
+    if not mtf_confirmation(
+        m15,
+        direction
+    ):
+        return None
 
-    return True
+    if not entry_trigger(
+        m5,
+        direction
+    ):
+        return None
+
+    return {
+        "direction": direction,
+        "name": "TREND_FOLLOWING",
+        "strength": (
+            "STRONG"
+            if adx >= 30
+            else "MODERATE"
+        ),
+        "reason": (
+            "1H structure + EMA + ADX "
+            "+ 15M confirmation + 5M trigger"
+        ),
+    }
 
 
 # ============================================================
 # PULLBACK
 # ============================================================
 
-def detect_pullback(h1, m15, m5, direction):
-    if direction not in ("LONG", "SHORT"):
-        return False
+def detect_pullback(h1, m15, m5):
 
-    h1 = closed_candles(h1)
+    h1_structure = market_structure(h1)
+    h1_ema = ema_direction(h1)
 
-    if len(h1) < 60:
-        return False
+    if h1_structure not in (
+        "BULLISH",
+        "BEARISH"
+    ):
+        return None
 
-    structure = market_structure(h1)
-    ema_dir = ema_direction(h1)
+    if h1_structure != h1_ema:
+        return None
 
-    if direction == "LONG":
-        if structure != "BULLISH" or ema_dir != "BULLISH":
-            return False
-    else:
-        if structure != "BEARISH" or ema_dir != "BEARISH":
-            return False
+    direction = (
+        "LONG"
+        if h1_structure == "BULLISH"
+        else "SHORT"
+    )
 
-    closes = [c["close"] for c in h1]
+    c = normalize_candles(h1)
+
+    if len(c) < 60:
+        return None
+
+    closes = [x["close"] for x in c]
 
     e20 = ema(closes, 20)
     e50 = ema(closes, 50)
 
     if e20 is None or e50 is None:
-        return False
+        return None
 
-    recent = h1[-6:]
+    recent = c[-8:]
 
-    zone_touch = False
+    touched_zone = False
 
-    for c in recent:
-        low = c["low"]
-        high = c["high"]
+    for x in recent:
 
-        if direction == "LONG":
-            if low <= e20 * 1.004 or low <= e50 * 1.004:
-                zone_touch = True
+        distance20 = (
+            abs(x["close"] - e20)
+            / x["close"]
+        )
 
-        else:
-            if high >= e20 * 0.996 or high >= e50 * 0.996:
-                zone_touch = True
+        distance50 = (
+            abs(x["close"] - e50)
+            / x["close"]
+        )
 
-    if not zone_touch:
-        return False
+        if min(
+            distance20,
+            distance50
+        ) <= 0.005:
 
-    last = h1[-1]
+            touched_zone = True
+            break
 
-    if direction == "LONG":
-        rejection = bullish_rejection(last)
-    else:
-        rejection = bearish_rejection(last)
+    if not touched_zone:
+        return None
 
-    if not rejection:
-        return False
+    if not rejection_candle(
+        recent,
+        direction
+    ):
+        return None
 
-    if not mtf_confirmation(m15, direction):
-        return False
+    if not mtf_confirmation(
+        m15,
+        direction
+    ):
+        return None
 
-    if not confirmation_trigger(m5, direction):
-        return False
+    if not entry_trigger(
+        m5,
+        direction
+    ):
+        return None
 
-    return True
+    return {
+        "direction": direction,
+        "name": "PULLBACK",
+        "strength": "STRONG",
+        "reason": (
+            "Trend + EMA pullback zone "
+            "+ rejection + 15M confirmation "
+            "+ 5M trigger"
+        ),
+    }
 
 
 # ============================================================
 # BREAKOUT
 # ============================================================
 
-def detect_breakout(m15, m5, direction):
-    m15 = closed_candles(m15)
+def detect_breakout(m15, m5):
 
-    if len(m15) < 30:
-        return False
+    c = normalize_candles(m15)
 
-    previous = m15[-21:-1]
+    if len(c) < 30:
+        return None
 
-    highest = max(c["high"] for c in previous)
-    lowest = min(c["low"] for c in previous)
+    previous = c[-21:-1]
+    last = c[-1]
 
-    last = m15[-1]
-    previous_candle = m15[-2]
+    resistance = max(
+        x["high"]
+        for x in previous
+    )
 
-    body = candle_body(last)
-    rng = candle_range(last)
+    support = min(
+        x["low"]
+        for x in previous
+    )
 
-    if rng <= 0:
-        return False
+    vol_ok = volume_spike(
+        c,
+        1.30,
+        20
+    )
 
-    strong_close = body / rng >= 0.60
+    if not vol_ok:
+        return None
 
-    vol_ok = volume_spike(m15, 1.30)
+    if body_ratio(last) < 0.50:
+        return None
 
-    if direction == "LONG":
-        broke = last["close"] > highest
+    # --------------------------------------------------------
+    # LONG BREAKOUT
+    # --------------------------------------------------------
 
-        if not broke:
-            return False
+    if last["close"] > resistance:
 
-        if not strong_close or not vol_ok:
-            return False
+        direction = "LONG"
 
-        # Hold above breakout level.
-        if last["close"] < highest:
-            return False
+        # The candle should hold the broken level.
+        if last["close"] <= resistance:
+            return None
 
-        # 5M must confirm continuation.
-        if not confirmation_trigger(m5, "LONG"):
-            return False
+        # Allow a small wick retest.
+        if (
+            last["low"] < resistance
+            and last["close"] < resistance * 1.001
+        ):
+            return None
 
-        return True
+        if not entry_trigger(
+            m5,
+            direction
+        ):
+            return None
 
-    if direction == "SHORT":
-        broke = last["close"] < lowest
+        return {
+            "direction": direction,
+            "name": "BREAKOUT",
+            "strength": "STRONG",
+            "reason": (
+                "15M breakout + volume "
+                "+ hold above resistance "
+                "+ 5M trigger"
+            ),
+        }
 
-        if not broke:
-            return False
+    # --------------------------------------------------------
+    # SHORT BREAKOUT
+    # --------------------------------------------------------
 
-        if not strong_close or not vol_ok:
-            return False
+    if last["close"] < support:
 
-        if last["close"] > lowest:
-            return False
+        direction = "SHORT"
 
-        if not confirmation_trigger(m5, "SHORT"):
-            return False
+        if last["close"] >= support:
+            return None
 
-        return True
+        if (
+            last["high"] > support
+            and last["close"] > support * 0.999
+        ):
+            return None
 
-    return False
+        if not entry_trigger(
+            m5,
+            direction
+        ):
+            return None
+
+        return {
+            "direction": direction,
+            "name": "BREAKOUT",
+            "strength": "STRONG",
+            "reason": (
+                "15M breakdown + volume "
+                "+ hold below support "
+                "+ 5M trigger"
+            ),
+        }
+
+    return None
 
 
 # ============================================================
 # REVERSAL
 # ============================================================
 
-def detect_reversal(m15, m5):
-    m15 = closed_candles(m15)
+def detect_reversal(h1, m15, m5):
 
-    if len(m15) < 30:
+    c15 = normalize_candles(m15)
+
+    if len(c15) < 30:
         return None
 
-    highs = swing_highs(m15)
-    lows = swing_lows(m15)
+    previous = c15[-11:-1]
+    last = c15[-1]
 
-    last = m15[-1]
+    local_high = max(
+        x["high"]
+        for x in previous
+    )
 
-    # --------------------------------------------------------
-    # Bullish reversal:
-    # sweep previous swing low -> close back above -> 5M shift
-    # --------------------------------------------------------
-
-    if lows:
-        previous_low = lows[-1][1]
-
-        swept = last["low"] < previous_low
-        recovered = last["close"] > previous_low
-
-        if swept and recovered and bullish_rejection(last):
-            if confirmation_trigger(m5, "LONG"):
-                return "LONG"
+    local_low = min(
+        x["low"]
+        for x in previous
+    )
 
     # --------------------------------------------------------
-    # Bearish reversal:
-    # sweep previous swing high -> close back below -> 5M shift
+    # BULLISH REVERSAL
     # --------------------------------------------------------
 
-    if highs:
-        previous_high = highs[-1][1]
+    if last["low"] < local_low:
 
-        swept = last["high"] > previous_high
-        recovered = last["close"] < previous_high
+        reclaimed = (
+            last["close"] > local_low
+        )
 
-        if swept and recovered and bearish_rejection(last):
-            if confirmation_trigger(m5, "SHORT"):
-                return "SHORT"
+        strong_close = (
+            bullish(last)
+            and body_ratio(last) >= 0.45
+        )
+
+        if reclaimed and strong_close:
+
+            if entry_trigger(
+                m5,
+                "LONG"
+            ):
+
+                return {
+                    "direction": "LONG",
+                    "name": "REVERSAL",
+                    "strength": "STRONG",
+                    "reason": (
+                        "15M downside sweep "
+                        "+ reclaim + bullish confirmation "
+                        "+ 5M trigger"
+                    ),
+                }
+
+    # --------------------------------------------------------
+    # BEARISH REVERSAL
+    # --------------------------------------------------------
+
+    if last["high"] > local_high:
+
+        rejected = (
+            last["close"] < local_high
+        )
+
+        strong_close = (
+            bearish(last)
+            and body_ratio(last) >= 0.45
+        )
+
+        if rejected and strong_close:
+
+            if entry_trigger(
+                m5,
+                "SHORT"
+            ):
+
+                return {
+                    "direction": "SHORT",
+                    "name": "REVERSAL",
+                    "strength": "STRONG",
+                    "reason": (
+                        "15M upside sweep "
+                        "+ rejection + bearish confirmation "
+                        "+ 5M trigger"
+                    ),
+                }
 
     return None
 
@@ -792,10 +1107,6 @@ def detect_reversal(m15, m5):
 # ============================================================
 
 def detect_range(h1, m5):
-    h1 = closed_candles(h1)
-
-    if len(h1) < 40:
-        return None
 
     structure = market_structure(h1)
     adx = calculate_adx(h1)
@@ -806,30 +1117,89 @@ def detect_range(h1, m5):
     if adx > 22:
         return None
 
-    recent = h1[-20:]
+    c = normalize_candles(h1)
 
-    range_high = max(c["high"] for c in recent)
-    range_low = min(c["low"] for c in recent)
+    if len(c) < 30:
+        return None
+
+    recent = c[-20:]
+
+    range_high = max(
+        x["high"]
+        for x in recent
+    )
+
+    range_low = min(
+        x["low"]
+        for x in recent
+    )
+
+    current = recent[-1]
 
     width = range_high - range_low
 
     if width <= 0:
         return None
 
-    last = h1[-1]
-    position = (last["close"] - range_low) / width
+    position = (
+        current["close"] - range_low
+    ) / width
 
-    # Near lower boundary -> LONG
+    # --------------------------------------------------------
+    # RANGE LOW -> LONG
+    # --------------------------------------------------------
+
     if position <= 0.20:
-        if bullish_rejection(last):
-            if confirmation_trigger(m5, "LONG"):
-                return "LONG"
 
-    # Near upper boundary -> SHORT
+        if not rejection_candle(
+            recent,
+            "LONG"
+        ):
+            return None
+
+        if not entry_trigger(
+            m5,
+            "LONG"
+        ):
+            return None
+
+        return {
+            "direction": "LONG",
+            "name": "RANGE_TRADING",
+            "strength": "MODERATE",
+            "reason": (
+                "Low ADX + range low rejection "
+                "+ 5M confirmation"
+            ),
+        }
+
+    # --------------------------------------------------------
+    # RANGE HIGH -> SHORT
+    # --------------------------------------------------------
+
     if position >= 0.80:
-        if bearish_rejection(last):
-            if confirmation_trigger(m5, "SHORT"):
-                return "SHORT"
+
+        if not rejection_candle(
+            recent,
+            "SHORT"
+        ):
+            return None
+
+        if not entry_trigger(
+            m5,
+            "SHORT"
+        ):
+            return None
+
+        return {
+            "direction": "SHORT",
+            "name": "RANGE_TRADING",
+            "strength": "MODERATE",
+            "reason": (
+                "Low ADX + range high rejection "
+                "+ 5M confirmation"
+            ),
+        }
 
     return None
 
@@ -838,68 +1208,158 @@ def detect_range(h1, m5):
 # CONTEXT FILTER
 # ============================================================
 
-def context_allowed(daily, h4, h1, direction, strategy_names):
-    strong_reversal = "REVERSAL" in strategy_names
-    range_trade = "RANGE_TRADING" in strategy_names
+def context_allows(
+    daily,
+    h4,
+    direction,
+    strategy
+):
 
-    # Daily strong opposite trend.
+    daily_dir = ema_direction(daily)
+    h4_dir = ema_direction(h4)
+
+    # Reversal and Range have their own logic.
+    if strategy in (
+        "REVERSAL",
+        "RANGE_TRADING"
+    ):
+        return True
+
     if direction == "LONG":
-        if daily == "BEARISH" and h4 == "BEARISH":
-            if not strong_reversal:
-                return False, "DAILY_4H_OPPOSITE"
+
+        if (
+            daily_dir == "BEARISH"
+            and h4_dir == "BEARISH"
+        ):
+            return False
+
+        if h4_dir == "BEARISH":
+            return False
 
     if direction == "SHORT":
-        if daily == "BULLISH" and h4 == "BULLISH":
-            if not strong_reversal:
-                return False, "DAILY_4H_OPPOSITE"
 
-    # 4H direct opposition.
-    if direction == "LONG" and h4 == "BEARISH":
-        if not strong_reversal and not range_trade:
-            return False, "4H_OPPOSITE_TREND"
+        if (
+            daily_dir == "BULLISH"
+            and h4_dir == "BULLISH"
+        ):
+            return False
 
-    if direction == "SHORT" and h4 == "BULLISH":
-        if not strong_reversal and not range_trade:
-            return False, "4H_OPPOSITE_TREND"
+        if h4_dir == "BULLISH":
+            return False
 
-    return True, "OK"
+    return True
+
+
+# ============================================================
+# NEARBY SUPPORT / RESISTANCE
+# ============================================================
+
+def nearby_levels(candles):
+
+    c = normalize_candles(candles)
+
+    if len(c) < 30:
+        return [], []
+
+    highs = swing_highs(c, 2)
+    lows = swing_lows(c, 2)
+
+    resistances = [
+        x[1]
+        for x in highs[-10:]
+    ]
+
+    supports = [
+        x[1]
+        for x in lows[-10:]
+    ]
+
+    return supports, resistances
+
+
+def target_reachable(
+    entry,
+    direction,
+    tp,
+    candles
+):
+
+    supports, resistances = nearby_levels(
+        candles
+    )
+
+    if direction == "LONG":
+
+        blockers = [
+            x
+            for x in resistances
+            if x > entry and x < tp
+        ]
+
+        if blockers:
+            return False
+
+    if direction == "SHORT":
+
+        blockers = [
+            x
+            for x in supports
+            if x < entry and x > tp
+        ]
+
+        if blockers:
+            return False
+
+    return True
 
 
 # ============================================================
 # TRADE LEVELS
 # ============================================================
 
-def calculate_trade_levels(h1, m5, direction):
-    h1 = closed_candles(h1)
-    m5 = closed_candles(m5)
+def calculate_trade_levels(
+    direction,
+    h1,
+    m5
+):
 
-    if not h1 or not m5:
+    h1c = normalize_candles(h1)
+    m5c = normalize_candles(m5)
+
+    if len(h1c) < 30 or len(m5c) < 10:
         return None
 
-    entry = m5[-1]["close"]
+    entry = m5c[-1]["close"]
 
-    atr = calculate_atr(h1, 14)
+    atr = calculate_atr(h1c)
 
     if atr <= 0:
         return None
 
-    highs = swing_highs(h1)
-    lows = swing_lows(h1)
+    lows = swing_lows(
+        h1c,
+        2
+    )
+
+    highs = swing_highs(
+        h1c,
+        2
+    )
 
     if direction == "LONG":
 
-        candidates = [
-            low
-            for _, low in lows[-5:]
-            if low < entry
+        recent_lows = [
+            x[1]
+            for x in lows[-5:]
         ]
 
-        if candidates:
-            swing_sl = min(candidates)
-        else:
-            swing_sl = entry - atr
+        swing = (
+            min(recent_lows)
+            if recent_lows
+            else entry - atr
+        )
 
-        sl = swing_sl - atr * 0.35
+        sl = swing - atr * 0.35
 
         risk = entry - sl
 
@@ -907,12 +1367,12 @@ def calculate_trade_levels(h1, m5, direction):
         max_risk = atr * 3.00
 
         if risk < min_risk:
+
             risk = min_risk
             sl = entry - risk
 
         if risk > max_risk:
-            risk = max_risk
-            sl = entry - risk
+            return None
 
         tp1 = entry + risk * 1.50
         tp2 = entry + risk * 2.50
@@ -920,18 +1380,18 @@ def calculate_trade_levels(h1, m5, direction):
 
     else:
 
-        candidates = [
-            high
-            for _, high in highs[-5:]
-            if high > entry
+        recent_highs = [
+            x[1]
+            for x in highs[-5:]
         ]
 
-        if candidates:
-            swing_sl = max(candidates)
-        else:
-            swing_sl = entry + atr
+        swing = (
+            max(recent_highs)
+            if recent_highs
+            else entry + atr
+        )
 
-        sl = swing_sl + atr * 0.35
+        sl = swing + atr * 0.35
 
         risk = sl - entry
 
@@ -939,12 +1399,12 @@ def calculate_trade_levels(h1, m5, direction):
         max_risk = atr * 3.00
 
         if risk < min_risk:
+
             risk = min_risk
             sl = entry + risk
 
         if risk > max_risk:
-            risk = max_risk
-            sl = entry + risk
+            return None
 
         tp1 = entry - risk * 1.50
         tp2 = entry - risk * 2.50
@@ -953,19 +1413,28 @@ def calculate_trade_levels(h1, m5, direction):
     if entry <= 0 or risk <= 0:
         return None
 
-    risk_percent = abs(risk / entry) * 100
+    risk_percent = (
+        risk / entry
+    ) * 100.0
 
-    # Keep extreme trades out.
     if risk_percent > 3.5:
         return None
 
+    if not target_reachable(
+        entry,
+        direction,
+        tp1,
+        h1c
+    ):
+        return None
+
     return {
-        "entry": round(entry, 8),
-        "sl": round(sl, 8),
-        "tp1": round(tp1, 8),
-        "tp2": round(tp2, 8),
-        "tp3": round(tp3, 8),
-        "risk": round(risk, 8),
+        "entry": entry,
+        "sl": sl,
+        "tp1": tp1,
+        "tp2": tp2,
+        "tp3": tp3,
+        "risk": risk,
         "rr": "1:3",
     }
 
@@ -979,21 +1448,23 @@ def no_trade(
     daily="RANGE",
     h4="RANGE",
     h1="RANGE",
+    daily_ema="RANGE",
+    h4_ema="RANGE",
+    h1_ema="RANGE",
     rsi_15m=50.0,
     adx_1h=0.0,
     adx_15m=0.0,
     mtf_confirmed=False,
-    volume_spike_flag=False,
+    volume_spike_value=False,
     confirmation=False,
     strategies=None,
-    strategy_matches=None,
 ):
-    strategies = strategies or []
-    strategy_matches = strategy_matches or {}
 
     return {
+
         "signal": "NO_TRADE",
         "direction": None,
+
         "quality": "LOW",
         "score": 0,
 
@@ -1001,38 +1472,55 @@ def no_trade(
         "4h": h4,
         "1h": h1,
 
-        "daily_ema": daily,
-        "4h_ema": h4,
-        "1h_ema": h1,
+        "daily_ema": daily_ema,
+        "4h_ema": h4_ema,
+        "1h_ema": h1_ema,
 
-        "rsi_15m": round(rsi_15m, 2),
-        "adx_1h": round(adx_1h, 2),
-        "adx_15m": round(adx_15m, 2),
+        "rsi_15m": round(
+            rsi_15m,
+            2
+        ),
 
-        "mtf_confirmed": bool(mtf_confirmed),
-        "volume_spike": bool(volume_spike_flag),
-        "confirmation": bool(confirmation),
+        "adx_1h": round(
+            adx_1h,
+            2
+        ),
 
-        "strategies": strategies,
-        "strategy_matches": strategy_matches,
+        "adx_15m": round(
+            adx_15m,
+            2
+        ),
+
+        "mtf_confirmed": mtf_confirmed,
+
+        "volume_spike": volume_spike_value,
+
+        "confirmation": confirmation,
+
+        "strategies": strategies or [],
+
+        "strategy_matches": [],
+
         "strategy": None,
-        "strategy_details": strategy_matches,
+
+        "strategy_details": {},
+
+        "trend_following": False,
+        "pullback": False,
+        "breakout": False,
+        "reversal": False,
+        "range_trading": False,
 
         "entry": None,
         "sl": None,
         "tp1": None,
         "tp2": None,
         "tp3": None,
+
         "risk": None,
         "rr": None,
 
         "reason": reason,
-
-        "trend_following": bool(strategy_matches.get("TREND_FOLLOWING")),
-        "pullback": bool(strategy_matches.get("PULLBACK")),
-        "breakout": bool(strategy_matches.get("BREAKOUT")),
-        "reversal": bool(strategy_matches.get("REVERSAL")),
-        "range_trading": bool(strategy_matches.get("RANGE_TRADING")),
     }
 
 
@@ -1040,290 +1528,389 @@ def no_trade(
 # MAIN SIGNAL GENERATOR
 # ============================================================
 
-def generate_signal(daily, h4, h1, m15, m5):
+def generate_signal(
+    daily,
+    h4,
+    h1,
+    m15,
+    m5
+):
 
-    daily = closed_candles(daily)
-    h4 = closed_candles(h4)
-    h1 = closed_candles(h1)
-    m15 = closed_candles(m15)
-    m5 = closed_candles(m5)
+    # --------------------------------------------------------
+    # CLOSE EACH TIMEFRAME ONCE
+    # --------------------------------------------------------
+
+    daily_c = closed(daily)
+    h4_c = closed(h4)
+    h1_c = closed(h1)
+    m15_c = closed(m15)
+    m5_c = closed(m5)
 
     if (
-        len(daily) < 60
-        or len(h4) < 60
-        or len(h1) < 60
-        or len(m15) < 30
-        or len(m5) < 20
+        len(daily_c) < 50
+        or len(h4_c) < 50
+        or len(h1_c) < 50
+        or len(m15_c) < 30
+        or len(m5_c) < 20
     ):
-        return no_trade("INSUFFICIENT_DATA")
+        return no_trade(
+            "INSUFFICIENT_DATA"
+        )
 
     # --------------------------------------------------------
-    # MARKET CONTEXT
+    # MARKET DIRECTION
     # --------------------------------------------------------
 
-    daily_structure = market_structure(daily)
-    h4_structure = market_structure(h4)
-    h1_structure = market_structure(h1)
+    daily_ema = ema_direction(daily_c)
+    h4_ema = ema_direction(h4_c)
+    h1_ema = ema_direction(h1_c)
 
-    daily_ema = ema_direction(daily)
-    h4_ema = ema_direction(h4)
-    h1_ema = ema_direction(h1)
+    daily_structure = market_structure(
+        daily_c
+    )
 
-    # Main 1H direction.
-    direction = None
+    h4_structure = market_structure(
+        h4_c
+    )
 
-    if (
-        h1_structure == "BULLISH"
-        and h1_ema == "BULLISH"
-    ):
-        direction = "LONG"
+    h1_structure = market_structure(
+        h1_c
+    )
 
-    elif (
-        h1_structure == "BEARISH"
-        and h1_ema == "BEARISH"
-    ):
-        direction = "SHORT"
+    daily_dir = (
+        daily_structure
+        if daily_structure in (
+            "BULLISH",
+            "BEARISH"
+        )
+        else daily_ema
+    )
+
+    h4_dir = (
+        h4_structure
+        if h4_structure in (
+            "BULLISH",
+            "BEARISH"
+        )
+        else h4_ema
+    )
+
+    h1_dir = (
+        h1_structure
+        if h1_structure in (
+            "BULLISH",
+            "BEARISH"
+        )
+        else h1_ema
+    )
 
     # --------------------------------------------------------
-    # INDICATORS
+    # FILTERS
     # --------------------------------------------------------
 
-    rsi_15m = calculate_rsi(m15)
-    adx_1h = calculate_adx(h1)
-    adx_15m = calculate_adx(m15)
+    rsi15 = calculate_rsi(m15_c)
 
-    vol_spike = volume_spike(m15)
+    adx1 = calculate_adx(h1_c)
+
+    adx15 = calculate_adx(m15_c)
+
+    vol_spike = volume_spike(
+        m15_c
+    )
 
     # --------------------------------------------------------
     # STRATEGY DETECTION
+    #
+    # IMPORTANT:
+    # Pass the already-closed candles.
+    # Detector functions no longer remove another candle.
     # --------------------------------------------------------
 
-    matches = {}
+    matches = []
 
-    if direction:
-        matches["TREND_FOLLOWING"] = detect_trend_following(
-            h1, m15, m5, direction
-        )
+    trend = detect_trend_following(
+        h1_c,
+        m15_c,
+        m5_c
+    )
 
-        matches["PULLBACK"] = detect_pullback(
-            h1, m15, m5, direction
-        )
+    if trend:
+        matches.append(trend)
 
-        matches["BREAKOUT"] = detect_breakout(
-            m15, m5, direction
-        )
+    pullback = detect_pullback(
+        h1_c,
+        m15_c,
+        m5_c
+    )
 
-    else:
-        matches["TREND_FOLLOWING"] = False
-        matches["PULLBACK"] = False
-        matches["BREAKOUT"] = False
+    if pullback:
+        matches.append(pullback)
 
-    reversal_direction = detect_reversal(m15, m5)
+    breakout = detect_breakout(
+        m15_c,
+        m5_c
+    )
 
-    matches["REVERSAL"] = reversal_direction is not None
+    if breakout:
+        matches.append(breakout)
 
-    range_direction = detect_range(h1, m5)
+    reversal = detect_reversal(
+        h1_c,
+        m15_c,
+        m5_c
+    )
 
-    matches["RANGE_TRADING"] = range_direction is not None
+    if reversal:
+        matches.append(reversal)
 
-    # --------------------------------------------------------
-    # STRATEGY DIRECTION
-    # --------------------------------------------------------
+    range_setup = detect_range(
+        h1_c,
+        m5_c
+    )
 
-    if direction is None:
+    if range_setup:
+        matches.append(range_setup)
 
-        if reversal_direction:
-            direction = reversal_direction
-
-        elif range_direction:
-            direction = range_direction
-
-    # No direction = no trade.
-    if direction is None:
-        return no_trade(
-            "NO_VALID_STRATEGY",
-            daily_structure,
-            h4_structure,
-            h1_structure,
-            rsi_15m,
-            adx_1h,
-            adx_15m,
-            False,
-            vol_spike,
-            False,
-            [],
-            matches,
-        )
-
-    # --------------------------------------------------------
-    # STRATEGIES THAT ACTUALLY MATCH
-    # --------------------------------------------------------
-
-    matched = [
-        name
-        for name, value in matches.items()
-        if value
+    strategy_names = [
+        x["name"]
+        for x in matches
     ]
 
-    if not matched:
+    # --------------------------------------------------------
+    # NO VALID STRATEGY
+    # --------------------------------------------------------
+
+    if not matches:
+
         return no_trade(
-            "NO_VALID_STRATEGY",
-            daily_structure,
-            h4_structure,
-            h1_structure,
-            rsi_15m,
-            adx_1h,
-            adx_15m,
-            False,
-            vol_spike,
-            False,
-            [],
-            matches,
+            reason="NO_VALID_STRATEGY",
+
+            daily=daily_dir,
+            h4=h4_dir,
+            h1=h1_dir,
+
+            daily_ema=daily_ema,
+            h4_ema=h4_ema,
+            h1_ema=h1_ema,
+
+            rsi_15m=rsi15,
+
+            adx_1h=adx1,
+            adx_15m=adx15,
+
+            mtf_confirmed=False,
+
+            volume_spike_value=vol_spike,
+
+            confirmation=False,
+
+            strategies=[],
         )
 
     # --------------------------------------------------------
-    # CHECK 5M CONFIRMATION
+    # STRATEGY PRIORITY
     # --------------------------------------------------------
 
-    confirmation = confirmation_trigger(m5, direction)
+    priority = {
+        "REVERSAL": 5,
+        "BREAKOUT": 4,
+        "PULLBACK": 3,
+        "TREND_FOLLOWING": 2,
+        "RANGE_TRADING": 1,
+    }
 
-    # Reversal/range functions already require confirmation,
-    # but keep a final global safety check.
-    if not confirmation:
-        return no_trade(
-            "NO_5M_CONFIRMATION",
-            daily_structure,
-            h4_structure,
-            h1_structure,
-            rsi_15m,
-            adx_1h,
-            adx_15m,
-            False,
-            vol_spike,
-            False,
-            matched,
-            matches,
-        )
+    matches.sort(
+        key=lambda x: priority.get(
+            x["name"],
+            0
+        ),
+        reverse=True
+    )
 
-    # --------------------------------------------------------
-    # 15M MTF CONFIRMATION
-    # --------------------------------------------------------
+    selected = matches[0]
 
-    mtf = mtf_confirmation(m15, direction)
-
-    # Trend/pullback require MTF.
-    if (
-        matches.get("TREND_FOLLOWING")
-        or matches.get("PULLBACK")
-    ):
-        if not mtf:
-            return no_trade(
-                "NO_15M_MTF_CONFIRMATION",
-                daily_structure,
-                h4_structure,
-                h1_structure,
-                rsi_15m,
-                adx_1h,
-                adx_15m,
-                mtf,
-                vol_spike,
-                confirmation,
-                matched,
-                matches,
-            )
+    direction = selected["direction"]
+    strategy = selected["name"]
 
     # --------------------------------------------------------
-    # CONTEXT FILTER
+    # CONTEXT
     # --------------------------------------------------------
 
-    allowed, context_reason = context_allowed(
-        daily_structure,
-        h4_structure,
-        h1_structure,
+    if not context_allows(
+        daily_c,
+        h4_c,
         direction,
-        matched,
-    )
+        strategy
+    ):
 
-    if not allowed:
         return no_trade(
-            context_reason,
-            daily_structure,
-            h4_structure,
-            h1_structure,
-            rsi_15m,
-            adx_1h,
-            adx_15m,
-            mtf,
-            vol_spike,
-            confirmation,
-            matched,
-            matches,
+            reason="4H_OPPOSITE_TREND",
+
+            daily=daily_dir,
+            h4=h4_dir,
+            h1=h1_dir,
+
+            daily_ema=daily_ema,
+            h4_ema=h4_ema,
+            h1_ema=h1_ema,
+
+            rsi_15m=rsi15,
+
+            adx_1h=adx1,
+            adx_15m=adx15,
+
+            mtf_confirmed=mtf_confirmation(
+                m15_c,
+                direction
+            ),
+
+            volume_spike_value=vol_spike,
+
+            confirmation=entry_trigger(
+                m5_c,
+                direction
+            ),
+
+            strategies=strategy_names,
         )
 
     # --------------------------------------------------------
-    # QUALITY REQUIREMENTS
+    # CONFIRMATIONS
     # --------------------------------------------------------
 
-    # HIGH cannot come from one weak condition.
-    #
-    # Required:
-    #   - at least one real strategy
-    #   - confirmation
-    #   - context
-    #
-    # Trend Following alone is NOT automatically HIGH.
-    #
+    mtf_ok = mtf_confirmation(
+        m15_c,
+        direction
+    )
 
-    strategy_count = len(matched)
+    trigger_ok = entry_trigger(
+        m5_c,
+        direction
+    )
 
-    strong_strategy = any(
-        x in matched
-        for x in (
-            "PULLBACK",
-            "BREAKOUT",
-            "REVERSAL",
-            "RANGE_TRADING",
+    # --------------------------------------------------------
+    # EVERY ACTIVE SIGNAL NEEDS 5M CONFIRMATION
+    # --------------------------------------------------------
+
+    if not trigger_ok:
+
+        return no_trade(
+            reason="NO_5M_CONFIRMATION",
+
+            daily=daily_dir,
+            h4=h4_dir,
+            h1=h1_dir,
+
+            daily_ema=daily_ema,
+            h4_ema=h4_ema,
+            h1_ema=h1_ema,
+
+            rsi_15m=rsi15,
+
+            adx_1h=adx1,
+            adx_15m=adx15,
+
+            mtf_confirmed=mtf_ok,
+
+            volume_spike_value=vol_spike,
+
+            confirmation=False,
+
+            strategies=strategy_names,
         )
-    )
 
-    # Trend-only needs stronger market agreement.
-    trend_only_valid = (
-        matched == ["TREND_FOLLOWING"]
-        and mtf
-        and confirmation
-        and adx_1h >= 20
-        and adx_15m >= 18
-    )
+    # --------------------------------------------------------
+    # TREND / PULLBACK REQUIRE 15M CONFIRMATION
+    # --------------------------------------------------------
 
-    high_valid = False
+    if strategy in (
+        "TREND_FOLLOWING",
+        "PULLBACK"
+    ):
 
-    if strong_strategy:
-        high_valid = (
-            confirmation
-            and (
-                mtf
-                or "REVERSAL" in matched
-                or "RANGE_TRADING" in matched
+        if not mtf_ok:
+
+            return no_trade(
+                reason="NO_MTF_CONFIRMATION",
+
+                daily=daily_dir,
+                h4=h4_dir,
+                h1=h1_dir,
+
+                daily_ema=daily_ema,
+                h4_ema=h4_ema,
+                h1_ema=h1_ema,
+
+                rsi_15m=rsi15,
+
+                adx_1h=adx1,
+                adx_15m=adx15,
+
+                mtf_confirmed=False,
+
+                volume_spike_value=vol_spike,
+
+                confirmation=trigger_ok,
+
+                strategies=strategy_names,
             )
+
+    # --------------------------------------------------------
+    # RSI EXTREME FILTER
+    # --------------------------------------------------------
+
+    if direction == "LONG" and rsi15 > 78:
+
+        return no_trade(
+            reason="RSI_TOO_EXTENDED",
+
+            daily=daily_dir,
+            h4=h4_dir,
+            h1=h1_dir,
+
+            daily_ema=daily_ema,
+            h4_ema=h4_ema,
+            h1_ema=h1_ema,
+
+            rsi_15m=rsi15,
+
+            adx_1h=adx1,
+            adx_15m=adx15,
+
+            mtf_confirmed=mtf_ok,
+
+            volume_spike_value=vol_spike,
+
+            confirmation=trigger_ok,
+
+            strategies=strategy_names,
         )
 
-    elif trend_only_valid:
-        high_valid = True
+    if direction == "SHORT" and rsi15 < 22:
 
-    if not high_valid:
         return no_trade(
-            "SETUP_NOT_STRONG_ENOUGH",
-            daily_structure,
-            h4_structure,
-            h1_structure,
-            rsi_15m,
-            adx_1h,
-            adx_15m,
-            mtf,
-            vol_spike,
-            confirmation,
-            matched,
-            matches,
+            reason="RSI_TOO_EXTENDED",
+
+            daily=daily_dir,
+            h4=h4_dir,
+            h1=h1_dir,
+
+            daily_ema=daily_ema,
+            h4_ema=h4_ema,
+            h1_ema=h1_ema,
+
+            rsi_15m=rsi15,
+
+            adx_1h=adx1,
+            adx_15m=adx15,
+
+            mtf_confirmed=mtf_ok,
+
+            volume_spike_value=vol_spike,
+
+            confirmation=trigger_ok,
+
+            strategies=strategy_names,
         )
 
     # --------------------------------------------------------
@@ -1332,123 +1919,301 @@ def generate_signal(daily, h4, h1, m15, m5):
 
     score = 0
 
-    score += strategy_count * 3
+    if strategy in (
+        "REVERSAL",
+        "BREAKOUT",
+        "PULLBACK"
+    ):
+        score += 4
 
-    if mtf:
+    elif strategy == "TREND_FOLLOWING":
+        score += 3
+
+    elif strategy == "RANGE_TRADING":
+        score += 3
+
+    if len(matches) >= 2:
         score += 2
 
-    if confirmation:
+    if len(matches) >= 3:
+        score += 1
+
+    if trigger_ok:
         score += 2
+
+    if mtf_ok:
+        score += 2
+
+    if adx1 >= 30:
+        score += 2
+
+    elif adx1 >= 22:
+        score += 1
 
     if vol_spike:
         score += 1
 
-    if adx_1h >= 25:
-        score += 1
+    # --------------------------------------------------------
+    # STRICT HIGH SETUP
+    # --------------------------------------------------------
 
-    if adx_15m >= 20:
-        score += 1
+    valid_high_setup = False
 
-    # Context alignment.
-    if direction == "LONG":
-        if daily_structure == "BULLISH":
-            score += 1
+    # TREND FOLLOWING
+    if strategy == "TREND_FOLLOWING":
 
-        if h4_structure == "BULLISH":
-            score += 1
+        valid_high_setup = (
+            h1_dir in (
+                "BULLISH",
+                "BEARISH"
+            )
+            and h1_dir == (
+                "BULLISH"
+                if direction == "LONG"
+                else "BEARISH"
+            )
+            and mtf_ok
+            and trigger_ok
+            and adx1 >= 22
+            and len(matches) >= 2
+        )
 
-    if direction == "SHORT":
-        if daily_structure == "BEARISH":
-            score += 1
+    # PULLBACK
+    elif strategy == "PULLBACK":
 
-        if h4_structure == "BEARISH":
-            score += 1
+        valid_high_setup = (
+            mtf_ok
+            and trigger_ok
+            and adx1 >= 20
+        )
+
+    # BREAKOUT
+    elif strategy == "BREAKOUT":
+
+        valid_high_setup = (
+            trigger_ok
+            and vol_spike
+        )
+
+    # REVERSAL
+    elif strategy == "REVERSAL":
+
+        valid_high_setup = (
+            trigger_ok
+            and (
+                mtf_ok
+                or adx15 >= 18
+            )
+        )
+
+    # RANGE
+    elif strategy == "RANGE_TRADING":
+
+        valid_high_setup = (
+            trigger_ok
+            and adx1 <= 22
+        )
+
+    if not valid_high_setup:
+
+        return no_trade(
+            reason="SETUP_NOT_STRONG_ENOUGH",
+
+            daily=daily_dir,
+            h4=h4_dir,
+            h1=h1_dir,
+
+            daily_ema=daily_ema,
+            h4_ema=h4_ema,
+            h1_ema=h1_ema,
+
+            rsi_15m=rsi15,
+
+            adx_1h=adx1,
+            adx_15m=adx15,
+
+            mtf_confirmed=mtf_ok,
+
+            volume_spike_value=vol_spike,
+
+            confirmation=trigger_ok,
+
+            strategies=strategy_names,
+        )
+
+    # --------------------------------------------------------
+    # HIGH THRESHOLD
+    # --------------------------------------------------------
+
+    if score < 11:
+
+        return no_trade(
+            reason="SIGNAL_QUALITY_TOO_LOW",
+
+            daily=daily_dir,
+            h4=h4_dir,
+            h1=h1_dir,
+
+            daily_ema=daily_ema,
+            h4_ema=h4_ema,
+            h1_ema=h1_ema,
+
+            rsi_15m=rsi15,
+
+            adx_1h=adx1,
+            adx_15m=adx15,
+
+            mtf_confirmed=mtf_ok,
+
+            volume_spike_value=vol_spike,
+
+            confirmation=trigger_ok,
+
+            strategies=strategy_names,
+        )
 
     # --------------------------------------------------------
     # TRADE LEVELS
     # --------------------------------------------------------
 
     levels = calculate_trade_levels(
-        h1,
-        m5,
         direction,
+        h1_c,
+        m5_c
     )
 
-    if levels is None:
+    if not levels:
+
         return no_trade(
-            "INVALID_TRADE_LEVELS",
-            daily_structure,
-            h4_structure,
-            h1_structure,
-            rsi_15m,
-            adx_1h,
-            adx_15m,
-            mtf,
-            vol_spike,
-            confirmation,
-            matched,
-            matches,
+            reason="INVALID_TRADE_LEVELS",
+
+            daily=daily_dir,
+            h4=h4_dir,
+            h1=h1_dir,
+
+            daily_ema=daily_ema,
+            h4_ema=h4_ema,
+            h1_ema=h1_ema,
+
+            rsi_15m=rsi15,
+
+            adx_1h=adx1,
+            adx_15m=adx15,
+
+            mtf_confirmed=mtf_ok,
+
+            volume_spike_value=vol_spike,
+
+            confirmation=trigger_ok,
+
+            strategies=strategy_names,
         )
 
     # --------------------------------------------------------
-    # FINAL HIGH
+    # STRATEGY DETAILS
+    # --------------------------------------------------------
+
+    strategy_details = {}
+
+    for item in matches:
+
+        strategy_details[
+            item["name"]
+        ] = item["reason"]
+
+    # --------------------------------------------------------
+    # FINAL HIGH SIGNAL
     # --------------------------------------------------------
 
     return {
+
         "signal": direction,
+
         "direction": direction,
 
         "quality": "HIGH",
+
         "score": score,
 
-        "daily": daily_structure,
-        "4h": h4_structure,
-        "1h": h1_structure,
+        "daily": daily_dir,
+
+        "4h": h4_dir,
+
+        "1h": h1_dir,
 
         "daily_ema": daily_ema,
+
         "4h_ema": h4_ema,
+
         "1h_ema": h1_ema,
 
-        "rsi_15m": round(rsi_15m, 2),
-        "adx_1h": round(adx_1h, 2),
-        "adx_15m": round(adx_15m, 2),
+        "rsi_15m": round(
+            rsi15,
+            2
+        ),
 
-        "mtf_confirmed": mtf,
+        "adx_1h": round(
+            adx1,
+            2
+        ),
+
+        "adx_15m": round(
+            adx15,
+            2
+        ),
+
+        "mtf_confirmed": mtf_ok,
+
         "volume_spike": vol_spike,
-        "confirmation": confirmation,
 
-        "strategies": matched,
-        "strategy_matches": matches,
-        "strategy": matched[0] if matched else None,
-        "strategy_details": matches,
+        "confirmation": trigger_ok,
 
-        "trend_following": matches.get(
-            "TREND_FOLLOWING", False
+        "strategies": strategy_names,
+
+        "strategy_matches": strategy_names,
+
+        "strategy": strategy,
+
+        "strategy_details": strategy_details,
+
+        "trend_following": (
+            "TREND_FOLLOWING"
+            in strategy_names
         ),
 
-        "pullback": matches.get(
-            "PULLBACK", False
+        "pullback": (
+            "PULLBACK"
+            in strategy_names
         ),
 
-        "breakout": matches.get(
-            "BREAKOUT", False
+        "breakout": (
+            "BREAKOUT"
+            in strategy_names
         ),
 
-        "reversal": matches.get(
-            "REVERSAL", False
+        "reversal": (
+            "REVERSAL"
+            in strategy_names
         ),
 
-        "range_trading": matches.get(
-            "RANGE_TRADING", False
+        "range_trading": (
+            "RANGE_TRADING"
+            in strategy_names
         ),
 
         "entry": levels["entry"],
+
         "sl": levels["sl"],
+
         "tp1": levels["tp1"],
+
         "tp2": levels["tp2"],
+
         "tp3": levels["tp3"],
+
         "risk": levels["risk"],
+
         "rr": levels["rr"],
 
-        "reason": "VALID_HIGH_SETUP",
+        "reason": selected["reason"],
     }
