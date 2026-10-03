@@ -131,10 +131,8 @@ def load_symbols(min_volume_usdt=10_000_000, max_symbols=30):
             except Exception:
                 continue
 
-        # مرتب‌سازی بر اساس حجم (نزولی)
         candidates.sort(key=lambda x: x[1], reverse=True)
 
-        # انتخاب top N
         selected = [s for s, _ in candidates[:max_symbols]]
 
         logger.info(
@@ -156,6 +154,7 @@ def load_symbols(min_volume_usdt=10_000_000, max_symbols=30):
         logger.error("Failed to load symbols: %s", e)
 
     logger.warning("Using fallback symbol list")
+
     return [
         "BTC-SWAP-USDT",
         "ETH-SWAP-USDT",
@@ -265,9 +264,18 @@ def normalize_candles(data):
 
 def get_klines(symbol, interval, limit=200):
     try:
-        params = {"symbol": symbol, "interval": interval, "limit": limit}
+        params = {
+            "symbol": symbol,
+            "interval": interval,
+            "limit": limit,
+        }
 
-        response = requests.get(TOOBIT_KLINES_URL, params=params, timeout=15)
+        response = requests.get(
+            TOOBIT_KLINES_URL,
+            params=params,
+            timeout=15,
+        )
+
         response.raise_for_status()
 
         data = response.json()
@@ -276,14 +284,21 @@ def get_klines(symbol, interval, limit=200):
         if len(candles) < 50:
             logger.warning(
                 "%s %s: insufficient candles: %s",
-                symbol, interval, len(candles),
+                symbol,
+                interval,
+                len(candles),
             )
             return []
 
         return candles
 
     except Exception as e:
-        logger.error("Kline error %s %s: %s", symbol, interval, e)
+        logger.error(
+            "Kline error %s %s: %s",
+            symbol,
+            interval,
+            e,
+        )
         return []
 
 
@@ -297,7 +312,13 @@ def get_market_data(symbol):
     if not daily or not h4 or not h1 or not m15 or not m5:
         return None
 
-    return {"1d": daily, "4h": h4, "1h": h1, "15m": m15, "5m": m5}
+    return {
+        "1d": daily,
+        "4h": h4,
+        "1h": h1,
+        "15m": m15,
+        "5m": m5,
+    }
 
 
 # ============================================================
@@ -311,6 +332,7 @@ def get_price(symbol):
             params={"symbol": symbol},
             timeout=10,
         )
+
         response.raise_for_status()
 
         data = response.json()
@@ -322,6 +344,7 @@ def get_price(symbol):
                 or data.get("lastPrice")
                 or data.get("last")
             )
+
             if price is not None:
                 return float(price)
 
@@ -341,14 +364,23 @@ def get_price(symbol):
                     or item.get("lastPrice")
                     or item.get("last")
                 )
+
                 if price is not None:
                     return float(price)
 
-        logger.warning("PRICE API | %s | Price not found", symbol)
+        logger.warning(
+            "PRICE API | %s | Price not found",
+            symbol,
+        )
+
         return None
 
     except Exception as e:
-        logger.error("Price error %s: %s", symbol, e)
+        logger.error(
+            "Price error %s: %s",
+            symbol,
+            e,
+        )
         return None
 
 
@@ -387,7 +419,11 @@ def register_high_signal(symbol, result):
         return None
 
     if already_tracking(symbol, direction):
-        logger.info("TRACKER | ALREADY OPEN | %s | %s", symbol, direction)
+        logger.info(
+            "TRACKER | ALREADY OPEN | %s | %s",
+            symbol,
+            direction,
+        )
         return None
 
     trade = register_signal(symbol, result)
@@ -395,9 +431,13 @@ def register_high_signal(symbol, result):
     if trade:
         logger.info(
             "TRACKER | REGISTERED | %s | %s | Entry=%s | SL=%s | TP1=%s | TP2=%s | TP3=%s",
-            symbol, direction,
-            result.get("entry"), result.get("sl"),
-            result.get("tp1"), result.get("tp2"), result.get("tp3"),
+            symbol,
+            direction,
+            result.get("entry"),
+            result.get("sl"),
+            result.get("tp1"),
+            result.get("tp2"),
+            result.get("tp3"),
         )
 
     return trade
@@ -416,6 +456,7 @@ def log_strategy_details(symbol, result):
     strategy_status = []
 
     for name, value in details.items():
+
         if isinstance(value, dict):
             matched = value.get("matched", False)
             direction = value.get("direction")
@@ -424,14 +465,17 @@ def log_strategy_details(symbol, result):
                 status = f"YES({direction})"
             else:
                 status = "YES" if matched else "NO"
+
         else:
             status = "YES" if bool(value) else "NO"
 
-        strategy_status.append(f"{name}={status}")
+        strategy_status.append(
+            f"{name}={status}"
+        )
 
     if strategy_status:
         logger.info(
-            "%s | STRATEGIES | %s",
+            "STRATEGIES | %s | %s",
             symbol,
             " | ".join(strategy_status),
         )
@@ -448,11 +492,34 @@ def log_signal_diagnostic(symbol, result):
     daily = result.get("daily", "UNKNOWN")
     h4 = result.get("4h", "UNKNOWN")
     h1 = result.get("1h", "UNKNOWN")
-    direction = result.get("direction", "UNKNOWN")
-    signal = result.get("signal", "UNKNOWN")
-    score = result.get("score", "UNKNOWN")
-    quality = result.get("quality", "UNKNOWN")
-    reason = result.get("reason", result.get("blocked_reason", "UNKNOWN"))
+
+    direction = result.get(
+        "direction",
+        "UNKNOWN",
+    )
+
+    signal = result.get(
+        "signal",
+        "UNKNOWN",
+    )
+
+    score = result.get(
+        "score",
+        "UNKNOWN",
+    )
+
+    quality = result.get(
+        "quality",
+        "UNKNOWN",
+    )
+
+    reason = result.get(
+        "reason",
+        result.get(
+            "blocked_reason",
+            "UNKNOWN",
+        ),
+    )
 
     strategies = (
         result.get("strategy_matches")
@@ -461,13 +528,28 @@ def log_signal_diagnostic(symbol, result):
     )
 
     if isinstance(strategies, (list, tuple)):
-        strategies_text = ", ".join(str(x) for x in strategies) if strategies else "NONE"
+        strategies_text = (
+            ", ".join(
+                str(x) for x in strategies
+            )
+            if strategies
+            else "NONE"
+        )
     else:
         strategies_text = str(strategies)
 
     logger.info(
         "DIAGNOSTIC | %s | Daily=%s | 4H=%s | 1H=%s | Direction=%s | Signal=%s | Score=%s | Quality=%s | Reason=%s | Strategies=%s",
-        symbol, daily, h4, h1, direction, signal, score, quality, reason, strategies_text,
+        symbol,
+        daily,
+        h4,
+        h1,
+        direction,
+        signal,
+        score,
+        quality,
+        reason,
+        strategies_text,
     )
 
     logger.info(
@@ -481,14 +563,10 @@ def log_signal_diagnostic(symbol, result):
         result.get("confirmation"),
     )
 
-    logger.info(
-        "NEW_STRATEGIES | %s | BreakerBlock=%s | FVGFill=%s",
+    log_strategy_details(
         symbol,
-        result.get("breaker_block"),
-        result.get("fvg_fill"),
+        result,
     )
-
-    log_strategy_details(symbol, result)
 
 
 # ============================================================
@@ -496,7 +574,10 @@ def log_signal_diagnostic(symbol, result):
 # ============================================================
 
 def signal_text(symbol, result):
-    direction = result.get("direction", "UNKNOWN")
+    direction = result.get(
+        "direction",
+        "UNKNOWN",
+    )
 
     if direction == "LONG":
         emoji = "🟢"
@@ -511,34 +592,79 @@ def signal_text(symbol, result):
         or []
     )
 
-    if not isinstance(strategies, (list, tuple)):
+    if not isinstance(
+        strategies,
+        (list, tuple),
+    ):
         strategies = [strategies]
 
-    strategy_text = ", ".join(str(x) for x in strategies) if strategies else "NONE"
+    strategy_text = (
+        ", ".join(
+            str(x) for x in strategies
+        )
+        if strategies
+        else "NONE"
+    )
 
     return (
         f"{emoji} <b>{symbol}</b>\n\n"
-        f"🎯 Signal: <b>{result.get('signal')}</b>\n"
-        f"⭐ Quality: <b>{result.get('quality')}</b>\n"
-        f"📊 Score: <b>{result.get('score')}</b>\n\n"
-        f"📅 Daily: {result.get('daily')}\n"
-        f"⏱ 4H: {result.get('4h')}\n"
-        f"🕐 1H: {result.get('1h')}\n"
-        f"⏱ 15M RSI: {result.get('rsi_15m')}\n"
-        f"📊 ADX 1H: {result.get('adx_1h')}\n"
-        f"📊 ADX 15M: {result.get('adx_15m')}\n"
-        f"✅ MTF 15M: {result.get('mtf_confirmed')}\n\n"
-        f"💰 Entry: <b>{result.get('entry')}</b>\n"
-        f"🛑 SL: <b>{result.get('sl')}</b>\n\n"
-        f"🎯 TP1: <b>{result.get('tp1')}</b>\n"
-        f"🎯 TP2: <b>{result.get('tp2')}</b>\n"
-        f"🎯 TP3: <b>{result.get('tp3')}</b>\n\n"
-        f"📏 Risk: {result.get('risk')}\n"
-        f"⚖️ RR: {result.get('rr')}\n\n"
-        f"🧠 Strategy:\n<b>{strategy_text}</b>\n\n"
-        f"🔷 Breaker Block: {result.get('breaker_block')}\n"
-        f"🔶 FVG Fill: {result.get('fvg_fill')}\n\n"
-        f"📝 Reason:\n{result.get('reason', 'N/A')}"
+
+        f"🎯 Signal: "
+        f"<b>{result.get('signal')}</b>\n"
+
+        f"⭐ Quality: "
+        f"<b>{result.get('quality')}</b>\n"
+
+        f"📊 Score: "
+        f"<b>{result.get('score')}</b>\n\n"
+
+        f"📅 Daily: "
+        f"{result.get('daily')}\n"
+
+        f"⏱ 4H: "
+        f"{result.get('4h')}\n"
+
+        f"🕐 1H: "
+        f"{result.get('1h')}\n"
+
+        f"⏱ 15M RSI: "
+        f"{result.get('rsi_15m')}\n"
+
+        f"📊 ADX 1H: "
+        f"{result.get('adx_1h')}\n"
+
+        f"📊 ADX 15M: "
+        f"{result.get('adx_15m')}\n"
+
+        f"✅ MTF 15M: "
+        f"{result.get('mtf_confirmed')}\n\n"
+
+        f"💰 Entry: "
+        f"<b>{result.get('entry')}</b>\n"
+
+        f"🛑 SL: "
+        f"<b>{result.get('sl')}</b>\n\n"
+
+        f"🎯 TP1: "
+        f"<b>{result.get('tp1')}</b>\n"
+
+        f"🎯 TP2: "
+        f"<b>{result.get('tp2')}</b>\n"
+
+        f"🎯 TP3: "
+        f"<b>{result.get('tp3')}</b>\n\n"
+
+        f"📏 Risk: "
+        f"{result.get('risk')}\n"
+
+        f"⚖️ RR: "
+        f"{result.get('rr')}\n\n"
+
+        f"🧠 Strategy:\n"
+        f"<b>{strategy_text}</b>\n\n"
+
+        f"📝 Reason:\n"
+        f"{result.get('reason', 'N/A')}"
     )
 
 
@@ -570,13 +696,24 @@ def analyze_symbol_raw(symbol):
 # /START
 # ============================================================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_ids = context.application.bot_data.setdefault("chat_ids", set())
-    chat_ids.add(update.effective_chat.id)
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    chat_ids = context.application.bot_data.setdefault(
+        "chat_ids",
+        set(),
+    )
+
+    chat_ids.add(
+        update.effective_chat.id
+    )
 
     await update.message.reply_text(
         f"🤖 CryptoBot فعال است.\n"
-        f"📊 تعداد ارزهای در حال اسکن: {len(SYMBOLS)}\n\n"
+        f"📊 تعداد ارزهای در حال اسکن: "
+        f"{len(SYMBOLS)}\n\n"
+
         "دستورات:\n"
         "/price - قیمت BTC و SOL\n"
         "/signal - بررسی سیگنال‌های HIGH\n"
@@ -589,33 +726,60 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # /PRICE
 # ============================================================
 
-async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    btc = get_price("BTC-SWAP-USDT")
-    sol = get_price("SOL-SWAP-USDT")
+async def price(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    btc = get_price(
+        "BTC-SWAP-USDT"
+    )
 
-    text = "💰 <b>CryptoBot Prices</b>\n\n"
+    sol = get_price(
+        "SOL-SWAP-USDT"
+    )
+
+    text = (
+        "💰 <b>CryptoBot Prices</b>\n\n"
+    )
 
     if btc is not None:
-        text += f"₿ BTC: <b>{btc}</b>\n"
+        text += (
+            f"₿ BTC: <b>{btc}</b>\n"
+        )
     else:
-        text += "₿ BTC: unavailable\n"
+        text += (
+            "₿ BTC: unavailable\n"
+        )
 
     if sol is not None:
-        text += f"◎ SOL: <b>{sol}</b>\n"
+        text += (
+            f"◎ SOL: <b>{sol}</b>\n"
+        )
     else:
-        text += "◎ SOL: unavailable\n"
+        text += (
+            "◎ SOL: unavailable\n"
+        )
 
-    await update.message.reply_text(text, parse_mode="HTML")
+    await update.message.reply_text(
+        text,
+        parse_mode="HTML",
+    )
 
 
 # ============================================================
 # /SIGNAL
 # ============================================================
 
-async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def signal(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
     await update.message.reply_text(
-        f"🔎 در حال بررسی {len(SYMBOLS)} ارز...\n"
+        f"🔎 در حال بررسی "
+        f"{len(SYMBOLS)} ارز...\n"
+
         "Daily → 4H → 1H → 15M → 5M\n\n"
+
         "فقط سیگنال‌های HIGH نمایش داده می‌شوند.\n"
         "این ممکن است چند دقیقه طول بکشد."
     )
@@ -623,41 +787,68 @@ async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     found = 0
 
     for symbol in SYMBOLS:
+
         try:
-            result = await asyncio.to_thread(analyze_symbol_raw, symbol)
+            result = await asyncio.to_thread(
+                analyze_symbol_raw,
+                symbol,
+            )
 
             if result is None:
                 continue
 
-            log_signal_diagnostic(symbol, result)
+            log_signal_diagnostic(
+                symbol,
+                result,
+            )
 
             if result.get("quality") != "HIGH":
                 continue
 
-            if result.get("direction") not in ("LONG", "SHORT"):
+            if result.get("direction") not in (
+                "LONG",
+                "SHORT",
+            ):
                 continue
 
-            if result.get("signal") not in ("LONG", "SHORT"):
+            if result.get("signal") not in (
+                "LONG",
+                "SHORT",
+            ):
                 continue
 
-            trade = register_high_signal(symbol, result)
+            trade = register_high_signal(
+                symbol,
+                result,
+            )
 
             if trade is not None:
-                logger.info("Manual signal registered | %s", symbol)
+                logger.info(
+                    "Manual signal registered | %s",
+                    symbol,
+                )
 
             await update.message.reply_text(
-                signal_text(symbol, result),
+                signal_text(
+                    symbol,
+                    result,
+                ),
                 parse_mode="HTML",
             )
 
             found += 1
 
         except Exception:
-            logger.exception("Signal error %s", symbol)
+            logger.exception(
+                "Signal error %s",
+                symbol,
+            )
 
     if found == 0:
         await update.message.reply_text(
-            f"⏳ هیچ سیگنال HIGH در {len(SYMBOLS)} ارز پیدا نشد.\n\n"
+            f"⏳ هیچ سیگنال HIGH در "
+            f"{len(SYMBOLS)} ارز پیدا نشد.\n\n"
+
             "🔍 جزئیات تشخیص در لاگ ثبت شد."
         )
 
@@ -666,156 +857,307 @@ async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # AUTO SCANNER
 # ============================================================
 
-async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
+async def auto_signal(
+    context: ContextTypes.DEFAULT_TYPE,
+):
     if _scan_lock.locked():
-        logger.warning("Previous scan still running. Skipping.")
+        logger.warning(
+            "Previous scan still running. Skipping."
+        )
         return
 
     async with _scan_lock:
+
         logger.info(
-            "Starting automatic market scan across %s symbols...",
+            "Starting automatic market scan "
+            "across %s symbols...",
             len(SYMBOLS),
         )
+
         found = 0
 
         for symbol in SYMBOLS:
+
             try:
-                result = await asyncio.to_thread(analyze_symbol_raw, symbol)
+                result = await asyncio.to_thread(
+                    analyze_symbol_raw,
+                    symbol,
+                )
 
                 if result is None:
-                    logger.warning("DIAGNOSTIC | %s | No analysis result", symbol)
+                    logger.warning(
+                        "DIAGNOSTIC | %s | "
+                        "No analysis result",
+                        symbol,
+                    )
                     continue
 
-                log_signal_diagnostic(symbol, result)
+                log_signal_diagnostic(
+                    symbol,
+                    result,
+                )
 
                 if result.get("quality") != "HIGH":
                     continue
 
-                if result.get("direction") not in ("LONG", "SHORT"):
+                if result.get("direction") not in (
+                    "LONG",
+                    "SHORT",
+                ):
                     continue
 
-                if result.get("signal") not in ("LONG", "SHORT"):
+                if result.get("signal") not in (
+                    "LONG",
+                    "SHORT",
+                ):
                     continue
 
-                trade = register_high_signal(symbol, result)
+                trade = register_high_signal(
+                    symbol,
+                    result,
+                )
 
                 if trade is None:
                     logger.info(
-                        "HIGH SIGNAL | %s | %s | Already tracked - Telegram alert skipped",
-                        symbol, result.get("direction"),
+                        "HIGH SIGNAL | %s | %s | "
+                        "Already tracked - "
+                        "Telegram alert skipped",
+                        symbol,
+                        result.get("direction"),
                     )
                     continue
 
                 found += 1
 
                 logger.info(
-                    "NEW HIGH SIGNAL | %s | %s | Score=%s | Strategy=%s",
-                    symbol, result.get("direction"),
-                    result.get("score"), result.get("strategy"),
+                    "NEW HIGH SIGNAL | %s | %s | "
+                    "Score=%s | Strategy=%s",
+                    symbol,
+                    result.get("direction"),
+                    result.get("score"),
+                    result.get("strategy"),
                 )
 
-                chat_ids = context.application.bot_data.get("chat_ids", set())
+                chat_ids = (
+                    context.application.bot_data.get(
+                        "chat_ids",
+                        set(),
+                    )
+                )
 
                 for chat_id in chat_ids:
+
                     try:
                         await context.bot.send_message(
                             chat_id=chat_id,
-                            text=signal_text(symbol, result),
+                            text=signal_text(
+                                symbol,
+                                result,
+                            ),
                             parse_mode="HTML",
                         )
+
                     except Exception:
-                        logger.exception("Telegram send error for chat %s", chat_id)
+                        logger.exception(
+                            "Telegram send error "
+                            "for chat %s",
+                            chat_id,
+                        )
 
             except Exception:
-                logger.exception("Scan error %s", symbol)
+                logger.exception(
+                    "Scan error %s",
+                    symbol,
+                )
 
         if found == 0:
-            logger.info("No HIGH signals.")
+            logger.info(
+                "No HIGH signals."
+            )
 
 
 # ============================================================
 # TRACK OPEN TRADES
 # ============================================================
 
-async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
+async def track_open_trades(
+    context: ContextTypes.DEFAULT_TYPE,
+):
     try:
-        open_trades = await asyncio.to_thread(get_open_trades)
+        open_trades = await asyncio.to_thread(
+            get_open_trades
+        )
 
         if not open_trades:
-            logger.info("TRACKER CHECK | No open trades")
+            logger.info(
+                "TRACKER CHECK | No open trades"
+            )
             return
 
-        logger.info("TRACKER CHECK | Open trades=%s", len(open_trades))
+        logger.info(
+            "TRACKER CHECK | Open trades=%s",
+            len(open_trades),
+        )
 
-        events = await asyncio.to_thread(check_all_trades, get_price)
+        events = await asyncio.to_thread(
+            check_all_trades,
+            get_price,
+        )
 
         for trade in open_trades:
-            symbol = trade.get("symbol", "UNKNOWN")
-            direction = trade.get("direction", "UNKNOWN")
 
-            current_price = await asyncio.to_thread(get_price, symbol)
+            symbol = trade.get(
+                "symbol",
+                "UNKNOWN",
+            )
+
+            direction = trade.get(
+                "direction",
+                "UNKNOWN",
+            )
+
+            current_price = await asyncio.to_thread(
+                get_price,
+                symbol,
+            )
 
             logger.info(
-                "TRACKER CHECK | %s | %s | Current=%s | Entry=%s | SL=%s | TP1=%s | TP2=%s | TP3=%s",
-                symbol, direction, current_price,
-                trade.get("entry"), trade.get("sl"),
-                trade.get("tp1"), trade.get("tp2"), trade.get("tp3"),
+                "TRACKER CHECK | %s | %s | "
+                "Current=%s | Entry=%s | "
+                "SL=%s | TP1=%s | TP2=%s | TP3=%s",
+                symbol,
+                direction,
+                current_price,
+                trade.get("entry"),
+                trade.get("sl"),
+                trade.get("tp1"),
+                trade.get("tp2"),
+                trade.get("tp3"),
             )
 
         if not events:
             return
 
-        chat_ids = context.application.bot_data.get("chat_ids", set())
+        chat_ids = (
+            context.application.bot_data.get(
+                "chat_ids",
+                set(),
+            )
+        )
 
         for event in events:
-            trade = event.get("trade", {})
-            result = event.get("event", "UNKNOWN")
-            price_now = event.get("price")
 
-            symbol = trade.get("symbol", "UNKNOWN")
-            direction = trade.get("direction", "UNKNOWN")
-            strategy = trade.get("strategy", "UNKNOWN")
+            trade = event.get(
+                "trade",
+                {},
+            )
+
+            result = event.get(
+                "event",
+                "UNKNOWN",
+            )
+
+            price_now = event.get(
+                "price"
+            )
+
+            symbol = trade.get(
+                "symbol",
+                "UNKNOWN",
+            )
+
+            direction = trade.get(
+                "direction",
+                "UNKNOWN",
+            )
+
+            strategy = trade.get(
+                "strategy",
+                "UNKNOWN",
+            )
 
             message = (
                 "📊 <b>TRACKER UPDATE</b>\n\n"
+
                 f"🪙 {symbol}\n"
-                f"📈 Direction: <b>{direction}</b>\n"
-                f"🧠 Strategy: <b>{strategy}</b>\n\n"
-                f"💰 Current Price: <b>{price_now}</b>\n\n"
-                f"📌 Entry: {trade.get('entry')}\n"
-                f"🛑 SL: {trade.get('sl')}\n"
-                f"🎯 TP1: {trade.get('tp1')}\n"
-                f"🎯 TP2: {trade.get('tp2')}\n"
-                f"🎯 TP3: {trade.get('tp3')}\n\n"
-                f"📍 RESULT: <b>{result}</b>"
+
+                f"📈 Direction: "
+                f"<b>{direction}</b>\n"
+
+                f"🧠 Strategy: "
+                f"<b>{strategy}</b>\n\n"
+
+                f"💰 Current Price: "
+                f"<b>{price_now}</b>\n\n"
+
+                f"📌 Entry: "
+                f"{trade.get('entry')}\n"
+
+                f"🛑 SL: "
+                f"{trade.get('sl')}\n"
+
+                f"🎯 TP1: "
+                f"{trade.get('tp1')}\n"
+
+                f"🎯 TP2: "
+                f"{trade.get('tp2')}\n"
+
+                f"🎯 TP3: "
+                f"{trade.get('tp3')}\n\n"
+
+                f"📍 RESULT: "
+                f"<b>{result}</b>"
             )
 
             for chat_id in chat_ids:
+
                 try:
                     await context.bot.send_message(
                         chat_id=chat_id,
                         text=message,
                         parse_mode="HTML",
                     )
-                except Exception:
-                    logger.exception("Tracker Telegram error for chat %s", chat_id)
 
-            logger.info("TRACKER | %s | %s | Price=%s", symbol, result, price_now)
+                except Exception:
+                    logger.exception(
+                        "Tracker Telegram error "
+                        "for chat %s",
+                        chat_id,
+                    )
+
+            logger.info(
+                "TRACKER | %s | %s | Price=%s",
+                symbol,
+                result,
+                price_now,
+            )
 
     except Exception:
-        logger.exception("Tracker error")
+        logger.exception(
+            "Tracker error"
+        )
 
 
 # ============================================================
 # /REGISTER
 # ============================================================
 
-async def register_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_ids = context.application.bot_data.setdefault("chat_ids", set())
-    chat_ids.add(update.effective_chat.id)
+async def register_chat(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    chat_ids = context.application.bot_data.setdefault(
+        "chat_ids",
+        set(),
+    )
+
+    chat_ids.add(
+        update.effective_chat.id
+    )
 
     await update.message.reply_text(
-        "✅ این چت برای دریافت سیگنال‌های خودکار ثبت شد."
+        "✅ این چت برای دریافت "
+        "سیگنال‌های خودکار ثبت شد."
     )
 
 
@@ -823,26 +1165,54 @@ async def register_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # TRACKER STATS
 # ============================================================
 
-async def tracker_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def tracker_stats(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
     try:
-        stats = await asyncio.to_thread(get_stats)
+        stats = await asyncio.to_thread(
+            get_stats
+        )
 
         message = (
             "📊 <b>Tracker Statistics</b>\n\n"
-            f"📌 Total Signals: {stats.get('total', 0)}\n"
-            f"⏳ Open: {stats.get('open', 0)}\n"
-            f"🔒 Closed: {stats.get('closed', 0)}\n\n"
-            f"🎯 TP1 Hit: {stats.get('tp1', 0)}\n"
-            f"🎯 TP2 Hit: {stats.get('tp2', 0)}\n"
-            f"🎯 TP3 Hit: {stats.get('tp3', 0)}\n"
-            f"🛑 SL Hit: {stats.get('sl', 0)}"
+
+            f"📌 Total Signals: "
+            f"{stats.get('total', 0)}\n"
+
+            f"⏳ Open: "
+            f"{stats.get('open', 0)}\n"
+
+            f"🔒 Closed: "
+            f"{stats.get('closed', 0)}\n\n"
+
+            f"🎯 TP1 Hit: "
+            f"{stats.get('tp1', 0)}\n"
+
+            f"🎯 TP2 Hit: "
+            f"{stats.get('tp2', 0)}\n"
+
+            f"🎯 TP3 Hit: "
+            f"{stats.get('tp3', 0)}\n"
+
+            f"🛑 SL Hit: "
+            f"{stats.get('sl', 0)}"
         )
 
-        await update.message.reply_text(message, parse_mode="HTML")
+        await update.message.reply_text(
+            message,
+            parse_mode="HTML",
+        )
 
     except Exception:
-        logger.exception("Tracker stats error")
-        await update.message.reply_text("❌ خطا در دریافت آمار Tracker.")
+        logger.exception(
+            "Tracker stats error"
+        )
+
+        await update.message.reply_text(
+            "❌ خطا در دریافت "
+            "آمار Tracker."
+        )
 
 
 # ============================================================
@@ -850,24 +1220,67 @@ async def tracker_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 
 def main():
+
     if not TOKEN:
-        raise RuntimeError("BOT_TOKEN environment variable is missing.")
+        raise RuntimeError(
+            "BOT_TOKEN environment variable is missing."
+        )
 
     logger.info("=" * 60)
-    logger.info("CryptoBot starting...")
-    logger.info("Symbols to scan: %s", len(SYMBOLS))
+    logger.info(
+        "CryptoBot starting..."
+    )
+    logger.info(
+        "Symbols to scan: %s",
+        len(SYMBOLS),
+    )
     logger.info("=" * 60)
 
-    application = Application.builder().token(TOKEN).build()
+    application = (
+        Application.builder()
+        .token(TOKEN)
+        .build()
+    )
 
     # COMMANDS
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("price", price))
-    application.add_handler(CommandHandler("signal", signal))
-    application.add_handler(CommandHandler("register", register_chat))
-    application.add_handler(CommandHandler("stats", tracker_stats))
+
+    application.add_handler(
+        CommandHandler(
+            "start",
+            start,
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "price",
+            price,
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "signal",
+            signal,
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "register",
+            register_chat,
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "stats",
+            tracker_stats,
+        )
+    )
 
     # AUTO SIGNAL SCANNER
+
     application.job_queue.run_repeating(
         auto_signal,
         interval=300,
@@ -875,17 +1288,30 @@ def main():
     )
 
     # TRADE TRACKER
+
     application.job_queue.run_repeating(
         track_open_trades,
         interval=30,
         first=30,
     )
 
-    logger.info("Trade tracker started: every 30 seconds")
-    logger.info("Auto signal scanner started: every 5 minutes")
-    logger.info("CryptoBot started successfully.")
+    logger.info(
+        "Trade tracker started: "
+        "every 30 seconds"
+    )
 
-    application.run_polling(drop_pending_updates=True)
+    logger.info(
+        "Auto signal scanner started: "
+        "every 5 minutes"
+    )
+
+    logger.info(
+        "CryptoBot started successfully."
+    )
+
+    application.run_polling(
+        drop_pending_updates=True
+    )
 
 
 # ============================================================
