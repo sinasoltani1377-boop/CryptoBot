@@ -570,6 +570,81 @@ def log_signal_diagnostic(symbol, result):
 
 
 # ============================================================
+# STRATEGY FAILURE DIAGNOSTIC
+# ============================================================
+
+def log_strategy_diagnostics(symbol, result):
+    diagnostics = result.get("strategy_diagnostics")
+
+    if not isinstance(diagnostics, dict):
+        logger.info(
+            "STRATEGY_CHECK | %s | No strategy diagnostics returned",
+            symbol,
+        )
+        return
+
+    parts = []
+
+    for strategy in (
+        "TREND_FOLLOWING",
+        "PULLBACK",
+        "BREAKOUT",
+        "REVERSAL",
+        "RANGE_TRADING",
+    ):
+        value = diagnostics.get(strategy)
+
+        if value is None:
+            parts.append(
+                f"{strategy}=NO_DATA"
+            )
+            continue
+
+        if isinstance(value, dict):
+            matched = value.get("matched")
+
+            reason = (
+                value.get("reason")
+                or value.get("blocked_reason")
+                or value.get("failure_reason")
+                or ""
+            )
+
+            if matched:
+                if reason:
+                    parts.append(
+                        f"{strategy}=PASS:{reason}"
+                    )
+                else:
+                    parts.append(
+                        f"{strategy}=PASS"
+                    )
+            else:
+                if reason:
+                    parts.append(
+                        f"{strategy}=FAIL:{reason}"
+                    )
+                else:
+                    parts.append(
+                        f"{strategy}=FAIL"
+                    )
+
+        elif isinstance(value, str):
+            parts.append(
+                f"{strategy}={value}"
+            )
+
+        else:
+            parts.append(
+                f"{strategy}={'PASS' if value else 'FAIL'}"
+            )
+
+    logger.info(
+        "STRATEGY_CHECK | %s | %s",
+        symbol,
+        " | ".join(parts),
+    )
+# ============================================================
 # SIGNAL TEXT
 # ============================================================
 
