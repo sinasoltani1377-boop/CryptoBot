@@ -573,35 +573,140 @@ def log_signal_diagnostic(symbol, result):
 # STRATEGY FAILURE DIAGNOSTIC
 # ============================================================
 
-def log_strategy_diagnostics(symbol, result):
+def log_strategy_details(symbol, result):
+    """
+    نمایش جزئیات هر پنج استراتژی.
+
+    این بخش فقط برای Diagnostics است و هیچ تأثیری
+    روی تولید یا فیلتر کردن سیگنال ندارد.
+    """
+
+    # --------------------------------------------------------
+    # 1. strategy_diagnostics from analysis.py
+    # --------------------------------------------------------
+
     diagnostics = result.get("strategy_diagnostics")
 
-    if not isinstance(diagnostics, dict):
+    if isinstance(diagnostics, dict):
+
+        parts = []
+
+        for strategy in (
+            "TREND_FOLLOWING",
+            "PULLBACK",
+            "BREAKOUT",
+            "REVERSAL",
+            "RANGE_TRADING",
+        ):
+
+            value = diagnostics.get(strategy)
+
+            if value is None:
+                parts.append(
+                    f"{strategy}=NO_DATA"
+                )
+                continue
+
+            # Dictionary format
+            if isinstance(value, dict):
+
+                matched = value.get("matched")
+
+                reason = (
+                    value.get("reason")
+                    or value.get("blocked_reason")
+                    or value.get("failure_reason")
+                    or value.get("fail_reason")
+                    or value.get("status")
+                    or ""
+                )
+
+                if matched is True:
+
+                    if reason:
+                        parts.append(
+                            f"{strategy}=PASS:{reason}"
+                        )
+                    else:
+                        parts.append(
+                            f"{strategy}=PASS"
+                        )
+
+                else:
+
+                    if reason:
+                        parts.append(
+                            f"{strategy}=FAIL:{reason}"
+                        )
+                    else:
+                        parts.append(
+                            f"{strategy}=FAIL"
+                        )
+
+                continue
+
+            # String format
+            if isinstance(value, str):
+
+                parts.append(
+                    f"{strategy}={value}"
+                )
+
+                continue
+
+            # Boolean format
+            if isinstance(value, bool):
+
+                parts.append(
+                    f"{strategy}="
+                    f"{'PASS' if value else 'FAIL'}"
+                )
+
+                continue
+
+            # Any other format
+            parts.append(
+                f"{strategy}={value}"
+            )
+
+        if parts:
+
+            logger.info(
+                "STRATEGY_CHECK | %s | %s",
+                symbol,
+                " | ".join(parts),
+            )
+
+        return
+
+    # --------------------------------------------------------
+    # 2. Existing strategy_details support
+    # --------------------------------------------------------
+
+    details = result.get("strategy_details")
+
+    if not isinstance(details, dict):
         logger.info(
-            "STRATEGY_CHECK | %s | No strategy diagnostics returned",
+            "STRATEGY_CHECK | %s | "
+            "No strategy diagnostics returned",
             symbol,
         )
         return
 
-    parts = []
+    strategy_status = []
 
-    for strategy in (
-        "TREND_FOLLOWING",
-        "PULLBACK",
-        "BREAKOUT",
-        "REVERSAL",
-        "RANGE_TRADING",
-    ):
-        value = diagnostics.get(strategy)
-
-        if value is None:
-            parts.append(
-                f"{strategy}=NO_DATA"
-            )
-            continue
+    for name, value in details.items():
 
         if isinstance(value, dict):
-            matched = value.get("matched")
+
+            matched = value.get(
+                "matched",
+                False,
+            )
+
+            direction = value.get(
+                "direction"
+            )
 
             reason = (
                 value.get("reason")
@@ -610,41 +715,46 @@ def log_strategy_diagnostics(symbol, result):
                 or ""
             )
 
-            if matched:
-                if reason:
-                    parts.append(
-                        f"{strategy}=PASS:{reason}"
-                    )
-                else:
-                    parts.append(
-                        f"{strategy}=PASS"
-                    )
-            else:
-                if reason:
-                    parts.append(
-                        f"{strategy}=FAIL:{reason}"
-                    )
-                else:
-                    parts.append(
-                        f"{strategy}=FAIL"
-                    )
+            if matched and direction:
 
-        elif isinstance(value, str):
-            parts.append(
-                f"{strategy}={value}"
-            )
+                status = (
+                    f"PASS({direction})"
+                )
+
+            elif matched:
+
+                status = "PASS"
+
+            elif reason:
+
+                status = (
+                    f"FAIL:{reason}"
+                )
+
+            else:
+
+                status = "FAIL"
 
         else:
-            parts.append(
-                f"{strategy}={'PASS' if value else 'FAIL'}"
+
+            status = (
+                "PASS"
+                if bool(value)
+                else "FAIL"
             )
 
-    logger.info(
-        "STRATEGY_CHECK | %s | %s",
-        symbol,
-        " | ".join(parts),
-    )
-# ============================================================
+        strategy_status.append(
+            f"{name}={status}"
+        )
+
+    if strategy_status:
+
+        logger.info(
+            "STRATEGY_CHECK | %s | %s",
+            symbol,
+            " | ".join(strategy_status),
+        )
+def # ============================================================
 # SIGNAL TEXT
 # ============================================================
 
