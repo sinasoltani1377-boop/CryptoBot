@@ -392,32 +392,53 @@ def mtf_confirmation(m15: List[Any], direction: str) -> bool:
 
 
 def strong_confirmation_5m(m5: List[Any], direction: str) -> bool:
-    """Require a real 5M push, not merely a green/red candle."""
-    if len(m5) < 8:
+    """5M confirmation: accept either a two-candle push or a strong structure break."""
+    if len(m5) < 10:
         return False
-    a, b, c = m5[-3], m5[-2], m5[-1]
-    _, ah, al, ac, _ = candle_values(a)
-    _, bh, bl, bc, _ = candle_values(b)
-    _, ch, cl, cc, _ = candle_values(c)
+
+    last = m5[-1]
+    prev = m5[-2]
+    cls = closes(m5)
+    recent = m5[-7:-1]
+    if not recent:
+        return False
+
+    _, ph, pl, pc, _ = candle_values(prev)
+    _, h, l, cl, _ = candle_values(last)
+
+    two_candle_push = False
+    structure_break = False
+
     if direction == "LONG":
-        return (
-            bullish(c)
-            and bullish(b)
-            and body_ratio(c) >= 0.45
-            and cc > bh
-            and cc > ac
-            and cl >= al
+        two_candle_push = (
+            bullish(prev)
+            and bullish(last)
+            and body_ratio(last) >= 0.40
+            and cl > ph
+            and cl > pc
         )
-    if direction == "SHORT":
-        return (
-            bearish(c)
-            and bearish(b)
-            and body_ratio(c) >= 0.45
-            and cc < bl
-            and cc < ac
-            and ch <= ah
+        local_high = max(highs(recent))
+        structure_break = (
+            bullish(last)
+            and body_ratio(last) >= 0.55
+            and cl > local_high
         )
-    return False
+    elif direction == "SHORT":
+        two_candle_push = (
+            bearish(prev)
+            and bearish(last)
+            and body_ratio(last) >= 0.40
+            and cl < pl
+            and cl < pc
+        )
+        local_low = min(lows(recent))
+        structure_break = (
+            bearish(last)
+            and body_ratio(last) >= 0.55
+            and cl < local_low
+        )
+
+    return two_candle_push or structure_break
 
 
 def rejection(c: Any, direction: str) -> bool:
@@ -454,9 +475,9 @@ def near_ema_zone(h1: List[Any], direction: str) -> bool:
 
 
 def pullback_detected(h1: List[Any], direction: str) -> bool:
-    if len(h1) < 12:
+    if len(h1) < 20:
         return False
-    recent = h1[-8:]
+    recent = h1[-12:]
     cls = closes(h1)
     e20 = ema(cls, 20)
     e50 = ema(cls, 50)
@@ -465,19 +486,19 @@ def pullback_detected(h1: List[Any], direction: str) -> bool:
     zone = max(atr(h1, 14) * 0.75, cls[-1] * 0.005)
     if direction == "LONG":
         touched = any(
-            abs(candle_values(c)[2] - e20) <= zone
-            or abs(candle_values(c)[2] - e50) <= zone
+            candle_values(c)[2] <= e20 + zone
+            or candle_values(c)[2] <= e50 + zone
             for c in recent
         )
-        recovery = closes(recent)[-1] > e20
+        recovery = closes(recent)[-1] > e20 or closes(recent)[-1] > e50
         return touched and recovery
     if direction == "SHORT":
         touched = any(
-            abs(candle_values(c)[1] - e20) <= zone
-            or abs(candle_values(c)[1] - e50) <= zone
+            candle_values(c)[1] >= e20 - zone
+            or candle_values(c)[1] >= e50 - zone
             for c in recent
         )
-        recovery = closes(recent)[-1] < e20
+        recovery = closes(recent)[-1] < e20 or closes(recent)[-1] < e50
         return touched and recovery
     return False
 
