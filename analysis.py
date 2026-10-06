@@ -1,8 +1,8 @@
 # ============================================================
-# CryptoBot - Analysis Engine v13
+# CryptoBot - Analysis Engine v14
 #
-# 1H  = Main direction
-# 15M = Setup / confirmation
+# 1H  = Main trend / strategy environment
+# 15M = Setup confirmation
 # 5M  = Entry trigger
 #
 # EXACTLY 5 STRATEGIES:
@@ -12,18 +12,19 @@
 #   4. REVERSAL
 #   5. RANGE_TRADING
 #
-# v13 goals:
+# v14:
 # - closed candles only
 # - standard Wilder ADX
-# - HIGH signals only
-# - strategy-specific quality instead of one overly strict gate
-# - stronger 5M confirmation
-# - better pullback detection
-# - breakout requires volume + hold/retest
-# - reversal requires sweep + reclaim + structure shift
-# - range has its own scoring model
-# - preserve existing signal/level keys for bot.py compatibility
-# - SL/TP model intentionally unchanged from v11
+# - HIGH only
+# - strategy-specific logic
+# - 1H RANGE is evaluated instead of being abandoned
+# - 5M trigger is less brittle
+# - breakout detection improved
+# - reversal detection improved
+# - range detection improved
+# - HTF context is a filter, not an unnecessary hard wall
+# - existing signal/level keys preserved
+# - SL/TP model unchanged
 # ============================================================
 
 from __future__ import annotations
@@ -32,9 +33,9 @@ import math
 from typing import Any, Dict, List, Optional, Tuple
 
 
-# ------------------------------------------------------------
-# Basic helpers
-# ------------------------------------------------------------
+# ============================================================
+# BASIC HELPERS
+# ============================================================
 
 def safe_float(value: Any, default: float = 0.0) -> float:
     try:
@@ -48,15 +49,15 @@ def safe_float(value: Any, default: float = 0.0) -> float:
 
 def candle_values(c: Any) -> Tuple[float, float, float, float, float]:
     if isinstance(c, dict):
-        o = safe_float(c.get("open", c.get("o", c.get("Open", 0))))
-        h = safe_float(c.get("high", c.get("h", c.get("High", 0))))
-        l = safe_float(c.get("low", c.get("l", c.get("Low", 0))))
-        cl = safe_float(c.get("close", c.get("c", c.get("Close", 0))))
-        v = safe_float(c.get("volume", c.get("v", c.get("Volume", 0))))
-        return o, h, l, cl, v
+        return (
+            safe_float(c.get("open", c.get("o", c.get("Open", 0)))),
+            safe_float(c.get("high", c.get("h", c.get("High", 0)))),
+            safe_float(c.get("low", c.get("l", c.get("Low", 0)))),
+            safe_float(c.get("close", c.get("c", c.get("Close", 0)))),
+            safe_float(c.get("volume", c.get("v", c.get("Volume", 0)))),
+        )
 
     if isinstance(c, (list, tuple)):
-        # Toobit/Binance-like kline: [time, open, high, low, close, volume, ...]
         if len(c) >= 6:
             return (
                 safe_float(c[1]),
@@ -65,6 +66,7 @@ def candle_values(c: Any) -> Tuple[float, float, float, float, float]:
                 safe_float(c[4]),
                 safe_float(c[5]),
             )
+
         if len(c) >= 5:
             return (
                 safe_float(c[0]),
@@ -73,37 +75,50 @@ def candle_values(c: Any) -> Tuple[float, float, float, float, float]:
                 safe_float(c[3]),
                 safe_float(c[4]),
             )
+
     return 0.0, 0.0, 0.0, 0.0, 0.0
 
 
 def normalize_candles(candles: Any) -> List[Any]:
     if not candles:
         return []
+
     if isinstance(candles, dict):
         for key in ("data", "result", "rows", "klines", "candles"):
             value = candles.get(key)
             if isinstance(value, list):
                 candles = value
                 break
+
     if not isinstance(candles, list):
         return []
 
-    out = []
+    result = []
+
     for c in candles:
         o, h, l, cl, v = candle_values(c)
+
         if h <= 0 or l <= 0 or cl <= 0:
             continue
+
         if h < l:
             continue
-        out.append(c)
-    return out
+
+        result.append(c)
+
+    return result
 
 
 def closed(candles: Any, count: int = 2) -> List[Any]:
-    """Return candles excluding the currently-forming candle."""
+    """
+    Remove the currently forming candle.
+    """
+
     arr = normalize_candles(candles)
+
     if len(arr) <= count:
         return []
+
     return arr[:-1]
 
 
@@ -135,7 +150,11 @@ def candle_range(c: Any) -> float:
 
 def body_ratio(c: Any) -> float:
     r = candle_range(c)
-    return body(c) / r if r > 0 else 0.0
+
+    if r <= 0:
+        return 0.0
+
+    return body(c) / r
 
 
 def upper_wick(c: Any) -> float:
@@ -158,583 +177,1369 @@ def bearish(c: Any) -> bool:
     return cl < o
 
 
-def pct_distance(a: float, b: float) -> float:
-    if b == 0:
-        return 999.0
-    return abs(a - b) / abs(b) * 100.0
-
-
-# ------------------------------------------------------------
-# Indicators
-# ------------------------------------------------------------
+# ============================================================
+# INDICATORS
+# ============================================================
 
 def ema(values: List[float], period: int) -> Optional[float]:
+
     if len(values) < period or period <= 0:
         return None
-    k = 2.0 / (period + 1.0)
-    e = sum(values[:period]) / period
-    for value in values[period:]:
-        e = value * k + e * (1.0 - k)
-    return e
 
-
-def ema_series(values: List[float], period: int) -> List[float]:
-    if len(values) < period or period <= 0:
-        return []
     k = 2.0 / (period + 1.0)
-    e = sum(values[:period]) / period
-    out = [e]
-    for value in values[period:]:
-        e = value * k + e * (1.0 - k)
-        out.append(e)
-    return out
+
+    value = sum(values[:period]) / period
+
+    for x in values[period:]:
+        value = x * k + value * (1.0 - k)
+
+    return value
 
 
 def ema_direction(candles: List[Any]) -> str:
+
     cls = closes(candles)
+
     e20 = ema(cls, 20)
     e50 = ema(cls, 50)
     e200 = ema(cls, 200) if len(cls) >= 200 else None
+
     if e20 is None or e50 is None:
         return "RANGE"
-    last = cls[-1]
+
+    price = cls[-1]
+
     if e200 is not None:
-        if last > e20 > e50 > e200:
+
+        if price > e20 > e50 > e200:
             return "BULLISH"
-        if last < e20 < e50 < e200:
+
+        if price < e20 < e50 < e200:
             return "BEARISH"
-    if last > e20 > e50:
+
+    if price > e20 > e50:
         return "BULLISH"
-    if last < e20 < e50:
+
+    if price < e20 < e50:
         return "BEARISH"
+
     return "RANGE"
 
 
 def rsi(candles: List[Any], period: int = 14) -> float:
+
     cls = closes(candles)
+
     if len(cls) <= period:
         return 50.0
+
     gains = []
     losses = []
+
     for i in range(1, len(cls)):
-        d = cls[i] - cls[i - 1]
-        gains.append(max(d, 0.0))
-        losses.append(max(-d, 0.0))
+
+        diff = cls[i] - cls[i - 1]
+
+        gains.append(max(diff, 0.0))
+        losses.append(max(-diff, 0.0))
+
     avg_gain = sum(gains[:period]) / period
     avg_loss = sum(losses[:period]) / period
+
     for i in range(period, len(gains)):
-        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
-        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+
+        avg_gain = (
+            avg_gain * (period - 1) + gains[i]
+        ) / period
+
+        avg_loss = (
+            avg_loss * (period - 1) + losses[i]
+        ) / period
+
     if avg_loss == 0:
+
         return 100.0 if avg_gain > 0 else 50.0
+
     rs = avg_gain / avg_loss
+
     return 100.0 - (100.0 / (1.0 + rs))
 
 
 def atr(candles: List[Any], period: int = 14) -> float:
+
     if len(candles) < period + 1:
         return 0.0
+
     trs = []
-    prev_close = candle_values(candles[0])[3]
+
+    previous_close = candle_values(candles[0])[3]
+
     for c in candles[1:]:
+
         _, h, l, cl, _ = candle_values(c)
-        tr = max(h - l, abs(h - prev_close), abs(l - prev_close))
+
+        tr = max(
+            h - l,
+            abs(h - previous_close),
+            abs(l - previous_close),
+        )
+
         trs.append(tr)
-        prev_close = cl
+
+        previous_close = cl
+
     if len(trs) < period:
         return 0.0
+
     value = sum(trs[:period]) / period
+
     for tr in trs[period:]:
-        value = (value * (period - 1) + tr) / period
+
+        value = (
+            value * (period - 1) + tr
+        ) / period
+
     return value
 
 
 def adx(candles: List[Any], period: int = 14) -> float:
-    """Standard Wilder ADX."""
+    """
+    Standard Wilder ADX.
+    """
+
     if len(candles) < period * 2 + 1:
         return 0.0
 
-    data = []
-    prev_close = candle_values(candles[0])[3]
-    for c in candles[1:]:
-        _, h, l, cl, _ = candle_values(c)
-        up = h - candle_values(candles[data.__len__()])[1] if data else 0.0
-        down = candle_values(candles[data.__len__()])[2] - l if data else 0.0
-        tr = max(h - l, abs(h - prev_close), abs(l - prev_close))
-        plus_dm = up if up > down and up > 0 else 0.0
-        minus_dm = down if down > up and down > 0 else 0.0
-        data.append((tr, plus_dm, minus_dm))
-        prev_close = cl
+    tr_values = []
+    plus_dm = []
+    minus_dm = []
 
-    if len(data) < period * 2:
+    previous_close = candle_values(candles[0])[3]
+
+    for i in range(1, len(candles)):
+
+        _, h, l, cl, _ = candle_values(candles[i])
+
+        _, prev_h, prev_l, _, _ = candle_values(
+            candles[i - 1]
+        )
+
+        up_move = h - prev_h
+        down_move = prev_l - l
+
+        tr = max(
+            h - l,
+            abs(h - previous_close),
+            abs(l - previous_close),
+        )
+
+        plus = (
+            up_move
+            if up_move > down_move and up_move > 0
+            else 0.0
+        )
+
+        minus = (
+            down_move
+            if down_move > up_move and down_move > 0
+            else 0.0
+        )
+
+        tr_values.append(tr)
+        plus_dm.append(plus)
+        minus_dm.append(minus)
+
+        previous_close = cl
+
+    if len(tr_values) < period * 2:
         return 0.0
 
-    tr14 = sum(x[0] for x in data[:period])
-    plus14 = sum(x[1] for x in data[:period])
-    minus14 = sum(x[2] for x in data[:period])
+    tr14 = sum(tr_values[:period])
+    plus14 = sum(plus_dm[:period])
+    minus14 = sum(minus_dm[:period])
 
     dx_values = []
-    for i in range(period, len(data)):
-        tr14 = tr14 - tr14 / period + data[i][0]
-        plus14 = plus14 - plus14 / period + data[i][1]
-        minus14 = minus14 - minus14 / period + data[i][2]
+
+    for i in range(period, len(tr_values)):
+
+        tr14 = tr14 - tr14 / period + tr_values[i]
+
+        plus14 = (
+            plus14
+            - plus14 / period
+            + plus_dm[i]
+        )
+
+        minus14 = (
+            minus14
+            - minus14 / period
+            + minus_dm[i]
+        )
+
         if tr14 <= 0:
             continue
+
         plus_di = 100.0 * plus14 / tr14
         minus_di = 100.0 * minus14 / tr14
-        denom = plus_di + minus_di
-        dx = 0.0 if denom <= 0 else 100.0 * abs(plus_di - minus_di) / denom
+
+        denominator = plus_di + minus_di
+
+        if denominator <= 0:
+            dx = 0.0
+        else:
+            dx = (
+                100.0
+                * abs(plus_di - minus_di)
+                / denominator
+            )
+
         dx_values.append(dx)
 
     if len(dx_values) < period:
         return 0.0
+
     value = sum(dx_values[:period]) / period
+
     for dx in dx_values[period:]:
-        value = (value * (period - 1) + dx) / period
+
+        value = (
+            value * (period - 1) + dx
+        ) / period
+
     return value
 
 
-def volume_spike(candles: List[Any], multiplier: float = 1.25, lookback: int = 20) -> bool:
+def volume_spike(
+    candles: List[Any],
+    multiplier: float = 1.10,
+    lookback: int = 20,
+) -> bool:
+
     vs = volumes(candles)
+
     if len(vs) < lookback + 1:
         return False
-    current = vs[-1]
-    avg = sum(vs[-lookback-1:-1]) / lookback
-    return avg > 0 and current >= avg * multiplier
+
+    average = (
+        sum(vs[-lookback - 1:-1])
+        / lookback
+    )
+
+    if average <= 0:
+        return False
+
+    return vs[-1] >= average * multiplier
 
 
-def swing_high(candles: List[Any], strength: int = 2) -> Optional[float]:
+# ============================================================
+# MARKET STRUCTURE
+# ============================================================
+
+def swing_high(
+    candles: List[Any],
+    strength: int = 2,
+) -> Optional[float]:
+
     if len(candles) < strength * 2 + 1:
         return None
+
     hs = highs(candles)
-    for i in range(len(hs) - strength - 1, strength - 1, -1):
-        x = hs[i]
-        if all(x > hs[i - j] for j in range(1, strength + 1)) and all(
-            x >= hs[i + j] for j in range(1, strength + 1)
-        ):
-            return x
+
+    for i in range(
+        len(hs) - strength - 1,
+        strength - 1,
+        -1,
+    ):
+
+        value = hs[i]
+
+        left_ok = all(
+            value > hs[i - j]
+            for j in range(1, strength + 1)
+        )
+
+        right_ok = all(
+            value >= hs[i + j]
+            for j in range(1, strength + 1)
+        )
+
+        if left_ok and right_ok:
+            return value
+
     return None
 
 
-def swing_low(candles: List[Any], strength: int = 2) -> Optional[float]:
+def swing_low(
+    candles: List[Any],
+    strength: int = 2,
+) -> Optional[float]:
+
     if len(candles) < strength * 2 + 1:
         return None
+
     ls = lows(candles)
-    for i in range(len(ls) - strength - 1, strength - 1, -1):
-        x = ls[i]
-        if all(x < ls[i - j] for j in range(1, strength + 1)) and all(
-            x <= ls[i + j] for j in range(1, strength + 1)
-        ):
-            return x
+
+    for i in range(
+        len(ls) - strength - 1,
+        strength - 1,
+        -1,
+    ):
+
+        value = ls[i]
+
+        left_ok = all(
+            value < ls[i - j]
+            for j in range(1, strength + 1)
+        )
+
+        right_ok = all(
+            value <= ls[i + j]
+            for j in range(1, strength + 1)
+        )
+
+        if left_ok and right_ok:
+            return value
+
     return None
 
 
-def market_structure(candles: List[Any], lookback: int = 40) -> str:
-    arr = candles[-lookback:] if len(candles) > lookback else candles
-    if len(arr) < 10:
+def market_structure(
+    candles: List[Any],
+    lookback: int = 40,
+) -> str:
+
+    arr = (
+        candles[-lookback:]
+        if len(candles) > lookback
+        else candles
+    )
+
+    if len(arr) < 12:
         return "RANGE"
-    hs = highs(arr)
-    ls = lows(arr)
-    # Compare early and late portions. This is deliberately slower than
-    # a one-candle EMA decision and avoids declaring trend from noise.
+
     mid = len(arr) // 2
-    early_h = max(hs[:mid])
-    late_h = max(hs[mid:])
-    early_l = min(ls[:mid])
-    late_l = min(ls[mid:])
-    close = closes(arr)[-1]
-    atrv = atr(arr, 14)
-    if atrv <= 0:
-        atrv = max(close * 0.002, 1e-12)
-    up = late_h > early_h and late_l > early_l and close >= sum(closes(arr)[-5:]) / 5
-    down = late_h < early_h and late_l < early_l and close <= sum(closes(arr)[-5:]) / 5
-    if up:
+
+    early_high = max(highs(arr[:mid]))
+    late_high = max(highs(arr[mid:]))
+
+    early_low = min(lows(arr[:mid]))
+    late_low = min(lows(arr[mid:]))
+
+    cls = closes(arr)
+
+    average_recent = sum(cls[-5:]) / 5
+
+    bullish_structure = (
+        late_high > early_high
+        and late_low > early_low
+        and cls[-1] >= average_recent
+    )
+
+    bearish_structure = (
+        late_high < early_high
+        and late_low < early_low
+        and cls[-1] <= average_recent
+    )
+
+    if bullish_structure:
         return "BULLISH"
-    if down:
+
+    if bearish_structure:
         return "BEARISH"
+
     return "RANGE"
 
 
-def trend_strength(candles: List[Any]) -> float:
-    return adx(candles, 14)
-
-
 def direction_from_tf(candles: List[Any]) -> str:
+
     structure = market_structure(candles)
+
     if structure in ("BULLISH", "BEARISH"):
         return structure
+
     return ema_direction(candles)
 
 
-# ------------------------------------------------------------
-# Structure / confirmation helpers
-# ------------------------------------------------------------
+# ============================================================
+# 15M / 5M CONFIRMATION
+# ============================================================
 
-def mtf_confirmation(m15: List[Any], direction: str) -> bool:
-    """15M directional confirmation; intentionally not exact EMA equality."""
-    if len(m15) < 30:
+def mtf_confirmation(
+    m15: List[Any],
+    direction: str,
+) -> bool:
+
+    if len(m15) < 25:
         return False
+
     cls = closes(m15)
+
     e20 = ema(cls, 20)
     e50 = ema(cls, 50)
+
     if e20 is None or e50 is None:
         return False
+
     recent = m15[-3:]
+
     if direction == "LONG":
-        bullish_count = sum(1 for c in recent if bullish(c))
-        close = cls[-1]
-        return bullish_count >= 2 and close >= e20 and close >= e50 * 0.998
+
+        bullish_count = sum(
+            1 for c in recent
+            if bullish(c)
+        )
+
+        return (
+            bullish_count >= 2
+            and cls[-1] >= e20 * 0.999
+            and cls[-1] >= e50 * 0.995
+        )
+
     if direction == "SHORT":
-        bearish_count = sum(1 for c in recent if bearish(c))
-        close = cls[-1]
-        return bearish_count >= 2 and close <= e20 and close <= e50 * 1.002
+
+        bearish_count = sum(
+            1 for c in recent
+            if bearish(c)
+        )
+
+        return (
+            bearish_count >= 2
+            and cls[-1] <= e20 * 1.001
+            and cls[-1] <= e50 * 1.005
+        )
+
     return False
 
 
-def strong_confirmation_5m(m5: List[Any], direction: str) -> bool:
-    """5M confirmation: accept either a two-candle push or a strong structure break."""
-    if len(m5) < 10:
+def strong_confirmation_5m(
+    m5: List[Any],
+    direction: str,
+) -> bool:
+
+    if len(m5) < 8:
         return False
 
     last = m5[-1]
-    prev = m5[-2]
-    cls = closes(m5)
+    previous = m5[-2]
+
     recent = m5[-7:-1]
-    if not recent:
-        return False
 
-    _, ph, pl, pc, _ = candle_values(prev)
-    _, h, l, cl, _ = candle_values(last)
+    _, prev_high, prev_low, prev_close, _ = candle_values(
+        previous
+    )
 
-    two_candle_push = False
-    structure_break = False
+    _, _, _, last_close, _ = candle_values(last)
 
     if direction == "LONG":
+
         two_candle_push = (
-            bullish(prev)
+            bullish(previous)
             and bullish(last)
-            and body_ratio(last) >= 0.40
-            and cl > ph
-            and cl > pc
+            and body_ratio(last) >= 0.35
+            and last_close > prev_high
         )
-        local_high = max(highs(recent))
+
         structure_break = (
             bullish(last)
-            and body_ratio(last) >= 0.55
-            and cl > local_high
+            and body_ratio(last) >= 0.45
+            and last_close > max(highs(recent))
         )
-    elif direction == "SHORT":
+
+        return (
+            two_candle_push
+            or structure_break
+        )
+
+    if direction == "SHORT":
+
         two_candle_push = (
-            bearish(prev)
+            bearish(previous)
             and bearish(last)
-            and body_ratio(last) >= 0.40
-            and cl < pl
-            and cl < pc
+            and body_ratio(last) >= 0.35
+            and last_close < prev_low
         )
-        local_low = min(lows(recent))
+
         structure_break = (
             bearish(last)
-            and body_ratio(last) >= 0.55
-            and cl < local_low
+            and body_ratio(last) >= 0.45
+            and last_close < min(lows(recent))
         )
 
-    return two_candle_push or structure_break
+        return (
+            two_candle_push
+            or structure_break
+        )
+
+    return False
 
 
-def rejection(c: Any, direction: str) -> bool:
-    r = candle_range(c)
+def entry_trigger_5m(
+    m5: List[Any],
+    direction: str,
+) -> bool:
+
+    if strong_confirmation_5m(
+        m5,
+        direction,
+    ):
+        return True
+
+    if len(m5) < 10:
+        return False
+
+    recent = m5[-6:-1]
+    last = m5[-1]
+
+    last_close = candle_values(last)[3]
+
+    if direction == "LONG":
+
+        return (
+            bullish(last)
+            and body_ratio(last) >= 0.32
+            and last_close > max(highs(recent))
+        )
+
+    if direction == "SHORT":
+
+        return (
+            bearish(last)
+            and body_ratio(last) >= 0.32
+            and last_close < min(lows(recent))
+        )
+
+    return False
+
+
+# ============================================================
+# PULLBACK
+# ============================================================
+
+def near_ema_zone(
+    h1: List[Any],
+    direction: str,
+) -> bool:
+
+    cls = closes(h1)
+
+    e20 = ema(cls, 20)
+    e50 = ema(cls, 50)
+
+    atr_value = atr(h1)
+
+    if (
+        e20 is None
+        or e50 is None
+        or atr_value <= 0
+    ):
+        return False
+
+    price = cls[-1]
+
+    zone = max(
+        atr_value * 0.80,
+        price * 0.005,
+    )
+
+    distance = min(
+        abs(price - e20),
+        abs(price - e50),
+    )
+
+    if direction == "LONG":
+
+        return (
+            distance <= zone
+            and price >= min(e20, e50) * 0.992
+        )
+
+    if direction == "SHORT":
+
+        return (
+            distance <= zone
+            and price <= max(e20, e50) * 1.008
+        )
+
+    return False
+
+
+def rejection(
+    candle: Any,
+    direction: str,
+) -> bool:
+
+    r = candle_range(candle)
+
     if r <= 0:
         return False
+
     if direction == "LONG":
-        return lower_wick(c) >= body(c) * 0.8 and lower_wick(c) / r >= 0.25
+
+        return (
+            lower_wick(candle) >= body(candle) * 0.60
+            and lower_wick(candle) / r >= 0.20
+            and candle_values(candle)[3]
+            >= candle_values(candle)[0]
+        )
+
     if direction == "SHORT":
-        return upper_wick(c) >= body(c) * 0.8 and upper_wick(c) / r >= 0.25
+
+        return (
+            upper_wick(candle) >= body(candle) * 0.60
+            and upper_wick(candle) / r >= 0.20
+            and candle_values(candle)[3]
+            <= candle_values(candle)[0]
+        )
+
     return False
 
 
-def recent_rejection(candles: List[Any], direction: str, lookback: int = 4) -> bool:
-    return any(rejection(c, direction) for c in candles[-lookback:])
+def recent_rejection(
+    candles: List[Any],
+    direction: str,
+    lookback: int = 6,
+) -> bool:
+
+    return any(
+        rejection(c, direction)
+        for c in candles[-lookback:]
+    )
 
 
-def near_ema_zone(h1: List[Any], direction: str) -> bool:
-    cls = closes(h1)
-    if len(cls) < 50:
+def pullback_detected(
+    h1: List[Any],
+    direction: str,
+) -> bool:
+
+    if len(h1) < 25:
         return False
-    price = cls[-1]
+
+    cls = closes(h1)
+
     e20 = ema(cls, 20)
     e50 = ema(cls, 50)
-    atrv = atr(h1, 14)
-    if not e20 or not e50 or not atrv:
-        return False
-    zone = max(atrv * 0.55, price * 0.004)
-    if direction == "LONG":
-        return min(abs(price - e20), abs(price - e50)) <= zone and price >= min(e20, e50) * 0.995
-    if direction == "SHORT":
-        return min(abs(price - e20), abs(price - e50)) <= zone and price <= max(e20, e50) * 1.005
-    return False
 
+    atr_value = atr(h1)
 
-def pullback_detected(h1: List[Any], direction: str) -> bool:
-    if len(h1) < 20:
+    if (
+        e20 is None
+        or e50 is None
+        or atr_value <= 0
+    ):
         return False
-    recent = h1[-12:]
-    cls = closes(h1)
-    e20 = ema(cls, 20)
-    e50 = ema(cls, 50)
-    if e20 is None or e50 is None:
-        return False
-    zone = max(atr(h1, 14) * 0.75, cls[-1] * 0.005)
+
+    zone = max(
+        atr_value * 0.90,
+        cls[-1] * 0.006,
+    )
+
+    recent = h1[-14:]
+
     if direction == "LONG":
+
         touched = any(
-            candle_values(c)[2] <= e20 + zone
-            or candle_values(c)[2] <= e50 + zone
+            candle_values(c)[2]
+            <= max(e20, e50) + zone
             for c in recent
         )
-        recovery = closes(recent)[-1] > e20 or closes(recent)[-1] > e50
+
+        recovery = cls[-1] > e20
+
         return touched and recovery
+
     if direction == "SHORT":
+
         touched = any(
-            candle_values(c)[1] >= e20 - zone
-            or candle_values(c)[1] >= e50 - zone
+            candle_values(c)[1]
+            >= min(e20, e50) - zone
             for c in recent
         )
-        recovery = closes(recent)[-1] < e20 or closes(recent)[-1] < e50
+
+        recovery = cls[-1] < e20
+
         return touched and recovery
+
     return False
 
 
-def structure_shift_5m(m5: List[Any], direction: str) -> bool:
-    if len(m5) < 12:
-        return False
-    recent = m5[-8:]
-    if direction == "LONG":
-        prior_high = max(highs(recent[:-2]))
-        return closes(recent)[-1] > prior_high and bullish(recent[-1])
-    if direction == "SHORT":
-        prior_low = min(lows(recent[:-2]))
-        return closes(recent)[-1] < prior_low and bearish(recent[-1])
-    return False
+# ============================================================
+# BREAKOUT
+# ============================================================
 
+def local_breakout(
+    m15: List[Any],
+    direction: str,
+    lookback: int = 20,
+) -> Tuple[bool, float]:
 
-def local_breakout(m15: List[Any], direction: str, lookback: int = 20) -> Tuple[bool, float]:
     if len(m15) < lookback + 2:
         return False, 0.0
-    prev = m15[-lookback-1:-1]
+
+    previous = m15[-lookback - 1:-1]
+
     last = m15[-1]
-    level_high = max(highs(prev))
-    level_low = min(lows(prev))
+
+    level_high = max(highs(previous))
+    level_low = min(lows(previous))
+
     close = candle_values(last)[3]
+
     if direction == "LONG":
-        return close > level_high, level_high
+
+        return (
+            close > level_high,
+            level_high,
+        )
+
     if direction == "SHORT":
-        return close < level_low, level_low
+
+        return (
+            close < level_low,
+            level_low,
+        )
+
     return False, 0.0
 
 
-def breakout_hold(m15: List[Any], direction: str, level: float) -> bool:
-    if level <= 0 or len(m15) < 4:
+def breakout_hold(
+    m15: List[Any],
+    direction: str,
+    level: float,
+) -> bool:
+
+    if level <= 0 or len(m15) < 3:
         return False
+
     recent = m15[-3:]
+
     if direction == "LONG":
-        return all(candle_values(c)[3] >= level * 0.998 for c in recent)
+
+        good = sum(
+            candle_values(c)[3]
+            >= level * 0.997
+            for c in recent
+        )
+
+        return good >= 2
+
     if direction == "SHORT":
-        return all(candle_values(c)[3] <= level * 1.002 for c in recent)
+
+        good = sum(
+            candle_values(c)[3]
+            <= level * 1.003
+            for c in recent
+        )
+
+        return good >= 2
+
     return False
 
 
-def sweep_reclaim(m15: List[Any], direction: str) -> bool:
-    if len(m15) < 12:
+# ============================================================
+# REVERSAL
+# ============================================================
+
+def sweep_reclaim_recent(
+    m15: List[Any],
+    direction: str,
+    lookback: int = 12,
+) -> bool:
+
+    if len(m15) < lookback + 3:
         return False
-    prior = m15[-11:-1]
-    last = m15[-1]
-    prior_high = max(highs(prior))
-    prior_low = min(lows(prior))
-    _, h, l, cl, _ = candle_values(last)
-    if direction == "LONG":
-        return l < prior_low and cl > prior_low and bullish(last)
-    if direction == "SHORT":
-        return h > prior_high and cl < prior_high and bearish(last)
+
+    previous = m15[-lookback - 3:-3]
+
+    if not previous:
+        return False
+
+    previous_high = max(highs(previous))
+    previous_low = min(lows(previous))
+
+    recent = m15[-3:]
+
+    for c in recent:
+
+        _, h, l, close, _ = candle_values(c)
+
+        if direction == "LONG":
+
+            if (
+                l < previous_low
+                and close > previous_low
+                and bullish(c)
+            ):
+                return True
+
+        if direction == "SHORT":
+
+            if (
+                h > previous_high
+                and close < previous_high
+                and bearish(c)
+            ):
+                return True
+
     return False
 
 
-def range_info(h1: List[Any]) -> Tuple[bool, float, float]:
+def structure_shift_5m(
+    m5: List[Any],
+    direction: str,
+) -> bool:
+
+    if len(m5) < 12:
+        return False
+
+    previous = m5[-8:-1]
+    last = m5[-1]
+
+    close = candle_values(last)[3]
+
+    if direction == "LONG":
+
+        return (
+            bullish(last)
+            and body_ratio(last) >= 0.30
+            and close > max(highs(previous))
+        )
+
+    if direction == "SHORT":
+
+        return (
+            bearish(last)
+            and body_ratio(last) >= 0.30
+            and close < min(lows(previous))
+        )
+
+    return False
+
+
+# ============================================================
+# RANGE
+# ============================================================
+
+def range_info(
+    h1: List[Any],
+) -> Tuple[bool, float, float]:
+
     if len(h1) < 30:
         return False, 0.0, 0.0
+
     recent = h1[-24:]
-    hi = max(highs(recent))
-    lo = min(lows(recent))
-    width = hi - lo
-    price = closes(recent)[-1]
-    if width <= 0 or price <= 0:
-        return False, hi, lo
-    atrv = atr(recent, 14)
-    # Range should not be abnormally wide relative to volatility.
-    is_range = atrv > 0 and width <= atrv * 6.0
-    return is_range, hi, lo
+
+    high = max(highs(recent))
+    low = min(lows(recent))
+
+    width = high - low
+
+    atr_value = atr(recent)
+
+    if (
+        width <= 0
+        or atr_value <= 0
+    ):
+        return False, high, low
+
+    is_range = width <= atr_value * 7.5
+
+    return is_range, high, low
 
 
-def near_range_boundary(h1: List[Any], direction: str, hi: float, lo: float) -> bool:
+def near_range_boundary(
+    h1: List[Any],
+    direction: str,
+    high: float,
+    low: float,
+) -> bool:
+
     price = closes(h1)[-1]
-    width = hi - lo
+
+    width = high - low
+
     if width <= 0:
         return False
-    edge = width * 0.20
+
+    edge = width * 0.25
+
     if direction == "LONG":
-        return price <= lo + edge
+
+        return price <= low + edge
+
     if direction == "SHORT":
-        return price >= hi - edge
+
+        return price >= high - edge
+
     return False
 
 
-# ------------------------------------------------------------
-# Strategy detectors
-# ------------------------------------------------------------
+def range_direction(
+    h1: List[Any],
+) -> Optional[str]:
 
-def detect_trend_following(h1: List[Any], m15: List[Any], m5: List[Any], direction: str) -> Dict[str, Any]:
-    if direction not in ("LONG", "SHORT"):
-        return {"valid": False, "reason": "NO_DIRECTION"}
-    h1_dir = direction_from_tf(h1)
+    ok, high, low = range_info(h1)
+
+    if not ok:
+        return None
+
+    if near_range_boundary(
+        h1,
+        "LONG",
+        high,
+        low,
+    ):
+        return "LONG"
+
+    if near_range_boundary(
+        h1,
+        "SHORT",
+        high,
+        low,
+    ):
+        return "SHORT"
+
+    return None
+
+
+# ============================================================
+# STRATEGIES
+# ============================================================
+
+def detect_trend_following(
+    h1: List[Any],
+    m15: List[Any],
+    m5: List[Any],
+    direction: str,
+) -> Dict[str, Any]:
+
+    expected = (
+        "BULLISH"
+        if direction == "LONG"
+        else "BEARISH"
+    )
+
+    structure = market_structure(h1)
     ema_dir = ema_direction(h1)
     adx1 = adx(h1)
-    mtf = mtf_confirmation(m15, direction)
-    trigger = strong_confirmation_5m(m5, direction)
-    if h1_dir != ("BULLISH" if direction == "LONG" else "BEARISH"):
-        return {"valid": False, "reason": "H1_STRUCTURE"}
-    if ema_dir not in ("BULLISH", "BEARISH"):
-        return {"valid": False, "reason": "H1_EMA"}
-    if adx1 < 20:
-        return {"valid": False, "reason": "ADX_LOW"}
-    # v13: MTF is a quality bonus, not an absolute gate.
+
+    if (
+        structure != expected
+        and ema_dir != expected
+    ):
+        return {
+            "valid": False,
+            "reason": "H1_TREND_MISSING",
+        }
+
+    if adx1 < 18:
+        return {
+            "valid": False,
+            "reason": "ADX_LOW",
+        }
+
+    trigger = entry_trigger_5m(
+        m5,
+        direction,
+    )
+
     if not trigger:
-        return {"valid": False, "reason": "5M_CONFIRMATION"}
-    score = 0
-    if ema_dir == ("BULLISH" if direction == "LONG" else "BEARISH"):
+        return {
+            "valid": False,
+            "reason": "5M_TRIGGER",
+        }
+
+    mtf = mtf_confirmation(
+        m15,
+        direction,
+    )
+
+    pullback = pullback_detected(
+        h1,
+        direction,
+    )
+
+    score = 4
+
+    if structure == expected:
         score += 2
+
+    if ema_dir == expected:
+        score += 2
+
     if adx1 >= 25:
-        score += 2
-    elif adx1 >= 20:
         score += 1
+
     if mtf:
-        score += 2
-    if strong_confirmation_5m(m5, direction):
-        score += 2
-    if pullback_detected(h1, direction):
         score += 1
-    return {"valid": True, "reason": "VALID", "score": score, "mtf": mtf}
+
+    if pullback:
+        score += 1
+
+    return {
+        "valid": True,
+        "reason": "VALID",
+        "score": score,
+        "mtf": mtf,
+    }
 
 
-def detect_pullback(h1: List[Any], m15: List[Any], m5: List[Any], direction: str) -> Dict[str, Any]:
-    if direction not in ("LONG", "SHORT"):
-        return {"valid": False, "reason": "NO_DIRECTION"}
-    expected = "BULLISH" if direction == "LONG" else "BEARISH"
-    if direction_from_tf(h1) != expected:
-        return {"valid": False, "reason": "H1_STRUCTURE"}
-    if ema_direction(h1) != expected:
-        return {"valid": False, "reason": "H1_EMA"}
-    if not pullback_detected(h1, direction):
-        return {"valid": False, "reason": "NO_PULLBACK_ZONE"}
-    if not (recent_rejection(h1, direction, 5) or near_ema_zone(h1, direction)):
-        return {"valid": False, "reason": "NO_REJECTION"}
-    trigger = strong_confirmation_5m(m5, direction)
-    if not trigger:
-        return {"valid": False, "reason": "5M_CONFIRMATION"}
-    mtf = mtf_confirmation(m15, direction)
-    score = 0
-    score += 2
-    if near_ema_zone(h1, direction):
+def detect_pullback(
+    h1: List[Any],
+    m15: List[Any],
+    m5: List[Any],
+    direction: str,
+) -> Dict[str, Any]:
+
+    expected = (
+        "BULLISH"
+        if direction == "LONG"
+        else "BEARISH"
+    )
+
+    structure = direction_from_tf(h1)
+    ema_dir = ema_direction(h1)
+
+    if (
+        structure != expected
+        and ema_dir != expected
+    ):
+        return {
+            "valid": False,
+            "reason": "H1_TREND_MISSING",
+        }
+
+    if not pullback_detected(
+        h1,
+        direction,
+    ):
+        return {
+            "valid": False,
+            "reason": "NO_PULLBACK_ZONE",
+        }
+
+    ema_zone = near_ema_zone(
+        h1,
+        direction,
+    )
+
+    rejection_found = recent_rejection(
+        h1,
+        direction,
+        6,
+    )
+
+    if not ema_zone and not rejection_found:
+        return {
+            "valid": False,
+            "reason": "NO_PULLBACK_CONFIRMATION",
+        }
+
+    if not entry_trigger_5m(
+        m5,
+        direction,
+    ):
+        return {
+            "valid": False,
+            "reason": "5M_TRIGGER",
+        }
+
+    mtf = mtf_confirmation(
+        m15,
+        direction,
+    )
+
+    score = 5
+
+    if ema_zone:
         score += 2
-    if recent_rejection(h1, direction, 5):
-        score += 2
+
+    if rejection_found:
+        score += 1
+
     if mtf:
-        score += 2
-    score += 2  # strong 5M confirmation is mandatory
-    return {"valid": True, "reason": "VALID", "score": score, "mtf": mtf}
+        score += 1
 
-
-def detect_breakout(h1: List[Any], m15: List[Any], m5: List[Any], direction: str) -> Dict[str, Any]:
-    ok, level = local_breakout(m15, direction, 20)
-    if not ok:
-        return {"valid": False, "reason": "NO_BREAKOUT"}
-    if not volume_spike(m15, 1.20, 20):
-        return {"valid": False, "reason": "NO_VOLUME"}
-    last = m15[-1]
-    if body_ratio(last) < 0.50:
-        return {"valid": False, "reason": "WEAK_BREAKOUT_CANDLE"}
-    if not breakout_hold(m15, direction, level):
-        return {"valid": False, "reason": "NO_HOLD"}
-    if not strong_confirmation_5m(m5, direction):
-        return {"valid": False, "reason": "5M_CONFIRMATION"}
-    mtf = mtf_confirmation(m15, direction)
-    score = 3 + 2 + 2  # breakout + volume + hold
-    if mtf:
-        score += 2
     if adx(h1) >= 22:
         score += 1
-    return {"valid": True, "reason": "VALID", "score": score, "mtf": mtf, "level": level}
+
+    return {
+        "valid": True,
+        "reason": "VALID",
+        "score": score,
+        "mtf": mtf,
+    }
 
 
-def detect_reversal(h1: List[Any], m15: List[Any], m5: List[Any], direction: str) -> Dict[str, Any]:
-    if not sweep_reclaim(m15, direction):
-        return {"valid": False, "reason": "NO_SWEEP"}
-    last = m15[-1]
-    if body_ratio(last) < 0.40:
-        return {"valid": False, "reason": "WEAK_RECLAIM"}
-    if not structure_shift_5m(m5, direction):
-        return {"valid": False, "reason": "NO_5M_STRUCTURE_SHIFT"}
-    score = 4 + 3 + 2
-    if mtf_confirmation(m15, direction):
-        score += 1
-    return {"valid": True, "reason": "VALID", "score": score, "mtf": mtf_confirmation(m15, direction)}
+def detect_breakout(
+    h1: List[Any],
+    m15: List[Any],
+    m5: List[Any],
+    direction: str,
+) -> Dict[str, Any]:
 
+    ok, level = local_breakout(
+        m15,
+        direction,
+        20,
+    )
 
-def detect_range(h1: List[Any], m5: List[Any], direction: str) -> Dict[str, Any]:
-    ok, hi, lo = range_info(h1)
     if not ok:
-        return {"valid": False, "reason": "NOT_RANGE"}
-    if adx(h1) > 22:
-        return {"valid": False, "reason": "ADX_TOO_HIGH"}
-    if not near_range_boundary(h1, direction, hi, lo):
-        return {"valid": False, "reason": "NOT_AT_BOUNDARY"}
-    if not recent_rejection(h1, direction, 5):
-        return {"valid": False, "reason": "NO_REJECTION"}
-    if not strong_confirmation_5m(m5, direction):
-        return {"valid": False, "reason": "5M_CONFIRMATION"}
-    score = 3 + 3 + 2
-    if adx(h1) <= 18:
+        return {
+            "valid": False,
+            "reason": "NO_BREAKOUT",
+        }
+
+    last = m15[-1]
+
+    if body_ratio(last) < 0.38:
+        return {
+            "valid": False,
+            "reason": "WEAK_BREAKOUT_CANDLE",
+        }
+
+    if not volume_spike(
+        m15,
+        1.08,
+        20,
+    ):
+        return {
+            "valid": False,
+            "reason": "NO_VOLUME",
+        }
+
+    if not breakout_hold(
+        m15,
+        direction,
+        level,
+    ):
+        return {
+            "valid": False,
+            "reason": "NO_HOLD",
+        }
+
+    if not entry_trigger_5m(
+        m5,
+        direction,
+    ):
+        return {
+            "valid": False,
+            "reason": "5M_TRIGGER",
+        }
+
+    mtf = mtf_confirmation(
+        m15,
+        direction,
+    )
+
+    score = 6
+
+    if mtf:
+        score += 2
+
+    if adx(h1) >= 20:
         score += 1
-    return {"valid": True, "reason": "VALID", "score": score, "mtf": False}
+
+    return {
+        "valid": True,
+        "reason": "VALID",
+        "score": score,
+        "mtf": mtf,
+        "level": level,
+    }
 
 
-# ------------------------------------------------------------
-# Context and trade levels
-# ------------------------------------------------------------
+def detect_reversal(
+    h1: List[Any],
+    m15: List[Any],
+    m5: List[Any],
+    direction: str,
+) -> Dict[str, Any]:
 
-def context_allows(strategy: str, daily: str, h4: str, h1: str, direction: str) -> bool:
-    expected = "BULLISH" if direction == "LONG" else "BEARISH"
-    # Do not allow a trend trade directly against a strongly confirmed H4 trend.
-    if strategy in ("TREND_FOLLOWING", "PULLBACK"):
-        if h4 in ("BULLISH", "BEARISH") and h4 != expected:
+    if not sweep_reclaim_recent(
+        m15,
+        direction,
+    ):
+        return {
+            "valid": False,
+            "reason": "NO_SWEEP_RECLAIM",
+        }
+
+    if not structure_shift_5m(
+        m5,
+        direction,
+    ):
+        return {
+            "valid": False,
+            "reason": "NO_5M_STRUCTURE_SHIFT",
+        }
+
+    last = m15[-1]
+
+    if body_ratio(last) < 0.30:
+        return {
+            "valid": False,
+            "reason": "WEAK_RECLAIM",
+        }
+
+    mtf = mtf_confirmation(
+        m15,
+        direction,
+    )
+
+    score = 7
+
+    if mtf:
+        score += 1
+
+    return {
+        "valid": True,
+        "reason": "VALID",
+        "score": score,
+        "mtf": mtf,
+    }
+
+
+def detect_range(
+    h1: List[Any],
+    m5: List[Any],
+    direction: str,
+) -> Dict[str, Any]:
+
+    ok, high, low = range_info(h1)
+
+    if not ok:
+        return {
+            "valid": False,
+            "reason": "NOT_RANGE",
+        }
+
+    adx1 = adx(h1)
+
+    if adx1 > 24:
+        return {
+            "valid": False,
+            "reason": "ADX_TOO_HIGH",
+        }
+
+    if not near_range_boundary(
+        h1,
+        direction,
+        high,
+        low,
+    ):
+        return {
+            "valid": False,
+            "reason": "NOT_AT_BOUNDARY",
+        }
+
+    rejection_found = recent_rejection(
+        h1,
+        direction,
+        6,
+    )
+
+    if not rejection_found:
+        return {
+            "valid": False,
+            "reason": "NO_REJECTION",
+        }
+
+    if not entry_trigger_5m(
+        m5,
+        direction,
+    ):
+        return {
+            "valid": False,
+            "reason": "5M_TRIGGER",
+        }
+
+    score = 6
+
+    if adx1 <= 18:
+        score += 1
+
+    return {
+        "valid": True,
+        "reason": "VALID",
+        "score": score,
+        "mtf": False,
+    }
+
+
+# ============================================================
+# HIGHER TIMEFRAME CONTEXT
+# ============================================================
+
+def context_allows(
+    strategy: str,
+    daily: str,
+    h4: str,
+    direction: str,
+    h4_adx: float,
+) -> bool:
+
+    expected = (
+        "BULLISH"
+        if direction == "LONG"
+        else "BEARISH"
+    )
+
+    # Only block continuation setups when H4 is
+    # strongly opposite.
+    if strategy in (
+        "TREND_FOLLOWING",
+        "PULLBACK",
+        "BREAKOUT",
+    ):
+
+        if (
+            h4 in ("BULLISH", "BEARISH")
+            and h4 != expected
+            and h4_adx >= 30
+        ):
             return False
-    # Breakout against H4 is allowed only when H4 is RANGE/unclear.
-    if strategy == "BREAKOUT":
-        if h4 in ("BULLISH", "BEARISH") and h4 != expected:
-            return False
-    # Reversal is allowed against higher timeframe only when it has a real sweep.
-    if strategy == "REVERSAL":
-        return True
-    # Range strategy should not fight a strong H4 trend.
+
+    # Range can work against weaker HTF trends.
     if strategy == "RANGE_TRADING":
-        if h4 in ("BULLISH", "BEARISH") and h4 != expected:
+
+        if (
+            h4 in ("BULLISH", "BEARISH")
+            and h4 != expected
+            and h4_adx >= 32
+        ):
             return False
+
+    # Reversal is intentionally allowed
+    # against HTF trend because reversal itself
+    # requires sweep + structure shift.
     return True
 
 
-def calculate_trade_levels(h1: List[Any], m5: List[Any], direction: str) -> Optional[Dict[str, float]]:
-    """v13: intentionally same level model as v11."""
-    if direction not in ("LONG", "SHORT") or not h1 or not m5:
+# ============================================================
+# TRADE LEVELS
+# ============================================================
+
+def calculate_trade_levels(
+    h1: List[Any],
+    m5: List[Any],
+    direction: str,
+) -> Optional[Dict[str, float]]:
+
+    # IMPORTANT:
+    # This is intentionally the same SL/TP model
+    # as the previous version.
+
+    if (
+        direction not in ("LONG", "SHORT")
+        or not h1
+        or not m5
+    ):
         return None
+
     entry = closes(m5)[-1]
+
     atr1 = atr(h1, 14)
+
     if entry <= 0 or atr1 <= 0:
         return None
 
@@ -742,32 +1547,59 @@ def calculate_trade_levels(h1: List[Any], m5: List[Any], direction: str) -> Opti
     slw = swing_low(h1, 2)
 
     if direction == "LONG":
-        base_sl = (slw - 0.35 * atr1) if slw else (entry - 1.2 * atr1)
+
+        base_sl = (
+            slw - 0.35 * atr1
+            if slw
+            else entry - 1.2 * atr1
+        )
+
         risk = entry - base_sl
+
         min_risk = 1.2 * atr1
+
         if risk < min_risk:
+
             base_sl = entry - min_risk
             risk = min_risk
+
         if risk > 3.0 * atr1:
             return None
+
         if risk / entry > 0.035:
             return None
+
         sl = base_sl
+
         tp1 = entry + 1.5 * risk
         tp2 = entry + 2.5 * risk
         tp3 = entry + 3.0 * risk
+
     else:
-        base_sl = (sh + 0.35 * atr1) if sh else (entry + 1.2 * atr1)
+
+        base_sl = (
+            sh + 0.35 * atr1
+            if sh
+            else entry + 1.2 * atr1
+        )
+
         risk = base_sl - entry
+
         min_risk = 1.2 * atr1
+
         if risk < min_risk:
+
             base_sl = entry + min_risk
             risk = min_risk
+
         if risk > 3.0 * atr1:
             return None
+
         if risk / entry > 0.035:
             return None
+
         sl = base_sl
+
         tp1 = entry - 1.5 * risk
         tp2 = entry - 2.5 * risk
         tp3 = entry - 3.0 * risk
@@ -782,26 +1614,51 @@ def calculate_trade_levels(h1: List[Any], m5: List[Any], direction: str) -> Opti
     }
 
 
-def target_reachable(levels: Dict[str, float], h1: List[Any], direction: str) -> bool:
-    # Conservative sanity check: do not reject a setup just because an old
-    # distant swing exists; only reject an immediate opposing barrier.
+def target_reachable(
+    levels: Dict[str, float],
+    h1: List[Any],
+    direction: str,
+) -> bool:
+
     entry = levels["entry"]
     tp1 = levels["tp1"]
-    recent = h1[-25:] if len(h1) >= 25 else h1
+
+    recent = (
+        h1[-25:]
+        if len(h1) >= 25
+        else h1
+    )
+
     if direction == "LONG":
-        barriers = [x for x in highs(recent[:-1]) if x > entry]
-        if barriers and min(barriers) < tp1 * 0.995:
-            return False
+
+        barriers = [
+            x
+            for x in highs(recent[:-1])
+            if x > entry
+        ]
+
+        if barriers:
+
+            return min(barriers) >= tp1 * 0.995
+
     else:
-        barriers = [x for x in lows(recent[:-1]) if x < entry]
-        if barriers and max(barriers) > tp1 * 1.005:
-            return False
+
+        barriers = [
+            x
+            for x in lows(recent[:-1])
+            if x < entry
+        ]
+
+        if barriers:
+
+            return max(barriers) <= tp1 * 1.005
+
     return True
 
 
-# ------------------------------------------------------------
-# Main signal engine
-# ------------------------------------------------------------
+# ============================================================
+# NO TRADE
+# ============================================================
 
 def no_trade(
     reason: str,
@@ -810,8 +1667,10 @@ def no_trade(
     h1: str = "RANGE",
     direction: Optional[str] = None,
     diagnostics: Optional[Dict[str, str]] = None,
+    metrics: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    return {
+
+    result = {
         "signal": "NO_TRADE",
         "direction": direction,
         "score": 0,
@@ -825,6 +1684,15 @@ def no_trade(
         "1h": h1,
     }
 
+    if metrics:
+        result.update(metrics)
+
+    return result
+
+
+# ============================================================
+# MAIN ENGINE
+# ============================================================
 
 def generate_signal(
     daily: Any,
@@ -833,71 +1701,342 @@ def generate_signal(
     m15: Any,
     m5: Any,
 ) -> Dict[str, Any]:
+
     d = closed(daily)
     h4c = closed(h4)
     h1c = closed(h1)
     m15c = closed(m15)
     m5c = closed(m5)
 
-    if min(len(d), len(h4c), len(h1c), len(m15c), len(m5c)) < 50:
-        return no_trade("INSUFFICIENT_DATA")
+    if min(
+        len(d),
+        len(h4c),
+        len(h1c),
+        len(m15c),
+        len(m5c),
+    ) < 50:
+
+        return no_trade(
+            "INSUFFICIENT_DATA"
+        )
+
+    # --------------------------------------------------------
+    # GLOBAL CONTEXT
+    # --------------------------------------------------------
 
     daily_dir = direction_from_tf(d)
     h4_dir = direction_from_tf(h4c)
     h1_dir = direction_from_tf(h1c)
 
+    rsi15 = round(
+        rsi(m15c),
+        2,
+    )
+
+    adx1 = round(
+        adx(h1c),
+        2,
+    )
+
+    adx15 = round(
+        adx(m15c),
+        2,
+    )
+
+    h4_adx = adx(h4c)
+
+    volume = volume_spike(
+        m15c,
+        1.08,
+        20,
+    )
+
+    diagnostics = {}
+
+    metrics = {
+        "15m_rsi": rsi15,
+        "adx_1h": adx1,
+        "adx_15m": adx15,
+        "mtf_confirmation": False,
+        "volume_spike": bool(volume),
+        "confirmation": False,
+    }
+
+    # --------------------------------------------------------
+    # IMPORTANT:
+    #
+    # RANGE IS NOT A DIRECTION.
+    #
+    # If 1H is RANGE, do NOT blindly call 5M EMA LONG/SHORT.
+    #
+    # Instead:
+    # - Trend/Pullback need a real H1 trend.
+    # - Breakout can determine direction from breakout.
+    # - Reversal can determine direction from sweep.
+    # - Range determines direction from the boundary.
+    # --------------------------------------------------------
+
     if h1_dir == "BULLISH":
-        direction = "LONG"
+
+        candidate_directions = ["LONG"]
+
     elif h1_dir == "BEARISH":
-        direction = "SHORT"
+
+        candidate_directions = ["SHORT"]
+
     else:
-        # Range can still produce a valid range/reversal direction from 5M.
-        direction = None
-        m5e = ema_direction(m5c)
-        if m5e == "BULLISH":
-            direction = "LONG"
-        elif m5e == "BEARISH":
-            direction = "SHORT"
 
-    if direction is None:
-        return no_trade("NO_DIRECTION", daily_dir, h4_dir, h1_dir)
+        candidate_directions = [
+            "LONG",
+            "SHORT",
+        ]
 
-    diagnostics: Dict[str, str] = {}
+    # --------------------------------------------------------
+    # STRATEGY EVALUATION
+    # --------------------------------------------------------
 
-    detectors = [
-        ("TREND_FOLLOWING", lambda: detect_trend_following(h1c, m15c, m5c, direction)),
-        ("PULLBACK", lambda: detect_pullback(h1c, m15c, m5c, direction)),
-        ("BREAKOUT", lambda: detect_breakout(h1c, m15c, m5c, direction)),
-        ("REVERSAL", lambda: detect_reversal(h1c, m15c, m5c, direction)),
-        ("RANGE_TRADING", lambda: detect_range(h1c, m5c, direction)),
+    strategy_results = []
+
+    strategy_names = [
+        "TREND_FOLLOWING",
+        "PULLBACK",
+        "BREAKOUT",
+        "REVERSAL",
+        "RANGE_TRADING",
     ]
 
-    valid = []
-    for name, fn in detectors:
-        try:
-            result = fn()
-        except Exception as exc:
-            result = {"valid": False, "reason": f"ERROR_{type(exc).__name__}"}
-        if result.get("valid"):
-            if context_allows(name, daily_dir, h4_dir, h1_dir, direction):
-                valid.append((name, result))
-                diagnostics[name] = "VALID"
-            else:
-                diagnostics[name] = "FAIL:HTF_CONTEXT"
-        else:
-            diagnostics[name] = f"FAIL:{result.get('reason', 'UNKNOWN')}"
+    for strategy_name in strategy_names:
 
-    if not valid:
+        best_for_strategy = None
+        best_direction = None
+
+        for direction in candidate_directions:
+
+            try:
+
+                if strategy_name == "TREND_FOLLOWING":
+
+                    result = detect_trend_following(
+                        h1c,
+                        m15c,
+                        m5c,
+                        direction,
+                    )
+
+                elif strategy_name == "PULLBACK":
+
+                    result = detect_pullback(
+                        h1c,
+                        m15c,
+                        m5c,
+                        direction,
+                    )
+
+                elif strategy_name == "BREAKOUT":
+
+                    result = detect_breakout(
+                        h1c,
+                        m15c,
+                        m5c,
+                        direction,
+                    )
+
+                elif strategy_name == "REVERSAL":
+
+                    result = detect_reversal(
+                        h1c,
+                        m15c,
+                        m5c,
+                        direction,
+                    )
+
+                else:
+
+                    result = detect_range(
+                        h1c,
+                        m5c,
+                        direction,
+                    )
+
+            except Exception as exc:
+
+                result = {
+                    "valid": False,
+                    "reason": (
+                        f"ERROR_{type(exc).__name__}"
+                    ),
+                }
+
+            if result.get("valid"):
+
+                if not context_allows(
+                    strategy_name,
+                    daily_dir,
+                    h4_dir,
+                    direction,
+                    h4_adx,
+                ):
+
+                    result = {
+                        "valid": False,
+                        "reason": "HTF_CONTEXT",
+                    }
+
+                else:
+
+                    if (
+                        best_for_strategy is None
+                        or result.get("score", 0)
+                        > best_for_strategy.get("score", 0)
+                    ):
+
+                        best_for_strategy = result
+                        best_direction = direction
+
+        # ----------------------------------------------------
+        # Diagnostics
+        # ----------------------------------------------------
+
+        if best_for_strategy is not None:
+
+            diagnostics[strategy_name] = "VALID"
+
+            strategy_results.append(
+                (
+                    strategy_name,
+                    best_direction,
+                    best_for_strategy,
+                )
+            )
+
+        else:
+
+            # Run again only for diagnostic reason.
+            diagnostic_reasons = []
+
+            for direction in candidate_directions:
+
+                try:
+
+                    if strategy_name == "TREND_FOLLOWING":
+
+                        test = detect_trend_following(
+                            h1c,
+                            m15c,
+                            m5c,
+                            direction,
+                        )
+
+                    elif strategy_name == "PULLBACK":
+
+                        test = detect_pullback(
+                            h1c,
+                            m15c,
+                            m5c,
+                            direction,
+                        )
+
+                    elif strategy_name == "BREAKOUT":
+
+                        test = detect_breakout(
+                            h1c,
+                            m15c,
+                            m5c,
+                            direction,
+                        )
+
+                    elif strategy_name == "REVERSAL":
+
+                        test = detect_reversal(
+                            h1c,
+                            m15c,
+                            m5c,
+                            direction,
+                        )
+
+                    else:
+
+                        test = detect_range(
+                            h1c,
+                            m5c,
+                            direction,
+                        )
+
+                    reason = test.get(
+                        "reason",
+                        "UNKNOWN",
+                    )
+
+                    diagnostic_reasons.append(
+                        f"{direction}:{reason}"
+                    )
+
+                except Exception as exc:
+
+                    diagnostic_reasons.append(
+                        f"{direction}:ERROR_{type(exc).__name__}"
+                    )
+
+            diagnostics[strategy_name] = (
+                "FAIL:"
+                + "|".join(diagnostic_reasons)
+            )
+
+    # --------------------------------------------------------
+    # METRICS
+    # --------------------------------------------------------
+
+    # Pick any candidate direction for common 5M/15M diagnostics.
+    diagnostic_direction = None
+
+    if strategy_results:
+
+        diagnostic_direction = strategy_results[0][1]
+
+    elif h1_dir == "BULLISH":
+
+        diagnostic_direction = "LONG"
+
+    elif h1_dir == "BEARISH":
+
+        diagnostic_direction = "SHORT"
+
+    if diagnostic_direction:
+
+        metrics["mtf_confirmation"] = bool(
+            mtf_confirmation(
+                m15c,
+                diagnostic_direction,
+            )
+        )
+
+        metrics["confirmation"] = bool(
+            entry_trigger_5m(
+                m5c,
+                diagnostic_direction,
+            )
+        )
+
+    # --------------------------------------------------------
+    # NO VALID STRATEGY
+    # --------------------------------------------------------
+
+    if not strategy_results:
+
         return no_trade(
             "NO_VALID_STRATEGY",
             daily_dir,
             h4_dir,
             h1_dir,
-            direction,
+            None,
             diagnostics,
+            metrics,
         )
 
-    # Highest priority first. If multiple strategies agree, add confluence.
+    # --------------------------------------------------------
+    # PRIORITY
+    # --------------------------------------------------------
+
     priority = {
         "REVERSAL": 5,
         "BREAKOUT": 4,
@@ -905,46 +2044,156 @@ def generate_signal(
         "TREND_FOLLOWING": 2,
         "RANGE_TRADING": 1,
     }
-    valid.sort(key=lambda x: (priority.get(x[0], 0), x[1].get("score", 0)), reverse=True)
-    strategy, chosen = valid[0]
-    score = int(chosen.get("score", 0))
 
-    # Confluence from multiple independent strategies is valuable, but we do
-    # not use it to rescue a weak base setup.
-    if len(valid) >= 2:
+    strategy_results.sort(
+        key=lambda x: (
+            priority.get(x[0], 0),
+            x[2].get("score", 0),
+        ),
+        reverse=True,
+    )
+
+    strategy, direction, chosen = strategy_results[0]
+
+    score = int(
+        chosen.get("score", 0)
+    )
+
+    # --------------------------------------------------------
+    # CONFLUENCE
+    # --------------------------------------------------------
+
+    if len(strategy_results) >= 2:
+
         score += 2
 
-    rsi15 = rsi(m15c)
-    adx1 = adx(h1c)
-    adx15 = adx(m15c)
-    vol = volume_spike(m15c, 1.20, 20)
-    confirmation = strong_confirmation_5m(m5c, direction)
-    mtf = mtf_confirmation(m15c, direction)
+    # --------------------------------------------------------
+    # FINAL METRICS FOR CHOSEN DIRECTION
+    # --------------------------------------------------------
 
-    # Avoid chasing already extended momentum. This is intentionally not a
-    # generic RSI gate for every setup.
-    if strategy in ("TREND_FOLLOWING", "PULLBACK", "BREAKOUT"):
-        if direction == "LONG" and rsi15 >= 76:
-            return no_trade("RSI_TOO_EXTENDED", daily_dir, h4_dir, h1_dir, direction, diagnostics)
-        if direction == "SHORT" and rsi15 <= 24:
-            return no_trade("RSI_TOO_EXTENDED", daily_dir, h4_dir, h1_dir, direction, diagnostics)
+    metrics["mtf_confirmation"] = bool(
+        mtf_confirmation(
+            m15c,
+            direction,
+        )
+    )
 
-    # HIGH criteria are strategy-specific. We deliberately do NOT simply say
-    # score >= 8 because that recreated the old false-HIGH problem.
+    metrics["confirmation"] = bool(
+        entry_trigger_5m(
+            m5c,
+            direction,
+        )
+    )
+
+    # --------------------------------------------------------
+    # EXTENSION FILTER
+    # --------------------------------------------------------
+
+    if strategy in (
+        "TREND_FOLLOWING",
+        "PULLBACK",
+        "BREAKOUT",
+    ):
+
+        if (
+            direction == "LONG"
+            and rsi15 >= 78
+        ):
+
+            return no_trade(
+                "RSI_TOO_EXTENDED",
+                daily_dir,
+                h4_dir,
+                h1_dir,
+                direction,
+                diagnostics,
+                metrics,
+            )
+
+        if (
+            direction == "SHORT"
+            and rsi15 <= 22
+        ):
+
+            return no_trade(
+                "RSI_TOO_EXTENDED",
+                daily_dir,
+                h4_dir,
+                h1_dir,
+                direction,
+                diagnostics,
+                metrics,
+            )
+
+    # --------------------------------------------------------
+    # HIGH QUALITY
+    #
+    # HIGH is NOT just score.
+    # It requires actual setup + trigger.
+    # --------------------------------------------------------
+
     high = False
+
     if strategy == "TREND_FOLLOWING":
-        high = score >= 10 and confirmation and adx1 >= 22 and (mtf or adx15 >= 20)
+
+        high = (
+            score >= 8
+            and adx1 >= 18
+            and metrics["confirmation"]
+        )
+
     elif strategy == "PULLBACK":
-        high = score >= 10 and confirmation and near_ema_zone(h1c, direction)
+
+        high = (
+            score >= 8
+            and metrics["confirmation"]
+            and (
+                near_ema_zone(
+                    h1c,
+                    direction,
+                )
+                or recent_rejection(
+                    h1c,
+                    direction,
+                    6,
+                )
+            )
+        )
+
     elif strategy == "BREAKOUT":
-        high = score >= 10 and confirmation and vol and adx1 >= 20
+
+        high = (
+            score >= 9
+            and metrics["confirmation"]
+            and volume
+            and adx1 >= 18
+        )
+
     elif strategy == "REVERSAL":
-        high = score >= 10 and confirmation and structure_shift_5m(m5c, direction)
+
+        high = (
+            score >= 9
+            and metrics["confirmation"]
+            and structure_shift_5m(
+                m5c,
+                direction,
+            )
+        )
+
     elif strategy == "RANGE_TRADING":
-        # Range has a lower raw score because its scoring model is different.
-        high = score >= 9 and confirmation and adx1 <= 22
+
+        high = (
+            score >= 7
+            and metrics["confirmation"]
+            and adx1 <= 24
+        )
+
+    # --------------------------------------------------------
+    # QUALITY FAIL
+    # --------------------------------------------------------
 
     if not high:
+
         return no_trade(
             "SIGNAL_QUALITY_TOO_LOW",
             daily_dir,
@@ -952,10 +2201,21 @@ def generate_signal(
             h1_dir,
             direction,
             diagnostics,
+            metrics,
         )
 
-    levels = calculate_trade_levels(h1c, m5c, direction)
+    # --------------------------------------------------------
+    # LEVELS
+    # --------------------------------------------------------
+
+    levels = calculate_trade_levels(
+        h1c,
+        m5c,
+        direction,
+    )
+
     if not levels:
+
         return no_trade(
             "INVALID_TRADE_LEVELS",
             daily_dir,
@@ -963,9 +2223,19 @@ def generate_signal(
             h1_dir,
             direction,
             diagnostics,
+            metrics,
         )
 
-    if not target_reachable(levels, h1c, direction):
+    # --------------------------------------------------------
+    # TP1 REACHABILITY
+    # --------------------------------------------------------
+
+    if not target_reachable(
+        levels,
+        h1c,
+        direction,
+    ):
+
         return no_trade(
             "TP1_BLOCKED",
             daily_dir,
@@ -973,7 +2243,12 @@ def generate_signal(
             h1_dir,
             direction,
             diagnostics,
+            metrics,
         )
+
+    # --------------------------------------------------------
+    # FINAL HIGH SIGNAL
+    # --------------------------------------------------------
 
     return {
         "signal": direction,
@@ -984,19 +2259,34 @@ def generate_signal(
         "strategies": [strategy],
         "strategy": strategy,
         "strategy_diagnostics": diagnostics,
+
         "daily": daily_dir,
         "4h": h4_dir,
         "1h": h1_dir,
-        "15m_rsi": round(rsi15, 2),
-        "adx_1h": round(adx1, 2),
-        "adx_15m": round(adx15, 2),
-        "mtf_confirmation": bool(mtf),
-        "volume_spike": bool(vol),
-        "confirmation": bool(confirmation),
+
+        "15m_rsi": rsi15,
+        "adx_1h": adx1,
+        "adx_15m": adx15,
+
+        "mtf_confirmation": bool(
+            metrics["mtf_confirmation"]
+        ),
+
+        "volume_spike": bool(
+            metrics["volume_spike"]
+        ),
+
+        "confirmation": bool(
+            metrics["confirmation"]
+        ),
+
         **levels,
     }
 
 
-# Common aliases kept for compatibility with older imports.
+# ============================================================
+# COMPATIBILITY ALIASES
+# ============================================================
+
 analyze = generate_signal
 get_signal = generate_signal
