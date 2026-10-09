@@ -1807,11 +1807,11 @@ def generate_signal(
 
     for strategy_name in strategy_names:
 
-    best_for_strategy = None
-    best_direction = None
+        best_for_strategy = None
+        best_direction = None
 
-    # Check both directions for breakout and reversal.
-    # Keep trend-following and pullback direction rules unchanged.
+        # Check both directions for breakout and reversal.
+        # Keep trend-following and pullback direction rules unchanged.
     if strategy_name in ("BREAKOUT", "REVERSAL"):
         directions_to_check = ["LONG", "SHORT"]
     else:
