@@ -1791,6 +1791,7 @@ def generate_signal(
             "SHORT",
         ]
 
+
     # --------------------------------------------------------
     # STRATEGY EVALUATION
     # --------------------------------------------------------
@@ -1806,98 +1807,87 @@ def generate_signal(
     ]
 
     for strategy_name in strategy_names:
-
         best_for_strategy = None
         best_direction = None
 
-        # Check both directions for breakout and reversal.
-        # Keep trend-following and pullback direction rules unchanged.
-    if strategy_name in ("BREAKOUT", "REVERSAL"):
-        directions_to_check = ["LONG", "SHORT"]
-    else:
-        directions_to_check = candidate_directions
+        if strategy_name in ("BREAKOUT", "REVERSAL"):
+            directions_to_check = ["LONG", "SHORT"]
+        else:
+            directions_to_check = candidate_directions
+
+        diagnostic_reasons = []
 
         for direction in directions_to_check:
             try:
-
                 if strategy_name == "TREND_FOLLOWING":
-
                     result = detect_trend_following(
-                        h1c,
-                        m15c,
-                        m5c,
-                        direction,
+                        h1c, m15c, m5c, direction
                     )
 
                 elif strategy_name == "PULLBACK":
-
                     result = detect_pullback(
-                        h1c,
-                        m15c,
-                        m5c,
-                        direction,
+                        h1c, m15c, m5c, direction
                     )
 
                 elif strategy_name == "BREAKOUT":
-
                     result = detect_breakout(
-                        h1c,
-                        m15c,
-                        m5c,
-                        direction,
+                        h1c, m15c, m5c, direction
                     )
 
                 elif strategy_name == "REVERSAL":
-
                     result = detect_reversal(
-                        h1c,
-                        m15c,
-                        m5c,
-                        direction,
+                        h1c, m15c, m5c, direction
                     )
 
                 else:
-
                     result = detect_range(
-                        h1c,
-                        m5c,
-                        direction,
+                        h1c, m5c, direction
                     )
+
+                reason = result.get("reason", "UNKNOWN")
+
+                if result.get("valid"):
+                    if not context_allows(
+                        strategy_name,
+                        daily_dir,
+                        h4_dir,
+                        direction,
+                        h4_adx,
+                    ):
+                        reason = "HTF_CONTEXT"
+                    else:
+                        if (
+                            best_for_strategy is None
+                            or result.get("score", 0)
+                            > best_for_strategy.get("score", 0)
+                        ):
+                            best_for_strategy = result
+                            best_direction = direction
+
+                diagnostic_reasons.append(
+                    f"{direction}:{reason}"
+                )
 
             except Exception as exc:
+                diagnostic_reasons.append(
+                    f"{direction}:ERROR_{type(exc).__name__}"
+                )
 
-                result = {
-                    "valid": False,
-                    "reason": (
-                        f"ERROR_{type(exc).__name__}"
-                    ),
-                }
+        if best_for_strategy is not None:
+            diagnostics[strategy_name] = "VALID"
 
-            if result.get("valid"):
-
-                if not context_allows(
+            strategy_results.append(
+                (
                     strategy_name,
-                    daily_dir,
-                    h4_dir,
-                    direction,
-                    h4_adx,
-                ):
+                    best_direction,
+                    best_for_strategy,
+                )
+            )
+        else:
+            diagnostics[strategy_name] = (
+                "FAIL:" + "|".join(diagnostic_reasons)
+            )
 
-                    result = {
-                        "valid": False,
-                        "reason": "HTF_CONTEXT",
-                    }
-
-                else:
-
-                    if (
-                        best_for_strategy is None
-                        or result.get("score", 0)
-                        > best_for_strategy.get("score", 0)
-                    ):
-
-                        best_for_strategy = result
-                        best_direction = direction
 
         # ----------------------------------------------------
         # Diagnostics
