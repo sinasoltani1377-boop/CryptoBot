@@ -1373,8 +1373,6 @@ def generate_signal(
         best_for_strategy = None
         best_direction = None
 
-        # FIX: this condition belongs inside the strategy loop.
-        # Breakout and reversal check both directions.
         if strategy_name in ("BREAKOUT", "REVERSAL"):
             directions_to_check = ["LONG", "SHORT"]
         else:
@@ -1383,15 +1381,25 @@ def generate_signal(
         for direction in directions_to_check:
             try:
                 if strategy_name == "TREND_FOLLOWING":
-                    result = detect_trend_following(h1c, m15c, m5c, direction)
+                    result = detect_trend_following(
+                        h1c, m15c, m5c, direction
+                    )
                 elif strategy_name == "PULLBACK":
-                    result = detect_pullback(h1c, m15c, m5c, direction)
+                    result = detect_pullback(
+                        h1c, m15c, m5c, direction
+                    )
                 elif strategy_name == "BREAKOUT":
-                    result = detect_breakout(h1c, m15c, m5c, direction)
+                    result = detect_breakout(
+                        h1c, m15c, m5c, direction
+                    )
                 elif strategy_name == "REVERSAL":
-                    result = detect_reversal(h1c, m15c, m5c, direction)
+                    result = detect_reversal(
+                        h1c, m15c, m5c, direction
+                    )
                 else:
-                    result = detect_range(h1c, m5c, direction)
+                    result = detect_range(
+                        h1c, m5c, direction
+                    )
 
             except Exception as exc:
                 result = {
@@ -1417,28 +1425,41 @@ def generate_signal(
                     best_for_strategy = result
                     best_direction = direction
 
-        # Diagnostics
+        # STRATEGY DIAGNOSTICS
         if best_for_strategy is not None:
             diagnostics[strategy_name] = "VALID"
             strategy_results.append(
-                (strategy_name, best_direction, best_for_strategy)
+                (
+                    strategy_name,
+                    best_direction,
+                    best_for_strategy,
+                )
             )
         else:
             diagnostic_reasons = []
 
-            # Use the same direction rules as the actual evaluation.
             for direction in directions_to_check:
                 try:
                     if strategy_name == "TREND_FOLLOWING":
-                        test = detect_trend_following(h1c, m15c, m5c, direction)
+                        test = detect_trend_following(
+                            h1c, m15c, m5c, direction
+                        )
                     elif strategy_name == "PULLBACK":
-                        test = detect_pullback(h1c, m15c, m5c, direction)
+                        test = detect_pullback(
+                            h1c, m15c, m5c, direction
+                        )
                     elif strategy_name == "BREAKOUT":
-                        test = detect_breakout(h1c, m15c, m5c, direction)
+                        test = detect_breakout(
+                            h1c, m15c, m5c, direction
+                        )
                     elif strategy_name == "REVERSAL":
-                        test = detect_reversal(h1c, m15c, m5c, direction)
+                        test = detect_reversal(
+                            h1c, m15c, m5c, direction
+                        )
                     else:
-                        test = detect_range(h1c, m5c, direction)
+                        test = detect_range(
+                            h1c, m5c, direction
+                        )
 
                     reason = test.get("reason", "UNKNOWN")
 
@@ -1454,14 +1475,18 @@ def generate_signal(
                     ):
                         reason = "HTF_CONTEXT"
 
-                    diagnostic_reasons.append(f"{direction}:{reason}")
+                    diagnostic_reasons.append(
+                        f"{direction}:{reason}"
+                    )
 
                 except Exception as exc:
                     diagnostic_reasons.append(
                         f"{direction}:ERROR_{type(exc).__name__}"
                     )
 
-            diagnostics[strategy_name] = "FAIL:" + "|".join(diagnostic_reasons)
+            diagnostics[strategy_name] = (
+                "FAIL:" + "|".join(diagnostic_reasons)
+            )
 
     # METRICS
     diagnostic_direction = None
@@ -1493,8 +1518,7 @@ def generate_signal(
             metrics,
         )
 
-    # Evaluate every valid strategy independently. Do not let a high-priority
-    # strategy that fails the HIGH gate hide another strategy that passes it.
+    # STRATEGY PRIORITY
     priority = {
         "REVERSAL": 5,
         "BREAKOUT": 4,
@@ -1509,11 +1533,13 @@ def generate_signal(
     for strategy, direction, candidate in strategy_results:
         score = int(candidate.get("score", 0))
 
-        # Confluence only counts strategies that agree on the same direction.
+        # CONFLUENCE: count only strategies agreeing on direction
         same_direction_count = sum(
-            1 for name, other_direction, _ in strategy_results
+            1
+            for name, other_direction, _ in strategy_results
             if other_direction == direction and name != strategy
         )
+
         if same_direction_count >= 1:
             score += 2
 
@@ -1525,25 +1551,38 @@ def generate_signal(
             entry_trigger_5m(m5c, direction)
         )
 
-        # Avoid continuation entries when the 15M RSI is already stretched.
-        if strategy in ("TREND_FOLLOWING", "PULLBACK", "BREAKOUT"):
+        # RSI EXTENSION FILTER
+        if strategy in (
+            "TREND_FOLLOWING",
+            "PULLBACK",
+            "BREAKOUT",
+        ):
             if direction == "LONG" and rsi15 >= 78:
-                diagnostics[strategy] = "HIGH_FAIL:RSI_TOO_EXTENDED"
-                rejection_reasons.append("RSI_TOO_EXTENDED")
-                continue
-            if direction == "SHORT" and rsi15 <= 22:
-                diagnostics[strategy] = "HIGH_FAIL:RSI_TOO_EXTENDED"
-                rejection_reasons.append("RSI_TOO_EXTENDED")
+                diagnostics[strategy] = (
+                    "HIGH_FAIL:RSI_TOO_EXTENDED"
+                )
+                rejection_reasons.append(
+                    "RSI_TOO_EXTENDED"
+                )
                 continue
 
-        # Strategy-specific HIGH gates remain strict; this change fixes
-        # candidate selection, not by lowering the quality requirements.
+            if direction == "SHORT" and rsi15 <= 22:
+                diagnostics[strategy] = (
+                    "HIGH_FAIL:RSI_TOO_EXTENDED"
+                )
+                rejection_reasons.append(
+                    "RSI_TOO_EXTENDED"
+                )
+                continue
+
+        # STRICT HIGH QUALITY GATES
         if strategy == "TREND_FOLLOWING":
             high = (
                 score >= 8
                 and adx1 >= 18
                 and candidate_metrics["confirmation"]
             )
+
         elif strategy == "PULLBACK":
             high = (
                 score >= 8
@@ -1553,6 +1592,7 @@ def generate_signal(
                     or recent_rejection(h1c, direction, 6)
                 )
             )
+
         elif strategy == "BREAKOUT":
             high = (
                 score >= 9
@@ -1560,12 +1600,14 @@ def generate_signal(
                 and volume
                 and adx1 >= 18
             )
+
         elif strategy == "REVERSAL":
             high = (
                 score >= 9
                 and candidate_metrics["confirmation"]
                 and structure_shift_5m(m5c, direction)
             )
+
         else:  # RANGE_TRADING
             high = (
                 score >= 7
@@ -1573,20 +1615,102 @@ def generate_signal(
                 and adx1 <= 24
             )
 
+        # DETAILED QUALITY-GATE DIAGNOSTICS
         if not high:
-            diagnostics[strategy] = "HIGH_FAIL:QUALITY_GATE"
-            rejection_reasons.append("SIGNAL_QUALITY_TOO_LOW")
+            failed_checks = []
+
+            minimum_score = {
+                "TREND_FOLLOWING": 8,
+                "PULLBACK": 8,
+                "BREAKOUT": 9,
+                "REVERSAL": 9,
+                "RANGE_TRADING": 7,
+            }.get(strategy, 999)
+
+            if score < minimum_score:
+                failed_checks.append(
+                    f"SCORE={score}<{minimum_score}"
+                )
+
+            if not candidate_metrics["confirmation"]:
+                failed_checks.append(
+                    "NO_5M_CONFIRMATION"
+                )
+
+            if strategy == "TREND_FOLLOWING":
+                if adx1 < 18:
+                    failed_checks.append(
+                        f"ADX1_LOW={adx1}"
+                    )
+
+            elif strategy == "PULLBACK":
+                if not (
+                    near_ema_zone(h1c, direction)
+                    or recent_rejection(h1c, direction, 6)
+                ):
+                    failed_checks.append(
+                        "NO_EMA_ZONE_OR_REJECTION"
+                    )
+
+            elif strategy == "BREAKOUT":
+                if not volume:
+                    failed_checks.append(
+                        "NO_VOLUME_SPIKE"
+                    )
+                if adx1 < 18:
+                    failed_checks.append(
+                        f"ADX1_LOW={adx1}"
+                    )
+
+            elif strategy == "REVERSAL":
+                if not structure_shift_5m(
+                    m5c, direction
+                ):
+                    failed_checks.append(
+                        "NO_5M_STRUCTURE_SHIFT"
+                    )
+
+            elif strategy == "RANGE_TRADING":
+                if adx1 > 24:
+                    failed_checks.append(
+                        f"ADX1_TOO_HIGH={adx1}"
+                    )
+
+            diagnostics[strategy] = (
+                "HIGH_FAIL:" + "|".join(failed_checks)
+                if failed_checks
+                else "HIGH_FAIL:UNKNOWN"
+            )
+
+            rejection_reasons.append(
+                "SIGNAL_QUALITY_TOO_LOW"
+            )
             continue
 
-        levels = calculate_trade_levels(h1c, m5c, direction)
+        # TRADE LEVELS
+        levels = calculate_trade_levels(
+            h1c, m5c, direction
+        )
+
         if not levels:
-            diagnostics[strategy] = "HIGH_FAIL:INVALID_TRADE_LEVELS"
-            rejection_reasons.append("INVALID_TRADE_LEVELS")
+            diagnostics[strategy] = (
+                "HIGH_FAIL:INVALID_TRADE_LEVELS"
+            )
+            rejection_reasons.append(
+                "INVALID_TRADE_LEVELS"
+            )
             continue
 
-        if not target_reachable(levels, h1c, direction):
-            diagnostics[strategy] = "HIGH_FAIL:TP1_BLOCKED"
-            rejection_reasons.append("TP1_BLOCKED")
+        # TP1 OBSTACLE FILTER
+        if not target_reachable(
+            levels, h1c, direction
+        ):
+            diagnostics[strategy] = (
+                "HIGH_FAIL:TP1_BLOCKED"
+            )
+            rejection_reasons.append(
+                "TP1_BLOCKED"
+            )
             continue
 
         high_candidates.append({
@@ -1598,15 +1722,20 @@ def generate_signal(
             "priority": priority.get(strategy, 0),
         })
 
+    # NO CANDIDATE PASSED ALL HIGH FILTERS
     if not high_candidates:
-        # Return the most informative final reason while retaining per-strategy
-        # diagnostics, including which strategies were valid but failed later.
         if "TP1_BLOCKED" in rejection_reasons:
             final_reason = "TP1_BLOCKED"
+
         elif "INVALID_TRADE_LEVELS" in rejection_reasons:
             final_reason = "INVALID_TRADE_LEVELS"
-        elif "RSI_TOO_EXTENDED" in rejection_reasons and len(set(rejection_reasons)) == 1:
+
+        elif (
+            "RSI_TOO_EXTENDED" in rejection_reasons
+            and len(set(rejection_reasons)) == 1
+        ):
             final_reason = "RSI_TOO_EXTENDED"
+
         else:
             final_reason = "SIGNAL_QUALITY_TOO_LOW"
 
@@ -1620,19 +1749,24 @@ def generate_signal(
             metrics,
         )
 
-    # Prefer the strongest qualified candidate; use strategy priority only as
-    # a tie-breaker. A REVERSAL that fails HIGH can no longer block a PULLBACK.
+    # SELECT BEST QUALIFIED CANDIDATE
     high_candidates.sort(
-        key=lambda item: (item["score"], item["priority"]),
+        key=lambda item: (
+            item["score"],
+            item["priority"],
+        ),
         reverse=True,
     )
+
     selected = high_candidates[0]
+
     strategy = selected["strategy"]
     direction = selected["direction"]
     score = selected["score"]
     levels = selected["levels"]
     selected_metrics = selected["metrics"]
 
+    # FINAL SIGNAL
     return {
         "signal": direction,
         "direction": direction,
@@ -1640,7 +1774,8 @@ def generate_signal(
         "quality": "HIGH",
         "reason": f"VALID_{strategy}",
         "strategies": [
-            item["strategy"] for item in high_candidates
+            item["strategy"]
+            for item in high_candidates
             if item["direction"] == direction
         ],
         "strategy": strategy,
@@ -1651,11 +1786,19 @@ def generate_signal(
         "15m_rsi": rsi15,
         "adx_1h": adx1,
         "adx_15m": adx15,
-        "mtf_confirmation": bool(selected_metrics["mtf_confirmation"]),
-        "volume_spike": bool(selected_metrics["volume_spike"]),
-        "confirmation": bool(selected_metrics["confirmation"]),
+        "mtf_confirmation": bool(
+            selected_metrics["mtf_confirmation"]
+        ),
+        "volume_spike": bool(
+            selected_metrics["volume_spike"]
+        ),
+        "confirmation": bool(
+            selected_metrics["confirmation"]
+        ),
         **levels,
     }
+
+
 
 
 # ============================================================
