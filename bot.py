@@ -823,8 +823,8 @@ def signal_text(symbol, result):
         f"{result.get('adx_15m')}\n"
 
         f"✅ MTF 15M: "
-        f"{result.get('mtf_confirmed')}\n\n"
-
+        f"{result.get('mtf_confirmation',
+           result.get('mtf_confirmed'))}\n\n"
         f"💰 Entry: "
         f"<b>{result.get('entry')}</b>\n"
 
