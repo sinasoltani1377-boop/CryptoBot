@@ -813,7 +813,8 @@ def signal_text(symbol, result):
         f"{result.get('1h')}\n"
 
         f"⏱ 15M RSI: "
-        f"{result.get('rsi_15m')}\n"
+        f"{result.get('15m_rsi', 
+          result.get('rsi_15m'))}\n"
 
         f"📊 ADX 1H: "
         f"{result.get('adx_1h')}\n"
