@@ -479,8 +479,6 @@ def log_strategy_details(symbol, result):
             symbol,
             " | ".join(strategy_status),
         )
-
-
 # ============================================================
 # FULL DIAGNOSTIC
 # ============================================================
@@ -493,32 +491,14 @@ def log_signal_diagnostic(symbol, result):
     h4 = result.get("4h", "UNKNOWN")
     h1 = result.get("1h", "UNKNOWN")
 
-    direction = result.get(
-        "direction",
-        "UNKNOWN",
-    )
-
-    signal = result.get(
-        "signal",
-        "UNKNOWN",
-    )
-
-    score = result.get(
-        "score",
-        "UNKNOWN",
-    )
-
-    quality = result.get(
-        "quality",
-        "UNKNOWN",
-    )
+    direction = result.get("direction", "UNKNOWN")
+    signal = result.get("signal", "UNKNOWN")
+    score = result.get("score", "UNKNOWN")
+    quality = result.get("quality", "UNKNOWN")
 
     reason = result.get(
         "reason",
-        result.get(
-            "blocked_reason",
-            "UNKNOWN",
-        ),
+        result.get("blocked_reason", "UNKNOWN"),
     )
 
     strategies = (
@@ -527,11 +507,9 @@ def log_signal_diagnostic(symbol, result):
         or []
     )
 
-    if isinstance(strategies, (list, tuple)):
+    if isinstance(strategies, (list, tuple, set)):
         strategies_text = (
-            ", ".join(
-                str(x) for x in strategies
-            )
+            ", ".join(str(x) for x in strategies)
             if strategies
             else "NONE"
         )
@@ -539,7 +517,9 @@ def log_signal_diagnostic(symbol, result):
         strategies_text = str(strategies)
 
     logger.info(
-        "DIAGNOSTIC | %s | Daily=%s | 4H=%s | 1H=%s | Direction=%s | Signal=%s | Score=%s | Quality=%s | Reason=%s | Strategies=%s",
+        "DIAGNOSTIC | %s | Daily=%s | 4H=%s | 1H=%s | "
+        "Direction=%s | Signal=%s | Score=%s | "
+        "Quality=%s | Reason=%s | Strategies=%s",
         symbol,
         daily,
         h4,
@@ -552,21 +532,36 @@ def log_signal_diagnostic(symbol, result):
         strategies_text,
     )
 
-    logger.info(
-        "FILTERS | %s | 15M_RSI=%s | ADX_1H=%s | ADX_15M=%s | MTF_15M=%s | VolumeSpike=%s | Confirmation=%s",
-        symbol,
-
-        result.get("15m_rsi",
-        result.get("15m_rsi", 
-        result.get("rsi_15m")),
-        result.get("adx_1h"),
-        result.get("adx_15m"),
-        result.get("mtf_confirmation", 
-        result.get("mtf_confirmed")),firmed"))
-    log_strategy_details(
-        symbol,
-        result,
+    rsi_15m = result.get(
+        "15m_rsi",
+        result.get("rsi_15m"),
     )
+
+    adx_1h = result.get("adx_1h")
+    adx_15m = result.get("adx_15m")
+
+    mtf_confirmation = result.get(
+        "mtf_confirmation",
+        result.get("mtf_confirmed"),
+    )
+
+    volume_spike = result.get("volume_spike")
+    confirmation = result.get("confirmation")
+
+    logger.info(
+        "FILTERS | %s | 15M_RSI=%s | ADX_1H=%s | "
+        "ADX_15M=%s | MTF_15M=%s | VolumeSpike=%s | "
+        "Confirmation=%s",
+        symbol,
+        rsi_15m,
+        adx_1h,
+        adx_15m,
+        mtf_confirmation,
+        volume_spike,
+        confirmation,
+    )
+
+    log_strategy_details(symbol, result)
 
 
 # ============================================================
