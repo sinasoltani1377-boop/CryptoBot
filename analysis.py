@@ -468,29 +468,37 @@ def market_structure(
 ) -> str:
     arr = candles[-lookback:] if len(candles) > lookback else candles
 
-    if len(arr) < 12:
+    if len(arr) < 20:
         return "RANGE"
+
+    hs = highs(arr)
+    ls = lows(arr)
+    cls = closes(arr)
 
     mid = len(arr) // 2
 
-    early_high = max(highs(arr[:mid]))
-    late_high = max(highs(arr[mid:]))
-    early_low = min(lows(arr[:mid]))
-    late_low = min(lows(arr[mid:]))
+    early_high = max(hs[:mid])
+    late_high = max(hs[mid:])
+    early_low = min(ls[:mid])
+    late_low = min(ls[mid:])
 
-    cls = closes(arr)
-    average_recent = sum(cls[-5:]) / 5
+    recent_atr = atr(arr, 14)
+    if recent_atr <= 0:
+        return "RANGE"
 
+    # Require both structure and meaningful displacement.
     bullish_structure = (
         late_high > early_high
         and late_low > early_low
-        and cls[-1] >= average_recent
+        and cls[-1] > cls[mid]
+        and (cls[-1] - cls[mid]) >= recent_atr * 0.25
     )
 
     bearish_structure = (
         late_high < early_high
         and late_low < early_low
-        and cls[-1] <= average_recent
+        and cls[-1] < cls[mid]
+        and (cls[mid] - cls[-1]) >= recent_atr * 0.25
     )
 
     if bullish_structure:
@@ -500,15 +508,6 @@ def market_structure(
         return "BEARISH"
 
     return "RANGE"
-
-
-def direction_from_tf(candles: List[Any]) -> str:
-    structure = market_structure(candles)
-
-    if structure in ("BULLISH", "BEARISH"):
-        return structure
-
-    return ema_direction(candles)
 
 
 # ============================================================
@@ -769,31 +768,42 @@ def local_breakout(
     return False, 0.0
 
 
+
 def breakout_hold(
     m15: List[Any],
     direction: str,
     level: float,
 ) -> bool:
-    if level <= 0 or len(m15) < 3:
+    if level <= 0 or len(m15) < 4:
         return False
 
-    recent = m15[-3:]
+    # The final candle must remain on the breakout side.
+    # Check the two candles before it separately.
+    previous = m15[-3:-1]
+    last_close = candle_values(m15[-1])[3]
 
     if direction == "LONG":
-        good = sum(
-            candle_values(c)[3] >= level * 0.997
-            for c in recent
+        previous_holds = sum(
+            candle_values(c)[3] >= level
+            for c in previous
         )
-        return good >= 2
+        return (
+            previous_holds >= 1
+            and last_close >= level
+        )
 
     if direction == "SHORT":
-        good = sum(
-            candle_values(c)[3] <= level * 1.003
-            for c in recent
+        previous_holds = sum(
+            candle_values(c)[3] <= level
+            for c in previous
         )
-        return good >= 2
+        return (
+            previous_holds >= 1
+            and last_close <= level
+        )
 
     return False
+
 
 
 # ============================================================
@@ -1120,6 +1130,7 @@ def detect_range(
 # HIGHER TIMEFRAME CONTEXT
 # ============================================================
 
+
 def context_allows(
     strategy: str,
     daily: str,
@@ -1129,8 +1140,14 @@ def context_allows(
 ) -> bool:
     expected = "BULLISH" if direction == "LONG" else "BEARISH"
 
-    # Only block continuation setups when H4 is strongly opposite.
-    if strategy in ("TREND_FOLLOWING", "PULLBACK", "BREAKOUT"):
+    continuation_strategies = (
+        "TREND_FOLLOWING",
+        "PULLBACK",
+        "BREAKOUT",
+    )
+
+    # Strongly opposing 4H trend blocks continuation entries.
+    if strategy in continuation_strategies:
         if (
             h4 in ("BULLISH", "BEARISH")
             and h4 != expected
@@ -1138,8 +1155,20 @@ def context_allows(
         ):
             return False
 
-    # Range can work against weaker HTF trends.
-    if strategy == "RANGE_TRADING":
+        # If both daily and 4H strongly oppose the trade,
+        # avoid a continuation setup against both timeframes.
+        if (
+            daily in ("BULLISH", "BEARISH")
+            and daily != expected
+            and h4 in ("BULLISH", "BEARISH")
+            and h4 != expected
+            and h4_adx >= 22
+        ):
+            return False
+
+    # Range setups can trade against a weak trend, but not a
+    # strongly directional opposing 4H market.
+    elif strategy == "RANGE_TRADING":
         if (
             h4 in ("BULLISH", "BEARISH")
             and h4 != expected
@@ -1147,7 +1176,9 @@ def context_allows(
         ):
             return False
 
-    # Reversal is intentionally allowed against HTF trend.
+    # Reversal is allowed against the higher-timeframe trend,
+    # because its own sweep/reclaim and structure-shift rules
+    # are responsible for confirming the reversal.
     return True
 
 
@@ -1155,12 +1186,12 @@ def context_allows(
 # TRADE LEVELS
 # ============================================================
 
+
 def calculate_trade_levels(
     h1: List[Any],
     m5: List[Any],
     direction: str,
 ) -> Optional[Dict[str, float]]:
-    # Same SL/TP model as the previous version.
     if direction not in ("LONG", "SHORT") or not h1 or not m5:
         return None
 
@@ -1174,15 +1205,20 @@ def calculate_trade_levels(
     slw = swing_low(h1, 2)
 
     if direction == "LONG":
-        base_sl = slw - 0.35 * atr1 if slw else entry - 1.2 * atr1
+        base_sl = (
+            slw - 0.35 * atr1
+            if slw is not None
+            else entry - 1.2 * atr1
+        )
+
         risk = entry - base_sl
         min_risk = 1.2 * atr1
 
         if risk < min_risk:
-            base_sl = entry - min_risk
             risk = min_risk
+            base_sl = entry - risk
 
-        if risk > 3.0 * atr1:
+        if risk <= 0 or risk > 3.0 * atr1:
             return None
 
         if risk / entry > 0.035:
@@ -1194,15 +1230,20 @@ def calculate_trade_levels(
         tp3 = entry + 3.0 * risk
 
     else:
-        base_sl = sh + 0.35 * atr1 if sh else entry + 1.2 * atr1
+        base_sl = (
+            sh + 0.35 * atr1
+            if sh is not None
+            else entry + 1.2 * atr1
+        )
+
         risk = base_sl - entry
         min_risk = 1.2 * atr1
 
         if risk < min_risk:
-            base_sl = entry + min_risk
             risk = min_risk
+            base_sl = entry + risk
 
-        if risk > 3.0 * atr1:
+        if risk <= 0 or risk > 3.0 * atr1:
             return None
 
         if risk / entry > 0.035:
@@ -1213,14 +1254,24 @@ def calculate_trade_levels(
         tp2 = entry - 2.5 * risk
         tp3 = entry - 3.0 * risk
 
+    # Final level validation.
+    if direction == "LONG":
+        if not (sl < entry < tp1 < tp2 < tp3):
+            return None
+    else:
+        if not (sl > entry > tp1 > tp2 > tp3):
+            return None
+
     return {
         "entry": entry,
         "sl": sl,
         "tp1": tp1,
         "tp2": tp2,
         "tp3": tp3,
+        "risk": risk,
         "rr": "1:3",
     }
+
 
 
 def target_reachable(
