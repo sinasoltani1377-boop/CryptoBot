@@ -774,32 +774,24 @@ def breakout_hold(
     direction: str,
     level: float,
 ) -> bool:
-    if level <= 0 or len(m15) < 4:
+    if level <= 0 or len(m15) < 2:
         return False
 
-    # The final candle must remain on the breakout side.
-    # Check the two candles before it separately.
-    previous = m15[-3:-1]
-    last_close = candle_values(m15[-1])[3]
+    last = m15[-1]
+    _, high, low, close, _ = candle_values(last)
 
     if direction == "LONG":
-        previous_holds = sum(
-            candle_values(c)[3] >= level
-            for c in previous
-        )
         return (
-            previous_holds >= 1
-            and last_close >= level
+            bullish(last)
+            and close > level
+            and high >= close
         )
 
     if direction == "SHORT":
-        previous_holds = sum(
-            candle_values(c)[3] <= level
-            for c in previous
-        )
         return (
-            previous_holds >= 1
-            and last_close <= level
+            bearish(last)
+            and close < level
+            and low <= close
         )
 
     return False
