@@ -275,15 +275,18 @@ def register_signal(symbol, signal):
 
 
 # ============================================================
-# UPDATE ONE TRADE
+# UPDATE ONE TRADE - TP HISTORY PRESERVED
 # ============================================================
 
 def update_trade(trade, price):
     """
-    Update one OPEN trade using current market price.
+    Update one OPEN trade.
 
-    Returns:
-        (changed, event)
+    - Preserve every target already hit.
+    - If price later reaches SL, keep TP history.
+    - Process multiple target levels when current price
+      has passed them.
+    - Keep return format: (changed, event).
     """
 
     if trade.get("status") != "OPEN":
@@ -291,12 +294,6 @@ def update_trade(trade, price):
 
     try:
         price = float(price)
-    except (TypeError, ValueError):
-        return False, None
-
-    direction = trade.get("direction")
-
-    try:
         entry = float(trade["entry"])
         sl = float(trade["sl"])
         tp1 = float(trade["tp1"])
@@ -305,10 +302,120 @@ def update_trade(trade, price):
     except (KeyError, TypeError, ValueError):
         return False, None
 
-    now = utc_now()
+    direction = trade.get("direction")
 
+    if direction not in ("LONG", "SHORT"):
+        return False, None
+
+    # Validate price and trade levels.
+    if price <= 0 or entry <= 0 or sl <= 0:
+        return False, None
+
+    if direction == "LONG":
+        if not (sl < entry < tp1 < tp2 < tp3):
+            return False, None
+    else:
+        if not (sl > entry > tp1 > tp2 > tp3):
+            return False, None
+
+    now = utc_now()
     trade["last_price"] = price
     trade["last_update"] = now
+
+    # Keep a permanent history of registered events.
+    if not isinstance(trade.get("events"), list):
+        trade["events"] = []
+
+    def record_event(event_name):
+        trade["events"].append({
+            "event": event_name,
+            "price": price,
+            "time": now,
+        })
+
+    changed = True
+
+    # --------------------------------------------------------
+    # STOP LOSS
+    # --------------------------------------------------------
+    # SL closes the remaining position.
+    # Previously hit targets are NOT erased.
+
+    sl_reached = (
+        price <= sl if direction == "LONG"
+        else price >= sl
+    )
+
+    if sl_reached:
+        trade["sl_hit"] = True
+        trade["sl_time"] = now
+        trade["status"] = "CLOSED"
+        trade["result"] = "SL"
+        trade["closed_at"] = now
+
+        record_event("SL")
+
+        # Example: TP1 → SL, TP1 remains recorded as hit.
+        hit_targets = [
+            name for name in ("TP1", "TP2", "TP3")
+            if trade.get(name.lower() + "_hit", False)
+        ]
+        trade["trade_path"] = " → ".join(
+            hit_targets + ["SL"]
+        )
+
+        return changed, "SL"
+
+    # --------------------------------------------------------
+    # TARGETS
+    # --------------------------------------------------------
+    # Register every target the current price has passed.
+    # Already-hit targets are never recorded twice.
+
+    targets = [
+        ("TP1", tp1),
+        ("TP2", tp2),
+        ("TP3", tp3),
+    ]
+
+    reached_events = []
+
+    for target_name, target_price in targets:
+        flag = target_name.lower() + "_hit"
+        time_key = target_name.lower() + "_time"
+
+        reached = (
+            price >= target_price if direction == "LONG"
+            else price <= target_price
+        )
+
+        if reached and not trade.get(flag, False):
+            trade[flag] = True
+            trade[time_key] = now
+
+            record_event(target_name)
+            reached_events.append(target_name)
+
+    if trade.get("tp3_hit", False):
+        trade["status"] = "CLOSED"
+        trade["result"] = "TP3"
+        trade["closed_at"] = now
+        trade["trade_path"] = " → ".join(
+            name for name in ("TP1", "TP2", "TP3")
+            if trade.get(name.lower() + "_hit", False)
+        )
+
+    elif reached_events:
+        trade["trade_path"] = " → ".join(
+            name for name in ("TP1", "TP2", "TP3")
+            if trade.get(name.lower() + "_hit", False)
+        )
+
+    if reached_events:
+        # Keep compatibility with existing tracker callers.
+        return True, reached_events[-1]
+
+    return changed, None
 
     # ========================================================
     # LONG
