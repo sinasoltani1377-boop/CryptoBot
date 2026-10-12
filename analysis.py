@@ -1355,7 +1355,25 @@ def no_trade(
 # ============================================================
 # MAIN ENGINE
 # ============================================================
+def direction_from_tf(candles):
+    """
+    Determine timeframe direction using the existing
+    market_structure() function.
+    """
+    if not candles or len(candles) < 30:
+        return "RANGE"
 
+    try:
+        direction = market_structure(candles)
+
+        if direction in ("BULLISH", "BEARISH", "RANGE"):
+            return direction
+
+        return "RANGE"
+
+    except Exception:
+        logging.exception("direction_from_tf failed")
+        return "RANGE"
 def generate_signal(
     daily: Any,
     h4: Any,
