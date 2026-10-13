@@ -364,7 +364,7 @@ def update_trade(trade, price):
             hit_targets + ["SL"]
         )
 
-        return changed, "SL"
+        return True, "SL"
 
     # --------------------------------------------------------
     # TARGETS
@@ -415,8 +415,7 @@ def update_trade(trade, price):
         # Keep compatibility with existing tracker callers.
         return True, reached_events[-1]
 
-    return changed, None
-
+    return False, None
     # ========================================================
     # LONG
     # ========================================================
