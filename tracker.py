@@ -333,7 +333,7 @@ def update_trade(trade, price):
             "time": now,
         })
 
-    changed = True
+    changed = False
 
     # --------------------------------------------------------
     # STOP LOSS
