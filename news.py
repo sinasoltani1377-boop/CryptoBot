@@ -33,17 +33,17 @@ CACHE_SECONDS = 300
 _cache = {
     "time": 0,
     "articles": [],
+    "sources": {},
 }
 
 _news_lock = asyncio.Lock()
 
 
 # ============================================================
-# CRITICAL NEWS KEYWORDS
+# CRITICAL EVENTS
 # ============================================================
 
-CRITICAL_KEYWORDS = [
-    # Exchange and security events
+CRITICAL_KEYWORDS = (
     "exchange hacked",
     "crypto exchange hack",
     "exchange exploit",
@@ -53,41 +53,35 @@ CRITICAL_KEYWORDS = [
     "private keys stolen",
     "customer funds stolen",
     "exchange withdrawals suspended",
-
-    # Market crashes
+    "withdrawals halted",
+    "withdrawals suspended",
+    "stablecoin depeg",
+    "stablecoin collapse",
+    "exchange insolvency",
+    "files for bankruptcy",
+    "filed for bankruptcy",
+    "exchange bankruptcy",
+    "liquidation cascade",
+    "flash crash",
+    "crypto market crash",
+    "market-wide selloff",
+    "market crash",
+    "crypto crash",
     "bitcoin crash",
     "bitcoin crashes",
     "bitcoin plunges",
-    "crypto market crash",
-    "crypto crash",
-    "market crash",
-    "market-wide selloff",
-    "liquidation cascade",
-    "flash crash",
-
-    # Stablecoins and insolvency
-    "stablecoin depeg",
-    "stablecoin collapse",
-    "bankruptcy",
-    "files for bankruptcy",
-    "exchange insolvency",
-    "insolvency",
-    "withdrawals halted",
-
-    # Major ETF decisions
+    "spot bitcoin etf rejected",
     "bitcoin etf rejected",
     "bitcoin etf approval denied",
     "sec rejects spot bitcoin etf",
-    "spot bitcoin etf rejected",
-]
+)
 
 
 # ============================================================
-# HIGH-IMPORTANCE NEWS KEYWORDS
+# HIGH-IMPORTANCE NEWS
 # ============================================================
 
-HIGH_KEYWORDS = [
-    # ETFs and regulation
+HIGH_KEYWORDS = (
     "bitcoin etf",
     "ethereum etf",
     "spot etf approved",
@@ -98,10 +92,7 @@ HIGH_KEYWORDS = [
     "sec lawsuit",
     "crypto regulation",
     "crypto regulations",
-    "regulation",
     "sanctions",
-
-    # Central banks and monetary policy
     "federal reserve",
     "fomc",
     "interest rate",
@@ -111,8 +102,6 @@ HIGH_KEYWORDS = [
     "fed cuts rates",
     "fed raises rates",
     "monetary policy",
-
-    # Inflation and economic data
     "inflation",
     "consumer price index",
     "producer price index",
@@ -124,8 +113,6 @@ HIGH_KEYWORDS = [
     "jobs report",
     "unemployment rate",
     "economic data",
-
-    # Security and financial risks
     "hack",
     "hacked",
     "exploit",
@@ -136,47 +123,52 @@ HIGH_KEYWORDS = [
     "outflows",
     "inflows",
     "withdrawals suspended",
-]
+)
 
 
 # ============================================================
 # ASSET KEYWORDS
 # ============================================================
 
-BTC_KEYWORDS = [
+BTC_KEYWORDS = (
     "bitcoin",
     "btc",
-]
+)
 
-ETH_KEYWORDS = [
+ETH_KEYWORDS = (
     "ethereum",
     "ether",
-    "eth ",
-]
+    "eth",
+)
 
-MARKET_KEYWORDS = [
+# Explicitly market-wide events and macroeconomic subjects.
+# A generic mention of "crypto" alone is not enough to label
+# a story as market-wide.
+MARKET_WIDE_KEYWORDS = (
     "crypto market",
     "cryptocurrency market",
-    "crypto",
-    "cryptocurrency",
-    "bitcoin",
-    "ethereum",
-    "blockchain",
-    "digital asset",
-    "digital assets",
-    "stablecoin",
-    "defi",
-    "exchange",
+    "global crypto market",
+    "market-wide",
+    "market crash",
+    "crypto crash",
+    "market-wide selloff",
+    "liquidation cascade",
+    "flash crash",
     "federal reserve",
+    "federal funds rate",
     "fomc",
+    "interest rate decision",
+    "rate decision",
+    "monetary policy",
+    "consumer price index",
+    "producer price index",
+    "consumer prices",
+    "producer prices",
     "inflation",
-    "interest rate",
-    "producer price",
-    "consumer price",
-    "cpi",
-    "ppi",
-    "etf",
-]
+    "nonfarm payrolls",
+    "jobs report",
+    "unemployment rate",
+)
 
 
 # ============================================================
@@ -187,13 +179,13 @@ def clean_text(value):
     if not value:
         return ""
 
+    value = unescape(str(value))
+
     value = re.sub(
         r"<[^>]+>",
         " ",
-        str(value),
+        value,
     )
-
-    value = unescape(value)
 
     value = re.sub(
         r"\s+",
@@ -204,18 +196,24 @@ def clean_text(value):
     return value.strip()
 
 
+def normalize_text(value):
+    return clean_text(value).casefold()
+
+
 def local_name(tag):
     return tag.rsplit("}", 1)[-1].lower()
 
 
 def child_text(element, names):
     for child in element.iter():
-        if local_name(child.tag) in names:
-            if child.text:
-                value = clean_text(child.text)
+        if local_name(child.tag) not in names:
+            continue
 
-                if value:
-                    return value
+        if child.text:
+            value = clean_text(child.text)
+
+            if value:
+                return value
 
     return ""
 
@@ -226,7 +224,6 @@ def parse_date(value):
 
     value = str(value).strip()
 
-    # Standard RSS date
     try:
         dt = parsedate_to_datetime(value)
 
@@ -240,7 +237,6 @@ def parse_date(value):
     except (TypeError, ValueError, OverflowError):
         pass
 
-    # ISO-8601 date
     try:
         if value.endswith("Z"):
             value = value[:-1] + "+00:00"
@@ -277,24 +273,33 @@ def extract_link(element):
     return ""
 
 
+def contains_any(text, terms):
+    return any(
+        term in text
+        for term in terms
+    )
+
+
 # ============================================================
 # NEWS CLASSIFICATION
 # ============================================================
 
 def classify_news(title, summary):
-    title = clean_text(title).lower()
-    summary = clean_text(summary).lower()
+    title_clean = clean_text(title)
+    summary_clean = clean_text(summary)
 
-    text = f"{title} {summary}"
-
-    critical = any(
-        keyword in text
-        for keyword in CRITICAL_KEYWORDS
+    text = normalize_text(
+        f"{title_clean} {summary_clean}"
     )
 
-    high = any(
-        keyword in text
-        for keyword in HIGH_KEYWORDS
+    critical = contains_any(
+        text,
+        CRITICAL_KEYWORDS,
+    )
+
+    high = contains_any(
+        text,
+        HIGH_KEYWORDS,
     )
 
     if critical:
@@ -306,52 +311,32 @@ def classify_news(title, summary):
     else:
         importance = "NORMAL"
 
-    # Macro and market-wide reports should not be
-    # assigned exclusively to BTC or ETH.
-    market_macro_keywords = [
-        "federal reserve",
-        "fomc",
-        "inflation",
-        "consumer price index",
-        "producer price index",
-        "consumer prices",
-        "producer prices",
-        "interest rate",
-        "rate decision",
-        "nonfarm payrolls",
-        "jobs report",
-        "unemployment rate",
-        "crypto market",
-        "cryptocurrency market",
-        "market crash",
-        "crypto crash",
-        "liquidation cascade",
-        "flash crash",
-    ]
+    # Asset classification:
+    # 1. Explicit market-wide or macro news.
+    # 2. Bitcoin-specific news.
+    # 3. Ethereum-specific news.
+    # 4. Otherwise UNKNOWN.
+    #
+    # Generic crypto-related words are not enough to assign
+    # an article to every market.
 
-    if any(
-        keyword in text
-        for keyword in market_macro_keywords
+    if contains_any(
+        text,
+        MARKET_WIDE_KEYWORDS,
     ):
         asset = "MARKET"
 
-    elif any(
-        keyword in text
-        for keyword in BTC_KEYWORDS
+    elif contains_any(
+        text,
+        BTC_KEYWORDS,
     ):
         asset = "BTC"
 
-    elif any(
-        keyword in text
-        for keyword in ETH_KEYWORDS
+    elif contains_any(
+        text,
+        ETH_KEYWORDS,
     ):
         asset = "ETH"
-
-    elif any(
-        keyword in text
-        for keyword in MARKET_KEYWORDS
-    ):
-        asset = "MARKET"
 
     else:
         asset = "UNKNOWN"
@@ -377,9 +362,10 @@ def parse_feed(xml_data, source):
         return articles
 
     for item in root.iter():
-        tag = local_name(item.tag)
-
-        if tag not in ("item", "entry"):
+        if local_name(item.tag) not in (
+            "item",
+            "entry",
+        ):
             continue
 
         title = child_text(
@@ -423,7 +409,7 @@ def parse_feed(xml_data, source):
             summary,
         )
 
-        article = {
+        articles.append({
             "source": source,
             "title": title,
             "summary": summary[:500],
@@ -435,9 +421,7 @@ def parse_feed(xml_data, source):
             ),
             "importance": importance,
             "asset": asset,
-        }
-
-        articles.append(article)
+        })
 
         if len(articles) >= MAX_ITEMS_PER_SOURCE:
             break
@@ -453,9 +437,7 @@ def fetch_source(source, url):
     request = Request(
         url,
         headers={
-            "User-Agent": (
-                "CryptoBot-NewsReader/2.0"
-            ),
+            "User-Agent": "CryptoBot-NewsReader/3.0",
             "Accept": (
                 "application/rss+xml, "
                 "application/atom+xml, "
@@ -469,9 +451,7 @@ def fetch_source(source, url):
         request,
         timeout=REQUEST_TIMEOUT,
     ) as response:
-        xml_data = response.read(
-            2_000_000
-        )
+        xml_data = response.read(2_000_000)
 
     return parse_feed(
         xml_data,
@@ -494,9 +474,7 @@ def fetch_all_news():
                 url,
             )
 
-            all_articles.extend(
-                articles
-            )
+            all_articles.extend(articles)
 
             source_status[source] = {
                 "ok": True,
@@ -522,14 +500,12 @@ def fetch_all_news():
                 "error": str(exc)[:200],
             }
 
-    # Remove duplicate headlines.
+    # Deduplicate headlines.
     unique = {}
 
     for article in all_articles:
-        key = (
+        key = normalize_text(
             article.get("title", "")
-            .strip()
-            .lower()
         )
 
         if not key:
@@ -538,26 +514,29 @@ def fetch_all_news():
         if key not in unique:
             unique[key] = article
 
-    articles = list(
-        unique.values()
-    )
+    articles = list(unique.values())
 
-    # Sort newest first.
+    # Sort by publication time.
+    # Articles without a date are placed at the end.
     articles.sort(
         key=lambda article: (
-            article.get("published") or ""
+            article.get("published") is not None,
+            article.get("published") or "",
         ),
         reverse=True,
+    )
+
+    working_sources = sum(
+        1
+        for status in source_status.values()
+        if status.get("ok")
     )
 
     logger.info(
         "NEWS_FETCH_COMPLETE | Articles=%s | "
         "WorkingSources=%s/%s",
         len(articles),
-        sum(
-            1 for status in source_status.values()
-            if status.get("ok")
-        ),
+        working_sources,
         len(NEWS_SOURCES),
     )
 
@@ -575,9 +554,7 @@ async def get_news(force_refresh=False):
         not force_refresh
         and now - _cache["time"] < CACHE_SECONDS
     ):
-        return list(
-            _cache["articles"]
-        )
+        return list(_cache["articles"])
 
     async with _news_lock:
         now = time.time()
@@ -586,9 +563,7 @@ async def get_news(force_refresh=False):
             not force_refresh
             and now - _cache["time"] < CACHE_SECONDS
         ):
-            return list(
-                _cache["articles"]
-            )
+            return list(_cache["articles"])
 
         articles, source_status = await asyncio.to_thread(
             fetch_all_news
@@ -600,15 +575,13 @@ async def get_news(force_refresh=False):
             if status.get("ok")
         )
 
-        # Refresh the cache when at least one source
-        # responds successfully, even if it has no items.
+        # Keep the last known cache if every source fails.
         if working_sources > 0:
             _cache["articles"] = articles
+            _cache["sources"] = source_status
             _cache["time"] = time.time()
 
-        return list(
-            _cache["articles"]
-        )
+        return list(_cache["articles"])
 
 
 async def get_news_status():
@@ -632,8 +605,14 @@ async def get_news_status():
         "high_count": len(high),
         "critical": critical[:10],
         "high": high[:10],
+        "sources": dict(_cache["sources"]),
         "updated_at": (
-            datetime.now(timezone.utc).isoformat()
+            datetime.fromtimestamp(
+                _cache["time"],
+                timezone.utc,
+            ).isoformat()
+            if _cache["time"]
+            else None
         ),
     }
 
@@ -650,9 +629,7 @@ async def get_latest_news(limit=10):
 
 
 async def search_news(query, limit=10):
-    query = str(
-        query or ""
-    ).strip().lower()
+    query = normalize_text(query)
 
     if not query:
         return []
@@ -661,20 +638,22 @@ async def search_news(query, limit=10):
 
     results = []
 
+    limit = max(
+        1,
+        min(int(limit), 30),
+    )
+
     for article in articles:
-        searchable = (
+        searchable = normalize_text(
             article.get("title", "")
             + " "
             + article.get("summary", "")
-        ).lower()
+        )
 
         if query in searchable:
             results.append(article)
 
-        if len(results) >= max(
-            1,
-            min(int(limit), 30),
-        ):
+        if len(results) >= limit:
             break
 
     return results
@@ -691,19 +670,21 @@ async def refresh_news():
 # ============================================================
 
 async def news_diagnostics():
-    articles, source_status = await asyncio.to_thread(
-        fetch_all_news
-    )
+    async with _news_lock:
+        articles, source_status = await asyncio.to_thread(
+            fetch_all_news
+        )
 
-    working_sources = sum(
-        1
-        for status in source_status.values()
-        if status.get("ok")
-    )
+        working_sources = sum(
+            1
+            for status in source_status.values()
+            if status.get("ok")
+        )
 
-    if working_sources > 0:
-        _cache["articles"] = articles
-        _cache["time"] = time.time()
+        if working_sources > 0:
+            _cache["articles"] = articles
+            _cache["sources"] = source_status
+            _cache["time"] = time.time()
 
     critical_count = sum(
         1
@@ -723,7 +704,7 @@ async def news_diagnostics():
         "critical_count": critical_count,
         "high_count": high_count,
         "working_sources": working_sources,
-        "updated_at": (
-            datetime.now(timezone.utc).isoformat()
-        ),
+        "updated_at": datetime.now(
+            timezone.utc
+        ).isoformat(),
     }
