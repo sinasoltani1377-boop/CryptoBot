@@ -2,7 +2,7 @@ import os
 import logging
 import asyncio
 import requests
-
+from news import get_latest_news, news_diagnostics
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -1458,16 +1458,14 @@ def main():
             "stats",
             tracker_stats,
         )
-    )
+     )
+     application.add_handler(
+         CommandHandler("news", news_command)
+     )
 
-    # AUTO SIGNAL SCANNER
-
-    application.job_queue.run_repeating(
-        auto_signal,
-        interval=300,
-        first=10,
-    )
-
+     application.add_handler(
+         CommandHandler("news_test", news_test_command)
+     )
     # TRADE TRACKER
 
     application.job_queue.run_repeating(
@@ -1501,3 +1499,114 @@ def main():
 
 if __name__ == "__main__":
     main()
+# ============================================================
+# NEWS COMMAND
+# ============================================================
+
+async def news_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    message = await update.effective_message.reply_text(
+        "📰 در حال دریافت اخبار کریپتو..."
+    )
+
+    try:
+        articles = await get_latest_news(limit=8)
+
+        if not articles:
+            await message.edit_text(
+                "⚠️ در حال حاضر خبری دریافت نشد.\n"
+                "ممکن است منابع RSS در دسترس نباشند."
+            )
+            return
+
+        lines = ["📰 آخرین اخبار کریپتو\n"]
+
+        for index, article in enumerate(articles, start=1):
+            importance = article.get(
+                "importance", "NORMAL"
+            )
+
+            emoji = {
+                "CRITICAL": "🔴",
+                "HIGH": "🟠",
+                "NORMAL": "🟢",
+            }.get(importance, "⚪")
+
+            title = article.get("title", "بدون عنوان")
+            source = article.get("source", "Unknown")
+            asset = article.get("asset", "UNKNOWN")
+            link = article.get("link", "")
+
+            item = (
+                f"{index}. {emoji} {title}\n"
+                f"📡 منبع: {source}\n"
+                f"🪙 دارایی: {asset}\n"
+            )
+
+            if link.startswith(("https://", "http://")):
+                item += f"🔗 {link}\n"
+
+            lines.append(item)
+
+        output = "\n".join(lines)
+
+        # Telegram messages have a maximum length.
+        if len(output) > 4000:
+            output = output[:3900] + "\n\nادامه اخبار در اجرای بعدی."
+
+        await message.edit_text(
+            output,
+            disable_web_page_preview=True,
+        )
+
+    except Exception:
+        logging.exception("NEWS_COMMAND_ERROR")
+
+        await message.edit_text(
+            "❌ خطا هنگام دریافت اخبار.\n"
+            "لاگ Belmo را بررسی کن."
+        )
+
+
+# ============================================================
+# NEWS DIAGNOSTICS COMMAND
+# ============================================================
+
+async def news_test_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    message = await update.effective_message.reply_text(
+        "🔎 در حال آزمایش منابع خبری..."
+    )
+
+    try:
+        result = await news_diagnostics()
+
+        lines = [
+            "📊 گزارش آزمایش منابع خبری\n",
+            f"📰 مجموع اخبار: {result['total']}",
+            f"🔴 اخبار CRITICAL: {result['critical_count']}",
+            f"🟠 اخبار HIGH: {result['high_count']}",
+            "",
+            "وضعیت منابع:",
+        ]
+
+        for source, status in result["sources"].items():
+            icon = "✅" if status["ok"] else "❌"
+
+            lines.append(
+                f"{icon} {source}: {status['count']} خبر"
+            )
+
+        await message.edit_text("\n".join(lines))
+
+    except Exception:
+        logging.exception("NEWS_TEST_ERROR")
+
+        await message.edit_text(
+            "❌ آزمایش منابع خبری ناموفق بود.\n"
+            "لاگ Belmo را بررسی کن."
+)
