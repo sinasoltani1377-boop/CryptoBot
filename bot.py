@@ -1439,13 +1439,12 @@ def main():
         )
     )
 
-        application.add_handler(
+    application.add_handler(
         CommandHandler(
             "signal",
             signal,
         )
     )
-
     application.add_handler(
         CommandHandler(
             "register",
