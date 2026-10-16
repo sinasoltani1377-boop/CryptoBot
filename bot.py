@@ -1452,20 +1452,20 @@ def main():
             register_chat,
         )
     )
-
     application.add_handler(
         CommandHandler(
             "stats",
             tracker_stats,
         )
-     )
-     application.add_handler(
-         CommandHandler("news", news_command)
-     )
+    )
 
-     application.add_handler(
-         CommandHandler("news_test", news_test_command)
-     )
+    application.add_handler(
+        CommandHandler("news", news_command)
+    )
+
+    application.add_handler(
+        CommandHandler("news_test", news_test_command)
+)
     # TRADE TRACKER
 
     application.job_queue.run_repeating(
