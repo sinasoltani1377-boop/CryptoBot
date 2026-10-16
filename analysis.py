@@ -10,7 +10,7 @@
 #   2. PULLBACK
 #   3. BREAKOUT
 #   4. REVERSAL
-#   5. RANGE_TRADING
+
 #
 # v14:
 # - closed candles only
@@ -21,7 +21,7 @@
 # - 5M trigger is less brittle
 # - breakout detection improved
 # - reversal detection improved
-# - range detection improved
+
 # - HTF context is a filter, not an unnecessary hard wall
 # - existing signal/level keys preserved
 # - SL/TP model unchanged
@@ -861,68 +861,6 @@ def structure_shift_5m(
     return False
 
 
-# ============================================================
-# RANGE
-# ============================================================
-
-def range_info(
-    h1: List[Any],
-) -> Tuple[bool, float, float]:
-    if len(h1) < 30:
-        return False, 0.0, 0.0
-
-    recent = h1[-24:]
-    high = max(highs(recent))
-    low = min(lows(recent))
-    width = high - low
-    atr_value = atr(recent)
-
-    if width <= 0 or atr_value <= 0:
-        return False, high, low
-
-    is_range = width <= atr_value * 7.5
-    return is_range, high, low
-
-
-def near_range_boundary(
-    h1: List[Any],
-    direction: str,
-    high: float,
-    low: float,
-) -> bool:
-    price = closes(h1)[-1]
-    width = high - low
-
-    if width <= 0:
-        return False
-
-    edge = width * 0.25
-
-    if direction == "LONG":
-        return price <= low + edge
-
-    if direction == "SHORT":
-        return price >= high - edge
-
-    return False
-
-
-def range_direction(
-    h1: List[Any],
-) -> Optional[str]:
-    ok, high, low = range_info(h1)
-
-    if not ok:
-        return None
-
-    if near_range_boundary(h1, "LONG", high, low):
-        return "LONG"
-
-    if near_range_boundary(h1, "SHORT", high, low):
-        return "SHORT"
-
-    return None
-
 
 # ============================================================
 # STRATEGIES
@@ -1158,16 +1096,7 @@ def context_allows(
         ):
             return False
 
-    # Range setups can trade against a weak trend, but not a
-    # strongly directional opposing 4H market.
-    elif strategy == "RANGE_TRADING":
-        if (
-            h4 in ("BULLISH", "BEARISH")
-            and h4 != expected
-            and h4_adx >= 32
-        ):
-            return False
-
+   
     # Reversal is allowed against the higher-timeframe trend,
     # because its own sweep/reclaim and structure-shift rules
     # are responsible for confirming the reversal.
@@ -1427,7 +1356,7 @@ def generate_signal(
         "PULLBACK",
         "BREAKOUT",
         "REVERSAL",
-        "RANGE_TRADING",
+     
     ]
 
     for strategy_name in strategy_names:
@@ -1457,11 +1386,7 @@ def generate_signal(
                     result = detect_reversal(
                         h1c, m15c, m5c, direction
                     )
-                else:
-                    result = detect_range(
-                        h1c, m5c, direction
-                    )
-
+      
             except Exception as exc:
                 result = {
                     "valid": False,
@@ -1517,10 +1442,7 @@ def generate_signal(
                         test = detect_reversal(
                             h1c, m15c, m5c, direction
                         )
-                    else:
-                        test = detect_range(
-                            h1c, m5c, direction
-                        )
+         
 
                     reason = test.get("reason", "UNKNOWN")
 
@@ -1581,11 +1503,11 @@ def generate_signal(
 
     # STRATEGY PRIORITY
     priority = {
-        "REVERSAL": 5,
-        "BREAKOUT": 4,
-        "PULLBACK": 3,
-        "TREND_FOLLOWING": 2,
-        "RANGE_TRADING": 1,
+        "REVERSAL": 4,
+        "BREAKOUT": 3,
+        "PULLBACK": 2,
+        "TREND_FOLLOWING": 1,
+    
     }
 
     high_candidates = []
@@ -1668,24 +1590,24 @@ def generate_signal(
                 and candidate_metrics["confirmation"]
                 and structure_shift_5m(m5c, direction)
             )
-
-        else:  # RANGE_TRADING
+        elif strategy == "REVERSAL":
             high = (
-                score >= 7
+                score >= 9
                 and candidate_metrics["confirmation"]
-                and adx1 <= 24
+                and structure_shift_5m(m5c, direction)
             )
 
+        else:
+            high = False
         # DETAILED QUALITY-GATE DIAGNOSTICS
         if not high:
             failed_checks = []
 
-            minimum_score = {
+                        minimum_score = {
                 "TREND_FOLLOWING": 8,
                 "PULLBACK": 8,
                 "BREAKOUT": 9,
                 "REVERSAL": 9,
-                "RANGE_TRADING": 7,
             }.get(strategy, 999)
 
             if score < minimum_score:
@@ -1731,11 +1653,6 @@ def generate_signal(
                         "NO_5M_STRUCTURE_SHIFT"
                     )
 
-            elif strategy == "RANGE_TRADING":
-                if adx1 > 24:
-                    failed_checks.append(
-                        f"ADX1_TOO_HIGH={adx1}"
-                    )
 
             diagnostics[strategy] = (
                 "HIGH_FAIL:" + "|".join(failed_checks)
