@@ -1599,17 +1599,16 @@ def generate_signal(
 
         else:
             high = False
-        # DETAILED QUALITY-GATE DIAGNOSTICS
+                 # DETAILED QUALITY-GATE DIAGNOSTICS
         if not high:
             failed_checks = []
 
-                        minimum_score = {
+            minimum_score = {
                 "TREND_FOLLOWING": 8,
                 "PULLBACK": 8,
                 "BREAKOUT": 9,
                 "REVERSAL": 9,
             }.get(strategy, 999)
-
             if score < minimum_score:
                 failed_checks.append(
                     f"SCORE={score}<{minimum_score}"
