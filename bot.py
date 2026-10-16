@@ -3,6 +3,8 @@ import logging
 import asyncio
 import requests
 
+from datetime import datetime, timezone
+
 from news import get_latest_news, news_diagnostics
 
 from telegram import Update
@@ -47,6 +49,11 @@ TRACKER_INTERVAL = 30
 MIN_VOLUME_USDT = 50_000_000
 MAX_SYMBOLS = 30
 
+NEWS_BLOCK_MINUTES = 120
+NEWS_FETCH_LIMIT = 50
+
+_scan_lock = asyncio.Lock()
+
 
 # ============================================================
 # LOGGING
@@ -62,21 +69,15 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-_scan_lock = asyncio.Lock()
-
 
 # ============================================================
-# SYMBOLS - AUTO FETCH FROM TOOBIT
+# SYMBOLS
 # ============================================================
 
 def load_symbols(
     min_volume_usdt=10_000_000,
     max_symbols=30,
 ):
-    """
-    دریافت نمادهای فیوچرز و فیلتر بر اساس حجم ۲۴ ساعته.
-    """
-
     try:
         all_symbols = get_futures_symbols()
 
@@ -186,9 +187,7 @@ def load_symbols(
         )
 
     except Exception:
-        logger.exception(
-            "Failed to load symbols"
-        )
+        logger.exception("Failed to load symbols")
 
     return [
         "BTC-SWAP-USDT",
@@ -349,22 +348,21 @@ def get_klines(
     limit=200,
 ):
     try:
-        params = {
-            "symbol": symbol,
-            "interval": interval,
-            "limit": limit,
-        }
-
         response = requests.get(
             TOOBIT_KLINES_URL,
-            params=params,
+            params={
+                "symbol": symbol,
+                "interval": interval,
+                "limit": limit,
+            },
             timeout=15,
         )
 
         response.raise_for_status()
 
-        data = response.json()
-        candles = normalize_candles(data)
+        candles = normalize_candles(
+            response.json()
+        )
 
         if len(candles) < 50:
             logger.warning(
@@ -387,39 +385,13 @@ def get_klines(
 
 
 def get_market_data(symbol):
-    daily = get_klines(
-        symbol,
-        INTERVALS["1d"],
-        200,
-    )
+    daily = get_klines(symbol, INTERVALS["1d"], 200)
+    h4 = get_klines(symbol, INTERVALS["4h"], 200)
+    h1 = get_klines(symbol, INTERVALS["1h"], 200)
+    m15 = get_klines(symbol, INTERVALS["15m"], 200)
+    m5 = get_klines(symbol, INTERVALS["5m"], 200)
 
-    h4 = get_klines(
-        symbol,
-        INTERVALS["4h"],
-        200,
-    )
-
-    h1 = get_klines(
-        symbol,
-        INTERVALS["1h"],
-        200,
-    )
-
-    m15 = get_klines(
-        symbol,
-        INTERVALS["15m"],
-        200,
-    )
-
-    m5 = get_klines(
-        symbol,
-        INTERVALS["5m"],
-        200,
-    )
-
-    if not all(
-        (daily, h4, h1, m15, m5)
-    ):
+    if not all((daily, h4, h1, m15, m5)):
         logger.warning(
             "MARKET_DATA_INCOMPLETE | %s",
             symbol,
@@ -495,11 +467,446 @@ def get_price(symbol):
         return None
 
     except Exception:
+        logger.exception("Price error %s", symbol)
+        return None
+
+
+# ============================================================
+# CRITICAL NEWS FILTER
+# ============================================================
+
+BEARISH_NEWS_TERMS = (
+    "market crash",
+    "crypto crash",
+    "bitcoin crashes",
+    "bitcoin plunges",
+    "market plunges",
+    "liquidation cascade",
+    "flash crash",
+    "stablecoin depeg",
+    "stablecoin collapse",
+    "exchange hacked",
+    "exchange hack",
+    "major crypto hack",
+    "security breach",
+    "bankruptcy",
+    "insolvency",
+    "etf rejected",
+    "etf rejection",
+    "sec rejects",
+    "higher than expected",
+    "hotter than expected",
+    "above expectations",
+    "above forecast",
+    "unexpectedly high",
+    "inflation accelerates",
+    "inflation hotter",
+    "ppi jumps",
+    "cpi jumps",
+    "producer prices surge",
+    "inflation surges",
+)
+
+BULLISH_NEWS_TERMS = (
+    "market-wide rally",
+    "crypto market surges",
+    "bitcoin surges",
+    "bitcoin rallies",
+    "lower than expected inflation",
+    "cooler than expected",
+    "below expectations",
+    "below forecast",
+    "inflation cools",
+    "inflation slows",
+    "unexpected rate cut",
+    "fed cuts rates",
+    "spot bitcoin etf approved",
+    "spot ethereum etf approved",
+    "sec approves spot etf",
+)
+
+MACRO_TERMS = (
+    "ppi",
+    "cpi",
+    "inflation",
+    "producer price",
+    "consumer price",
+    "federal reserve",
+    "federal funds rate",
+    "interest rate",
+    "fed decision",
+    "rate decision",
+)
+
+MACRO_SURPRISE_TERMS = (
+    "higher than expected",
+    "hotter than expected",
+    "above expectations",
+    "above forecast",
+    "unexpectedly high",
+    "inflation accelerates",
+    "inflation hotter",
+    "ppi jumps",
+    "cpi jumps",
+    "producer prices surge",
+    "lower than expected inflation",
+    "cooler than expected",
+    "below expectations",
+    "below forecast",
+    "inflation cools",
+    "inflation slows",
+    "unexpected rate cut",
+)
+
+CRITICAL_EVENT_TERMS = (
+    "exchange hacked",
+    "exchange hack",
+    "major crypto hack",
+    "security breach",
+    "stablecoin depeg",
+    "stablecoin collapse",
+    "liquidation cascade",
+    "flash crash",
+    "market crash",
+    "crypto crash",
+    "bitcoin plunges",
+    "bitcoin crashes",
+    "bankruptcy",
+    "insolvency",
+)
+
+BULLISH_CRITICAL_TERMS = (
+    "spot bitcoin etf approved",
+    "spot ethereum etf approved",
+    "sec approves spot etf",
+    "unexpected rate cut",
+    "fed cuts rates",
+)
+
+BEARISH_CRITICAL_TERMS = (
+    "etf rejected",
+    "etf rejection",
+    "sec rejects",
+    "market crash",
+    "crypto crash",
+    "bitcoin plunges",
+    "bitcoin crashes",
+    "liquidation cascade",
+    "flash crash",
+    "stablecoin depeg",
+    "stablecoin collapse",
+    "exchange hacked",
+    "exchange hack",
+    "major crypto hack",
+    "security breach",
+    "bankruptcy",
+    "insolvency",
+)
+
+
+def article_datetime(article):
+    published = article.get("published")
+
+    if not published:
+        return None
+
+    try:
+        value = str(published).strip()
+
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+
+        parsed = datetime.fromisoformat(value)
+
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(
+                tzinfo=timezone.utc
+            )
+
+        return parsed.astimezone(timezone.utc)
+
+    except (TypeError, ValueError):
+        return None
+
+
+def article_text(article):
+    title = str(article.get("title") or "")
+    summary = str(article.get("summary") or "")
+
+    return f"{title} {summary}".lower()
+
+
+def contains_any(text, terms):
+    return any(
+        term in text
+        for term in terms
+    )
+
+
+def is_market_wide_news(text):
+    market_terms = (
+        "crypto market",
+        "cryptocurrency market",
+        "global crypto",
+        "bitcoin crash",
+        "bitcoin plunges",
+        "market crash",
+        "crypto crash",
+        "liquidation cascade",
+        "flash crash",
+        "federal reserve",
+        "interest rate",
+        "rate decision",
+        "inflation",
+        "producer price",
+        "consumer price",
+        "ppi",
+        "cpi",
+    )
+
+    return contains_any(
+        text,
+        market_terms,
+    )
+
+
+def news_direction(text):
+    bearish = contains_any(
+        text,
+        BEARISH_NEWS_TERMS,
+    )
+
+    bullish = contains_any(
+        text,
+        BULLISH_NEWS_TERMS,
+    )
+
+    if bearish and not bullish:
+        return "BEARISH"
+
+    if bullish and not bearish:
+        return "BULLISH"
+
+    return None
+
+
+def is_critical_news(text, importance):
+    if contains_any(
+        text,
+        CRITICAL_EVENT_TERMS,
+    ):
+        return True
+
+    macro_news = contains_any(
+        text,
+        MACRO_TERMS,
+    )
+
+    macro_surprise = contains_any(
+        text,
+        MACRO_SURPRISE_TERMS,
+    )
+
+    if macro_news and macro_surprise:
+        return True
+
+    if contains_any(
+        text,
+        BULLISH_CRITICAL_TERMS,
+    ):
+        return True
+
+    if contains_any(
+        text,
+        BEARISH_CRITICAL_TERMS,
+    ):
+        return True
+
+    return (
+        importance == "CRITICAL"
+        and news_direction(text) is not None
+    )
+
+
+def news_applies_to_symbol(
+    article,
+    symbol,
+    text,
+):
+    if is_market_wide_news(text):
+        return True
+
+    asset = str(
+        article.get("asset") or "UNKNOWN"
+    ).upper()
+
+    symbol_upper = symbol.upper()
+
+    if asset == "MARKET":
+        return True
+
+    if asset == "BTC":
+        return "BTC" in symbol_upper
+
+    if asset == "ETH":
+        return "ETH" in symbol_upper
+
+    return False
+
+
+async def check_critical_news(
+    symbol,
+    direction,
+):
+    """
+    فقط خبر بحرانی، تازه، مرتبط و متناقض می‌تواند
+    سیگنال را مسدود کند.
+
+    اگر منابع خبری از کار بیفتند، فیلتر به‌صورت
+    fail-open عمل می‌کند و سیگنال را به خاطر
+    خطای خبر مسدود نمی‌کند.
+    """
+
+    if direction not in ("LONG", "SHORT"):
+        return (
+            False,
+            "News filter skipped: invalid direction.",
+        )
+
+    try:
+        articles = await get_latest_news(
+            limit=NEWS_FETCH_LIMIT
+        )
+
+        if not articles:
+            logger.warning(
+                "NEWS_FILTER_UNAVAILABLE | %s | "
+                "No articles received",
+                symbol,
+            )
+
+            return (
+                False,
+                "⚠️ اخبار در دسترس نیست؛ "
+                "فیلتر خبری نتوانست بررسی کامل انجام دهد.",
+            )
+
+        now = datetime.now(timezone.utc)
+
+        for article in articles:
+            if not isinstance(article, dict):
+                continue
+
+            published_at = article_datetime(
+                article
+            )
+
+            if published_at is None:
+                continue
+
+            age_minutes = (
+                now - published_at
+            ).total_seconds() / 60
+
+            if age_minutes < 0:
+                continue
+
+            if age_minutes > NEWS_BLOCK_MINUTES:
+                continue
+
+            text = article_text(article)
+
+            importance = str(
+                article.get("importance") or "NORMAL"
+            ).upper()
+
+            if not is_critical_news(
+                text,
+                importance,
+            ):
+                continue
+
+            if not news_applies_to_symbol(
+                article,
+                symbol,
+                text,
+            ):
+                continue
+
+            direction_of_news = news_direction(
+                text
+            )
+
+            if direction_of_news is None:
+                continue
+
+            conflict = (
+                direction == "LONG"
+                and direction_of_news == "BEARISH"
+            ) or (
+                direction == "SHORT"
+                and direction_of_news == "BULLISH"
+            )
+
+            if not conflict:
+                continue
+
+            title = str(
+                article.get("title")
+                or "Critical news"
+            )
+
+            source = str(
+                article.get("source")
+                or "Unknown"
+            )
+
+            logger.warning(
+                "SIGNAL_BLOCKED_BY_NEWS | "
+                "%s | Direction=%s | "
+                "NewsDirection=%s | "
+                "AgeMinutes=%.1f | Source=%s | "
+                "Title=%s",
+                symbol,
+                direction,
+                direction_of_news,
+                age_minutes,
+                source,
+                title,
+            )
+
+            return (
+                True,
+                (
+                    "⛔ سیگنال به دلیل خبر بحرانی "
+                    "متناقض مسدود شد.\n"
+                    f"جهت معامله: {direction}\n"
+                    f"جهت خبر: {direction_of_news}\n"
+                    f"خبر: {title}"
+                ),
+            )
+
+        logger.info(
+            "NEWS_FILTER_PASS | %s | Direction=%s",
+            symbol,
+            direction,
+        )
+
+        return (
+            False,
+            "✅ خبر بحرانی متناقض شناسایی نشد.",
+        )
+
+    except Exception:
         logger.exception(
-            "Price error %s",
+            "NEWS_FILTER_ERROR | %s",
             symbol,
         )
-        return None
+
+        return (
+            False,
+            "⚠️ فیلتر خبری موقتاً در دسترس نیست.",
+        )
 
 
 # ============================================================
@@ -573,11 +980,6 @@ def register_high_signal(symbol, result):
 # ============================================================
 
 def log_strategy_details(symbol, result):
-    """
-    نمایش وضعیت پنج استراتژی در لاگ Belmo.
-    این تابع فقط گزارش‌گیری می‌کند و سیگنال را تغییر نمی‌دهد.
-    """
-
     diagnostics = result.get(
         "strategy_diagnostics"
     )
@@ -612,10 +1014,11 @@ def log_strategy_details(symbol, result):
                     or ""
                 )
 
-                if matched is True:
-                    status = "PASS"
-                else:
-                    status = "FAIL"
+                status = (
+                    "PASS"
+                    if matched is True
+                    else "FAIL"
+                )
 
                 if reason:
                     status = f"{status}:{reason}"
@@ -640,7 +1043,6 @@ def log_strategy_details(symbol, result):
             symbol,
             " | ".join(parts),
         )
-
         return
 
     details = result.get("strategy_details")
@@ -780,17 +1182,6 @@ def log_signal_diagnostic(symbol, result):
         result.get("rsi_15m"),
     )
 
-    adx_1h = result.get("adx_1h")
-    adx_15m = result.get("adx_15m")
-
-    mtf_confirmation = result.get(
-        "mtf_confirmation",
-        result.get("mtf_confirmed"),
-    )
-
-    volume_spike = result.get("volume_spike")
-    confirmation = result.get("confirmation")
-
     logger.info(
         "FILTERS | %s | 15M_RSI=%s | "
         "ADX_1H=%s | ADX_15M=%s | "
@@ -798,11 +1189,14 @@ def log_signal_diagnostic(symbol, result):
         "Confirmation=%s",
         symbol,
         rsi_15m,
-        adx_1h,
-        adx_15m,
-        mtf_confirmation,
-        volume_spike,
-        confirmation,
+        result.get("adx_1h"),
+        result.get("adx_15m"),
+        result.get(
+            "mtf_confirmation",
+            result.get("mtf_confirmed"),
+        ),
+        result.get("volume_spike"),
+        result.get("confirmation"),
     )
 
     log_strategy_details(
@@ -854,55 +1248,34 @@ def signal_text(symbol, result):
         result.get("rsi_15m"),
     )
 
-    mtf_confirmation = result.get(
-        "mtf_confirmation",
-        result.get("mtf_confirmed"),
+    news_note = result.get(
+        "_news_note",
+        "بررسی نشده",
     )
 
     return (
         f"{emoji} <b>{symbol}</b>\n\n"
-
-        f"🎯 Signal: "
-        f"<b>{result.get('signal')}</b>\n"
-
-        f"⭐ Quality: "
-        f"<b>{result.get('quality')}</b>\n"
-
-        f"📊 Score: "
-        f"<b>{result.get('score')}</b>\n\n"
-
+        f"🎯 Signal: <b>{result.get('signal')}</b>\n"
+        f"⭐ Quality: <b>{result.get('quality')}</b>\n"
+        f"📊 Score: <b>{result.get('score')}</b>\n\n"
         f"📅 Daily: {result.get('daily')}\n"
         f"⏱ 4H: {result.get('4h')}\n"
         f"🕐 1H: {result.get('1h')}\n"
-
         f"⏱ 15M RSI: {rsi_15m}\n"
         f"📊 ADX 1H: {result.get('adx_1h')}\n"
         f"📊 ADX 15M: {result.get('adx_15m')}\n"
-        f"✅ MTF 15M: {mtf_confirmation}\n\n"
-
-        f"💰 Entry: "
-        f"<b>{result.get('entry')}</b>\n"
-
-        f"🛑 SL: "
-        f"<b>{result.get('sl')}</b>\n\n"
-
-        f"🎯 TP1: "
-        f"<b>{result.get('tp1')}</b>\n"
-
-        f"🎯 TP2: "
-        f"<b>{result.get('tp2')}</b>\n"
-
-        f"🎯 TP3: "
-        f"<b>{result.get('tp3')}</b>\n\n"
-
+        f"✅ MTF 15M: "
+        f"{result.get('mtf_confirmation', result.get('mtf_confirmed'))}\n\n"
+        f"💰 Entry: <b>{result.get('entry')}</b>\n"
+        f"🛑 SL: <b>{result.get('sl')}</b>\n\n"
+        f"🎯 TP1: <b>{result.get('tp1')}</b>\n"
+        f"🎯 TP2: <b>{result.get('tp2')}</b>\n"
+        f"🎯 TP3: <b>{result.get('tp3')}</b>\n\n"
         f"📏 Risk: {result.get('risk')}\n"
         f"⚖️ RR: {result.get('rr')}\n\n"
-
-        f"🧠 Strategy:\n"
-        f"<b>{strategy_text}</b>\n\n"
-
-        f"📝 Reason:\n"
-        f"{result.get('reason', 'N/A')}"
+        f"🧠 Strategy:\n<b>{strategy_text}</b>\n\n"
+        f"📝 Reason:\n{result.get('reason', 'N/A')}\n\n"
+        f"📰 News Filter:\n{news_note}"
     )
 
 
@@ -935,6 +1308,35 @@ def analyze_symbol_raw(symbol):
 
 
 # ============================================================
+# COMMON SIGNAL VALIDATION
+# ============================================================
+
+def is_valid_high_signal(result):
+    if not isinstance(result, dict):
+        return False
+
+    if result.get("quality") != "HIGH":
+        return False
+
+    if result.get("direction") not in (
+        "LONG",
+        "SHORT",
+    ):
+        return False
+
+    if result.get("signal") not in (
+        "LONG",
+        "SHORT",
+    ):
+        return False
+
+    if result.get("signal") != result.get("direction"):
+        return False
+
+    return True
+
+
+# ============================================================
 # /START
 # ============================================================
 
@@ -942,11 +1344,9 @@ async def start(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-    chat_ids = (
-        context.application.bot_data.setdefault(
-            "chat_ids",
-            set(),
-        )
+    chat_ids = context.application.bot_data.setdefault(
+        "chat_ids",
+        set(),
     )
 
     chat_ids.add(
@@ -955,9 +1355,7 @@ async def start(
 
     await update.effective_message.reply_text(
         f"🤖 CryptoBot فعال است.\n"
-        f"📊 تعداد ارزهای در حال اسکن: "
-        f"{len(SYMBOLS)}\n\n"
-
+        f"📊 تعداد ارزهای در حال اسکن: {len(SYMBOLS)}\n\n"
         "دستورات:\n"
         "/price - قیمت BTC و SOL\n"
         "/signal - بررسی سیگنال‌های HIGH\n"
@@ -986,9 +1384,7 @@ async def price(
         "SOL-SWAP-USDT",
     )
 
-    message = (
-        "💰 <b>CryptoBot Prices</b>\n\n"
-    )
+    message = "💰 <b>CryptoBot Prices</b>\n\n"
 
     if btc is not None:
         message += f"₿ BTC: <b>{btc}</b>\n"
@@ -1018,10 +1414,12 @@ async def signal(
         f"🔎 در حال بررسی {len(SYMBOLS)} ارز...\n"
         "Daily → 4H → 1H → 15M → 5M\n\n"
         "فقط سیگنال‌های HIGH نمایش داده می‌شوند.\n"
+        "خبرهای بحرانی نیز بررسی می‌شوند.\n"
         "این کار ممکن است چند دقیقه طول بکشد."
     )
 
     found = 0
+    blocked_by_news = 0
 
     for symbol in SYMBOLS:
         try:
@@ -1038,26 +1436,22 @@ async def signal(
                 result,
             )
 
-            if result.get("quality") != "HIGH":
+            if not is_valid_high_signal(result):
                 continue
 
-            if result.get("direction") not in (
-                "LONG",
-                "SHORT",
-            ):
+            blocked, news_note = await check_critical_news(
+                symbol,
+                result.get("direction"),
+            )
+
+            if blocked:
+                blocked_by_news += 1
                 continue
 
-            if result.get("signal") not in (
-                "LONG",
-                "SHORT",
-            ):
-                continue
+            result["_news_note"] = news_note
 
             await update.effective_message.reply_text(
-                signal_text(
-                    symbol,
-                    result,
-                ),
+                signal_text(symbol, result),
                 parse_mode="HTML",
             )
 
@@ -1082,8 +1476,9 @@ async def signal(
 
     if found == 0:
         await update.effective_message.reply_text(
-            f"⏳ هیچ سیگنال HIGH در "
-            f"{len(SYMBOLS)} ارز پیدا نشد.\n\n"
+            f"⏳ هیچ سیگنال HIGH قابل‌ارسالی "
+            f"در {len(SYMBOLS)} ارز پیدا نشد.\n"
+            f"⛔ مسدودشده توسط خبر: {blocked_by_news}\n\n"
             "🔍 جزئیات تشخیص در لاگ Belmo ثبت شد."
         )
 
@@ -1109,6 +1504,7 @@ async def auto_signal(
         )
 
         found = 0
+        blocked_by_news = 0
 
         for symbol in SYMBOLS:
             try:
@@ -1130,21 +1526,25 @@ async def auto_signal(
                     result,
                 )
 
-                if result.get("quality") != "HIGH":
+                if not is_valid_high_signal(result):
                     continue
 
-                if result.get("direction") not in (
-                    "LONG",
-                    "SHORT",
-                ):
+                blocked, news_note = await check_critical_news(
+                    symbol,
+                    result.get("direction"),
+                )
+
+                if blocked:
+                    blocked_by_news += 1
+                    logger.warning(
+                        "AUTO_SIGNAL_BLOCKED_BY_NEWS | %s",
+                        symbol,
+                    )
                     continue
 
-                if result.get("signal") not in (
-                    "LONG",
-                    "SHORT",
-                ):
-                    continue
+                result["_news_note"] = news_note
 
+                # ثبت فقط پس از عبور از فیلتر خبر
                 trade = register_high_signal(
                     symbol,
                     result,
@@ -1170,11 +1570,9 @@ async def auto_signal(
                     result.get("strategy"),
                 )
 
-                chat_ids = (
-                    context.application.bot_data.get(
-                        "chat_ids",
-                        set(),
-                    )
+                chat_ids = context.application.bot_data.get(
+                    "chat_ids",
+                    set(),
                 )
 
                 for chat_id in list(chat_ids):
@@ -1190,8 +1588,7 @@ async def auto_signal(
 
                     except Exception:
                         logger.exception(
-                            "Telegram send error "
-                            "for chat %s",
+                            "Telegram send error for chat %s",
                             chat_id,
                         )
 
@@ -1203,8 +1600,9 @@ async def auto_signal(
 
         logger.info(
             "Automatic scan completed. "
-            "New signals=%s",
+            "New signals=%s | Blocked by news=%s",
             found,
+            blocked_by_news,
         )
 
 
@@ -1269,40 +1667,19 @@ async def track_open_trades(
         if not events:
             return
 
-        chat_ids = (
-            context.application.bot_data.get(
-                "chat_ids",
-                set(),
-            )
+        chat_ids = context.application.bot_data.get(
+            "chat_ids",
+            set(),
         )
 
         for event in events:
-            trade = event.get(
-                "trade",
-                {},
-            )
-
-            event_name = event.get(
-                "event",
-                "UNKNOWN",
-            )
-
+            trade = event.get("trade", {})
+            event_name = event.get("event", "UNKNOWN")
             price_now = event.get("price")
 
-            symbol = trade.get(
-                "symbol",
-                "UNKNOWN",
-            )
-
-            direction = trade.get(
-                "direction",
-                "UNKNOWN",
-            )
-
-            strategy_name = trade.get(
-                "strategy",
-                "UNKNOWN",
-            )
+            symbol = trade.get("symbol", "UNKNOWN")
+            direction = trade.get("direction", "UNKNOWN")
+            strategy_name = trade.get("strategy", "UNKNOWN")
 
             message = (
                 "📊 <b>TRACKER UPDATE</b>\n\n"
@@ -1328,8 +1705,7 @@ async def track_open_trades(
 
                 except Exception:
                     logger.exception(
-                        "Tracker Telegram error "
-                        "for chat %s",
+                        "Tracker Telegram error for chat %s",
                         chat_id,
                     )
 
@@ -1341,9 +1717,7 @@ async def track_open_trades(
             )
 
     except Exception:
-        logger.exception(
-            "Tracker error"
-        )
+        logger.exception("Tracker error")
 
 
 # ============================================================
@@ -1354,11 +1728,9 @@ async def register_chat(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-    chat_ids = (
-        context.application.bot_data.setdefault(
-            "chat_ids",
-            set(),
-        )
+    chat_ids = context.application.bot_data.setdefault(
+        "chat_ids",
+        set(),
     )
 
     chat_ids.add(
@@ -1386,27 +1758,13 @@ async def tracker_stats(
 
         message = (
             "📊 <b>Tracker Statistics</b>\n\n"
-
-            f"📌 Total Signals: "
-            f"{stats.get('total', 0)}\n"
-
-            f"⏳ Open: "
-            f"{stats.get('open', 0)}\n"
-
-            f"🔒 Closed: "
-            f"{stats.get('closed', 0)}\n\n"
-
-            f"🎯 TP1 Hit: "
-            f"{stats.get('tp1', 0)}\n"
-
-            f"🎯 TP2 Hit: "
-            f"{stats.get('tp2', 0)}\n"
-
-            f"🎯 TP3 Hit: "
-            f"{stats.get('tp3', 0)}\n"
-
-            f"🛑 SL Hit: "
-            f"{stats.get('sl', 0)}"
+            f"📌 Total Signals: {stats.get('total', 0)}\n"
+            f"⏳ Open: {stats.get('open', 0)}\n"
+            f"🔒 Closed: {stats.get('closed', 0)}\n\n"
+            f"🎯 TP1 Hit: {stats.get('tp1', 0)}\n"
+            f"🎯 TP2 Hit: {stats.get('tp2', 0)}\n"
+            f"🎯 TP3 Hit: {stats.get('tp3', 0)}\n"
+            f"🛑 SL Hit: {stats.get('sl', 0)}"
         )
 
         await update.effective_message.reply_text(
@@ -1415,9 +1773,7 @@ async def tracker_stats(
         )
 
     except Exception:
-        logger.exception(
-            "Tracker stats error"
-        )
+        logger.exception("Tracker stats error")
 
         await update.effective_message.reply_text(
             "❌ خطا در دریافت آمار Tracker."
@@ -1432,16 +1788,12 @@ async def news_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-    message = (
-        await update.effective_message.reply_text(
-            "📰 در حال دریافت اخبار کریپتو..."
-        )
+    message = await update.effective_message.reply_text(
+        "📰 در حال دریافت اخبار کریپتو..."
     )
 
     try:
-        articles = await get_latest_news(
-            limit=8
-        )
+        articles = await get_latest_news(limit=8)
 
         if not articles:
             await message.edit_text(
@@ -1450,9 +1802,7 @@ async def news_command(
             )
             return
 
-        lines = [
-            "📰 آخرین اخبار کریپتو\n"
-        ]
+        lines = ["📰 آخرین اخبار کریپتو\n"]
 
         for index, article in enumerate(
             articles,
@@ -1467,29 +1817,22 @@ async def news_command(
                 "CRITICAL": "🔴",
                 "HIGH": "🟠",
                 "NORMAL": "🟢",
-            }.get(
-                importance,
-                "⚪",
+            }.get(importance, "⚪")
+
+            title = str(
+                article.get("title", "بدون عنوان")
             )
 
-            title = article.get(
-                "title",
-                "بدون عنوان",
+            source = str(
+                article.get("source", "Unknown")
             )
 
-            source = article.get(
-                "source",
-                "Unknown",
+            asset = str(
+                article.get("asset", "UNKNOWN")
             )
 
-            asset = article.get(
-                "asset",
-                "UNKNOWN",
-            )
-
-            link = article.get(
-                "link",
-                "",
+            link = str(
+                article.get("link", "")
             )
 
             item = (
@@ -1498,9 +1841,7 @@ async def news_command(
                 f"🪙 دارایی: {asset}\n"
             )
 
-            if link.startswith(
-                ("https://", "http://")
-            ):
+            if link.startswith(("https://", "http://")):
                 item += f"🔗 {link}\n"
 
             lines.append(item)
@@ -1519,9 +1860,7 @@ async def news_command(
         )
 
     except Exception:
-        logger.exception(
-            "NEWS_COMMAND_ERROR"
-        )
+        logger.exception("NEWS_COMMAND_ERROR")
 
         await message.edit_text(
             "❌ خطا هنگام دریافت اخبار.\n"
@@ -1537,10 +1876,8 @@ async def news_test_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-    message = (
-        await update.effective_message.reply_text(
-            "🔎 در حال آزمایش منابع خبری..."
-        )
+    message = await update.effective_message.reply_text(
+        "🔎 در حال آزمایش منابع خبری..."
     )
 
     try:
@@ -1549,29 +1886,16 @@ async def news_test_command(
         lines = [
             "📊 گزارش آزمایش منابع خبری\n",
             f"📰 مجموع اخبار: {result['total']}",
-            (
-                "🔴 اخبار CRITICAL: "
-                f"{result['critical_count']}"
-            ),
-            (
-                "🟠 اخبار HIGH: "
-                f"{result['high_count']}"
-            ),
+            f"🔴 اخبار CRITICAL: {result['critical_count']}",
+            f"🟠 اخبار HIGH: {result['high_count']}",
             "",
             "وضعیت منابع:",
         ]
 
         for source, status in result["sources"].items():
-            icon = (
-                "✅"
-                if status.get("ok")
-                else "❌"
-            )
+            icon = "✅" if status.get("ok") else "❌"
 
-            count = status.get(
-                "count",
-                0,
-            )
+            count = status.get("count", 0)
 
             lines.append(
                 f"{icon} {source}: {count} خبر"
@@ -1582,9 +1906,7 @@ async def news_test_command(
         )
 
     except Exception:
-        logger.exception(
-            "NEWS_TEST_ERROR"
-        )
+        logger.exception("NEWS_TEST_ERROR")
 
         await message.edit_text(
             "❌ آزمایش منابع خبری ناموفق بود.\n"
@@ -1603,26 +1925,20 @@ def main():
         )
 
     logger.info("=" * 60)
-
-    logger.info(
-        "CryptoBot starting..."
-    )
-
-    logger.info(
-        "Symbols to scan: %s",
-        len(SYMBOLS),
-    )
-
+    logger.info("CryptoBot starting...")
+    logger.info("Symbols to scan: %s", len(SYMBOLS))
     logger.info(
         "Automatic scan interval: %s seconds",
         AUTO_INTERVAL,
     )
-
     logger.info(
         "Tracker interval: %s seconds",
         TRACKER_INTERVAL,
     )
-
+    logger.info(
+        "Critical news window: %s minutes",
+        NEWS_BLOCK_MINUTES,
+    )
     logger.info("=" * 60)
 
     application = (
@@ -1631,62 +1947,33 @@ def main():
         .build()
     )
 
-    # --------------------------------------------------------
-    # COMMAND HANDLERS
-    # --------------------------------------------------------
-
     application.add_handler(
-        CommandHandler(
-            "start",
-            start,
-        )
+        CommandHandler("start", start)
     )
 
     application.add_handler(
-        CommandHandler(
-            "price",
-            price,
-        )
+        CommandHandler("price", price)
     )
 
     application.add_handler(
-        CommandHandler(
-            "signal",
-            signal,
-        )
+        CommandHandler("signal", signal)
     )
 
     application.add_handler(
-        CommandHandler(
-            "register",
-            register_chat,
-        )
+        CommandHandler("register", register_chat)
     )
 
     application.add_handler(
-        CommandHandler(
-            "stats",
-            tracker_stats,
-        )
+        CommandHandler("stats", tracker_stats)
     )
 
     application.add_handler(
-        CommandHandler(
-            "news",
-            news_command,
-        )
+        CommandHandler("news", news_command)
     )
 
     application.add_handler(
-        CommandHandler(
-            "news_test",
-            news_test_command,
-        )
+        CommandHandler("news_test", news_test_command)
     )
-
-    # --------------------------------------------------------
-    # TRACKER SCHEDULE
-    # --------------------------------------------------------
 
     application.job_queue.run_repeating(
         track_open_trades,
@@ -1699,10 +1986,6 @@ def main():
         TRACKER_INTERVAL,
     )
 
-    # --------------------------------------------------------
-    # AUTOMATIC SCANNER SCHEDULE
-    # --------------------------------------------------------
-
     application.job_queue.run_repeating(
         auto_signal,
         interval=AUTO_INTERVAL,
@@ -1710,14 +1993,11 @@ def main():
     )
 
     logger.info(
-        "Automatic signal scanner scheduled "
-        "every %s seconds",
+        "Automatic signal scanner scheduled every %s seconds",
         AUTO_INTERVAL,
     )
 
-    logger.info(
-        "CryptoBot started successfully."
-    )
+    logger.info("CryptoBot started successfully.")
 
     application.run_polling(
         drop_pending_updates=True
