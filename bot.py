@@ -2,7 +2,9 @@ import os
 import logging
 import asyncio
 import requests
+
 from news import get_latest_news, news_diagnostics
+
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -11,7 +13,6 @@ from telegram.ext import (
 )
 
 from analysis import generate_signal
-
 from market import get_futures_symbols
 
 from tracker import (
@@ -28,7 +29,9 @@ from tracker import (
 
 TOKEN = os.getenv("BOT_TOKEN")
 
-TOOBIT_KLINES_URL = "https://api.toobit.com/quote/v1/klines"
+TOOBIT_KLINES_URL = (
+    "https://api.toobit.com/quote/v1/klines"
+)
 
 TOOBIT_TICKER_URL = (
     "https://api.toobit.com/quote/v1/contract/ticker/price"
@@ -38,13 +41,22 @@ TOOBIT_TICKER_24H_URL = (
     "https://api.toobit.com/quote/v1/contract/ticker/24hr"
 )
 
+AUTO_INTERVAL = 300
+TRACKER_INTERVAL = 30
+
+MIN_VOLUME_USDT = 50_000_000
+MAX_SYMBOLS = 30
+
 
 # ============================================================
 # LOGGING
 # ============================================================
 
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format=(
+        "%(asctime)s - %(name)s - "
+        "%(levelname)s - %(message)s"
+    ),
     level=logging.INFO,
 )
 
@@ -54,21 +66,24 @@ _scan_lock = asyncio.Lock()
 
 
 # ============================================================
-# SYMBOLS - AUTO FETCH FROM TOOBIT WITH LIQUIDITY FILTER
+# SYMBOLS - AUTO FETCH FROM TOOBIT
 # ============================================================
 
-def load_symbols(min_volume_usdt=10_000_000, max_symbols=30):
+def load_symbols(
+    min_volume_usdt=10_000_000,
+    max_symbols=30,
+):
     """
-    دریافت خودکار ارزهای فیوچرز توبیت با فیلتر نقدینگی.
+    دریافت نمادهای فیوچرز و فیلتر بر اساس حجم ۲۴ ساعته.
+    """
 
-    min_volume_usdt: حداقل حجم 24 ساعته به دلار
-    max_symbols: حداکثر تعداد ارزها برای اسکن
-    """
     try:
         all_symbols = get_futures_symbols()
 
         if not all_symbols:
-            logger.warning("No symbols returned from Toobit")
+            logger.warning(
+                "No symbols returned from Toobit"
+            )
             return []
 
         logger.info(
@@ -100,6 +115,7 @@ def load_symbols(min_volume_usdt=10_000_000, max_symbols=30):
                         or data.get("v")
                         or 0
                     )
+
                     volume = float(raw) if raw else 0.0
 
                 elif isinstance(data, list):
@@ -112,7 +128,10 @@ def load_symbols(min_volume_usdt=10_000_000, max_symbols=30):
                             or item.get("s")
                         )
 
-                        if item_symbol and item_symbol != symbol:
+                        if (
+                            item_symbol
+                            and item_symbol != symbol
+                        ):
                             continue
 
                         raw = (
@@ -122,18 +141,34 @@ def load_symbols(min_volume_usdt=10_000_000, max_symbols=30):
                             or item.get("v")
                             or 0
                         )
-                        volume = float(raw) if raw else 0.0
+
+                        volume = (
+                            float(raw) if raw else 0.0
+                        )
                         break
 
                 if volume >= min_volume_usdt:
-                    candidates.append((symbol, volume))
+                    candidates.append(
+                        (symbol, volume)
+                    )
 
             except Exception:
+                logger.debug(
+                    "Volume check failed for %s",
+                    symbol,
+                    exc_info=True,
+                )
                 continue
 
-        candidates.sort(key=lambda x: x[1], reverse=True)
+        candidates.sort(
+            key=lambda item: item[1],
+            reverse=True,
+        )
 
-        selected = [s for s, _ in candidates[:max_symbols]]
+        selected = [
+            symbol
+            for symbol, _ in candidates[:max_symbols]
+        ]
 
         logger.info(
             "Filtered %s/%s symbols, selected top %s",
@@ -147,13 +182,13 @@ def load_symbols(min_volume_usdt=10_000_000, max_symbols=30):
 
         logger.warning(
             "No symbols passed liquidity filter. "
-            "Falling back to top symbols."
+            "Using fallback symbols."
         )
 
-    except Exception as e:
-        logger.error("Failed to load symbols: %s", e)
-
-    logger.warning("Using fallback symbol list")
+    except Exception:
+        logger.exception(
+            "Failed to load symbols"
+        )
 
     return [
         "BTC-SWAP-USDT",
@@ -170,8 +205,8 @@ def load_symbols(min_volume_usdt=10_000_000, max_symbols=30):
 
 
 SYMBOLS = load_symbols(
-    min_volume_usdt=50_000_000,
-    max_symbols=30,
+    min_volume_usdt=MIN_VOLUME_USDT,
+    max_symbols=MAX_SYMBOLS,
 )
 
 
@@ -190,7 +225,11 @@ INTERVALS = {
 
 def safe_number(value):
     try:
+        if value is None:
+            return None
+
         return float(value)
+
     except (TypeError, ValueError):
         return None
 
@@ -198,12 +237,26 @@ def safe_number(value):
 def normalize_candle(candle):
     if isinstance(candle, dict):
         return {
-            "timestamp": candle.get("timestamp", candle.get("time")),
-            "open": safe_number(candle.get("open")),
-            "high": safe_number(candle.get("high")),
-            "low": safe_number(candle.get("low")),
-            "close": safe_number(candle.get("close")),
-            "volume": safe_number(candle.get("volume")),
+            "timestamp": (
+                candle.get("timestamp")
+                or candle.get("time")
+                or candle.get("t")
+            ),
+            "open": safe_number(
+                candle.get("open", candle.get("o"))
+            ),
+            "high": safe_number(
+                candle.get("high", candle.get("h"))
+            ),
+            "low": safe_number(
+                candle.get("low", candle.get("l"))
+            ),
+            "close": safe_number(
+                candle.get("close", candle.get("c"))
+            ),
+            "volume": safe_number(
+                candle.get("volume", candle.get("v"))
+            ),
         }
 
     if isinstance(candle, (list, tuple)):
@@ -216,7 +269,11 @@ def normalize_candle(candle):
             "high": safe_number(candle[2]),
             "low": safe_number(candle[3]),
             "close": safe_number(candle[4]),
-            "volume": safe_number(candle[5]) if len(candle) > 5 else None,
+            "volume": (
+                safe_number(candle[5])
+                if len(candle) > 5
+                else None
+            ),
         }
 
     return None
@@ -227,10 +284,29 @@ def extract_candle_rows(data):
         return data
 
     if isinstance(data, dict):
-        for key in ("data", "result", "rows", "klines", "candles"):
+        for key in (
+            "data",
+            "result",
+            "rows",
+            "klines",
+            "candles",
+        ):
             value = data.get(key)
+
             if isinstance(value, list):
                 return value
+
+            if isinstance(value, dict):
+                for nested_key in (
+                    "data",
+                    "rows",
+                    "klines",
+                    "candles",
+                ):
+                    nested = value.get(nested_key)
+
+                    if isinstance(nested, list):
+                        return nested
 
     return []
 
@@ -245,11 +321,16 @@ def normalize_candles(data):
         if candle is None:
             continue
 
-        if (
-            candle["open"] is None
-            or candle["high"] is None
-            or candle["low"] is None
-            or candle["close"] is None
+        required = (
+            "open",
+            "high",
+            "low",
+            "close",
+        )
+
+        if any(
+            candle.get(key) is None
+            for key in required
         ):
             continue
 
@@ -262,7 +343,11 @@ def normalize_candles(data):
 # TOOBIT MARKET DATA
 # ============================================================
 
-def get_klines(symbol, interval, limit=200):
+def get_klines(
+    symbol,
+    interval,
+    limit=200,
+):
     try:
         params = {
             "symbol": symbol,
@@ -292,24 +377,53 @@ def get_klines(symbol, interval, limit=200):
 
         return candles
 
-    except Exception as e:
-        logger.error(
-            "Kline error %s %s: %s",
+    except Exception:
+        logger.exception(
+            "Kline error %s %s",
             symbol,
             interval,
-            e,
         )
         return []
 
 
 def get_market_data(symbol):
-    daily = get_klines(symbol, INTERVALS["1d"], 200)
-    h4 = get_klines(symbol, INTERVALS["4h"], 200)
-    h1 = get_klines(symbol, INTERVALS["1h"], 200)
-    m15 = get_klines(symbol, INTERVALS["15m"], 200)
-    m5 = get_klines(symbol, INTERVALS["5m"], 200)
+    daily = get_klines(
+        symbol,
+        INTERVALS["1d"],
+        200,
+    )
 
-    if not daily or not h4 or not h1 or not m15 or not m5:
+    h4 = get_klines(
+        symbol,
+        INTERVALS["4h"],
+        200,
+    )
+
+    h1 = get_klines(
+        symbol,
+        INTERVALS["1h"],
+        200,
+    )
+
+    m15 = get_klines(
+        symbol,
+        INTERVALS["15m"],
+        200,
+    )
+
+    m5 = get_klines(
+        symbol,
+        INTERVALS["5m"],
+        200,
+    )
+
+    if not all(
+        (daily, h4, h1, m15, m5)
+    ):
+        logger.warning(
+            "MARKET_DATA_INCOMPLETE | %s",
+            symbol,
+        )
         return None
 
     return {
@@ -334,39 +448,44 @@ def get_price(symbol):
         )
 
         response.raise_for_status()
-
         data = response.json()
 
         if isinstance(data, dict):
-            price = (
+            price_value = (
                 data.get("p")
                 or data.get("price")
                 or data.get("lastPrice")
                 or data.get("last")
             )
 
-            if price is not None:
-                return float(price)
+            if price_value is not None:
+                return float(price_value)
 
         if isinstance(data, list):
             for item in data:
                 if not isinstance(item, dict):
                     continue
 
-                item_symbol = item.get("symbol") or item.get("s")
+                item_symbol = (
+                    item.get("symbol")
+                    or item.get("s")
+                )
 
-                if item_symbol is not None and item_symbol != symbol:
+                if (
+                    item_symbol is not None
+                    and item_symbol != symbol
+                ):
                     continue
 
-                price = (
+                price_value = (
                     item.get("p")
                     or item.get("price")
                     or item.get("lastPrice")
                     or item.get("last")
                 )
 
-                if price is not None:
-                    return float(price)
+                if price_value is not None:
+                    return float(price_value)
 
         logger.warning(
             "PRICE API | %s | Price not found",
@@ -375,11 +494,10 @@ def get_price(symbol):
 
         return None
 
-    except Exception as e:
-        logger.error(
-            "Price error %s: %s",
+    except Exception:
+        logger.exception(
+            "Price error %s",
             symbol,
-            e,
         )
         return None
 
@@ -402,7 +520,9 @@ def already_tracking(symbol, direction):
         return False
 
     except Exception:
-        logger.exception("Tracker duplicate-check error")
+        logger.exception(
+            "Tracker duplicate-check error"
+        )
         return False
 
 
@@ -426,11 +546,16 @@ def register_high_signal(symbol, result):
         )
         return None
 
-    trade = register_signal(symbol, result)
+    trade = register_signal(
+        symbol,
+        result,
+    )
 
     if trade:
         logger.info(
-            "TRACKER | REGISTERED | %s | %s | Entry=%s | SL=%s | TP1=%s | TP2=%s | TP3=%s",
+            "TRACKER | REGISTERED | %s | %s | "
+            "Entry=%s | SL=%s | TP1=%s | "
+            "TP2=%s | TP3=%s",
             symbol,
             direction,
             result.get("entry"),
@@ -444,43 +569,138 @@ def register_high_signal(symbol, result):
 
 
 # ============================================================
-# STRATEGY DIAGNOSTIC
+# STRATEGY DIAGNOSTICS
 # ============================================================
 
 def log_strategy_details(symbol, result):
+    """
+    نمایش وضعیت پنج استراتژی در لاگ Belmo.
+    این تابع فقط گزارش‌گیری می‌کند و سیگنال را تغییر نمی‌دهد.
+    """
+
+    diagnostics = result.get(
+        "strategy_diagnostics"
+    )
+
+    if isinstance(diagnostics, dict):
+        parts = []
+
+        for strategy in (
+            "TREND_FOLLOWING",
+            "PULLBACK",
+            "BREAKOUT",
+            "REVERSAL",
+            "RANGE_TRADING",
+        ):
+            value = diagnostics.get(strategy)
+
+            if value is None:
+                parts.append(
+                    f"{strategy}=NO_DATA"
+                )
+                continue
+
+            if isinstance(value, dict):
+                matched = value.get("matched")
+
+                reason = (
+                    value.get("reason")
+                    or value.get("blocked_reason")
+                    or value.get("failure_reason")
+                    or value.get("fail_reason")
+                    or value.get("status")
+                    or ""
+                )
+
+                if matched is True:
+                    status = "PASS"
+                else:
+                    status = "FAIL"
+
+                if reason:
+                    status = f"{status}:{reason}"
+
+                parts.append(
+                    f"{strategy}={status}"
+                )
+
+            elif isinstance(value, bool):
+                parts.append(
+                    f"{strategy}="
+                    f"{'PASS' if value else 'FAIL'}"
+                )
+
+            else:
+                parts.append(
+                    f"{strategy}={value}"
+                )
+
+        logger.info(
+            "STRATEGY_CHECK | %s | %s",
+            symbol,
+            " | ".join(parts),
+        )
+
+        return
+
     details = result.get("strategy_details")
 
     if not isinstance(details, dict):
+        logger.info(
+            "STRATEGY_CHECK | %s | "
+            "No strategy diagnostics returned",
+            symbol,
+        )
         return
 
-    strategy_status = []
+    parts = []
 
     for name, value in details.items():
-
         if isinstance(value, dict):
-            matched = value.get("matched", False)
+            matched = value.get(
+                "matched",
+                False,
+            )
+
             direction = value.get("direction")
 
+            reason = (
+                value.get("reason")
+                or value.get("blocked_reason")
+                or value.get("failure_reason")
+                or ""
+            )
+
             if matched and direction:
-                status = f"YES({direction})"
+                status = f"PASS({direction})"
+            elif matched:
+                status = "PASS"
+            elif reason:
+                status = f"FAIL:{reason}"
             else:
-                status = "YES" if matched else "NO"
+                status = "FAIL"
 
         else:
-            status = "YES" if bool(value) else "NO"
+            status = (
+                "PASS"
+                if bool(value)
+                else "FAIL"
+            )
 
-        strategy_status.append(
+        parts.append(
             f"{name}={status}"
         )
 
-    if strategy_status:
+    if parts:
         logger.info(
-            "STRATEGIES | %s | %s",
+            "STRATEGY_CHECK | %s | %s",
             symbol,
-            " | ".join(strategy_status),
+            " | ".join(parts),
         )
+
+
 # ============================================================
-# FULL DIAGNOSTIC
+# FULL SIGNAL DIAGNOSTIC
 # ============================================================
 
 def log_signal_diagnostic(symbol, result):
@@ -491,14 +711,30 @@ def log_signal_diagnostic(symbol, result):
     h4 = result.get("4h", "UNKNOWN")
     h1 = result.get("1h", "UNKNOWN")
 
-    direction = result.get("direction", "UNKNOWN")
-    signal = result.get("signal", "UNKNOWN")
-    score = result.get("score", "UNKNOWN")
-    quality = result.get("quality", "UNKNOWN")
+    direction = result.get(
+        "direction",
+        "UNKNOWN",
+    )
 
-    reason = result.get(
-        "reason",
-        result.get("blocked_reason", "UNKNOWN"),
+    signal_value = result.get(
+        "signal",
+        "UNKNOWN",
+    )
+
+    score = result.get(
+        "score",
+        "UNKNOWN",
+    )
+
+    quality = result.get(
+        "quality",
+        "UNKNOWN",
+    )
+
+    reason = (
+        result.get("reason")
+        or result.get("blocked_reason")
+        or "UNKNOWN"
     )
 
     strategies = (
@@ -507,9 +743,15 @@ def log_signal_diagnostic(symbol, result):
         or []
     )
 
-    if isinstance(strategies, (list, tuple, set)):
+    if isinstance(
+        strategies,
+        (list, tuple, set),
+    ):
         strategies_text = (
-            ", ".join(str(x) for x in strategies)
+            ", ".join(
+                str(item)
+                for item in strategies
+            )
             if strategies
             else "NONE"
         )
@@ -517,15 +759,16 @@ def log_signal_diagnostic(symbol, result):
         strategies_text = str(strategies)
 
     logger.info(
-        "DIAGNOSTIC | %s | Daily=%s | 4H=%s | 1H=%s | "
-        "Direction=%s | Signal=%s | Score=%s | "
-        "Quality=%s | Reason=%s | Strategies=%s",
+        "DIAGNOSTIC | %s | Daily=%s | 4H=%s | "
+        "1H=%s | Direction=%s | Signal=%s | "
+        "Score=%s | Quality=%s | Reason=%s | "
+        "Strategies=%s",
         symbol,
         daily,
         h4,
         h1,
         direction,
-        signal,
+        signal_value,
         score,
         quality,
         reason,
@@ -549,8 +792,9 @@ def log_signal_diagnostic(symbol, result):
     confirmation = result.get("confirmation")
 
     logger.info(
-        "FILTERS | %s | 15M_RSI=%s | ADX_1H=%s | "
-        "ADX_15M=%s | MTF_15M=%s | VolumeSpike=%s | "
+        "FILTERS | %s | 15M_RSI=%s | "
+        "ADX_1H=%s | ADX_15M=%s | "
+        "MTF_15M=%s | VolumeSpike=%s | "
         "Confirmation=%s",
         symbol,
         rsi_15m,
@@ -561,196 +805,14 @@ def log_signal_diagnostic(symbol, result):
         confirmation,
     )
 
-    log_strategy_details(symbol, result)
+    log_strategy_details(
+        symbol,
+        result,
+    )
 
 
 # ============================================================
-# STRATEGY FAILURE DIAGNOSTIC
-# ============================================================
-
-def log_strategy_details(symbol, result):
-    """
-    نمایش جزئیات هر پنج استراتژی.
-
-    این بخش فقط برای Diagnostics است و هیچ تأثیری
-    روی تولید یا فیلتر کردن سیگنال ندارد.
-    """
-
-    # --------------------------------------------------------
-    # 1. strategy_diagnostics from analysis.py
-    # --------------------------------------------------------
-
-    diagnostics = result.get("strategy_diagnostics")
-
-    if isinstance(diagnostics, dict):
-
-        parts = []
-
-        for strategy in (
-            "TREND_FOLLOWING",
-            "PULLBACK",
-            "BREAKOUT",
-            "REVERSAL",
-            "RANGE_TRADING",
-        ):
-
-            value = diagnostics.get(strategy)
-
-            if value is None:
-                parts.append(
-                    f"{strategy}=NO_DATA"
-                )
-                continue
-
-            # Dictionary format
-            if isinstance(value, dict):
-
-                matched = value.get("matched")
-
-                reason = (
-                    value.get("reason")
-                    or value.get("blocked_reason")
-                    or value.get("failure_reason")
-                    or value.get("fail_reason")
-                    or value.get("status")
-                    or ""
-                )
-
-                if matched is True:
-
-                    if reason:
-                        parts.append(
-                            f"{strategy}=PASS:{reason}"
-                        )
-                    else:
-                        parts.append(
-                            f"{strategy}=PASS"
-                        )
-
-                else:
-
-                    if reason:
-                        parts.append(
-                            f"{strategy}=FAIL:{reason}"
-                        )
-                    else:
-                        parts.append(
-                            f"{strategy}=FAIL"
-                        )
-
-                continue
-
-            # String format
-            if isinstance(value, str):
-
-                parts.append(
-                    f"{strategy}={value}"
-                )
-
-                continue
-
-            # Boolean format
-            if isinstance(value, bool):
-
-                parts.append(
-                    f"{strategy}="
-                    f"{'PASS' if value else 'FAIL'}"
-                )
-
-                continue
-
-            # Any other format
-            parts.append(
-                f"{strategy}={value}"
-            )
-
-        if parts:
-
-            logger.info(
-                "STRATEGY_CHECK | %s | %s",
-                symbol,
-                " | ".join(parts),
-            )
-
-        return
-
-    # --------------------------------------------------------
-    # 2. Existing strategy_details support
-    # --------------------------------------------------------
-
-    details = result.get("strategy_details")
-
-    if not isinstance(details, dict):
-        logger.info(
-            "STRATEGY_CHECK | %s | "
-            "No strategy diagnostics returned",
-            symbol,
-        )
-        return
-
-    strategy_status = []
-
-    for name, value in details.items():
-
-        if isinstance(value, dict):
-
-            matched = value.get(
-                "matched",
-                False,
-            )
-
-            direction = value.get(
-                "direction"
-            )
-
-            reason = (
-                value.get("reason")
-                or value.get("blocked_reason")
-                or value.get("failure_reason")
-                or ""
-            )
-
-            if matched and direction:
-
-                status = (
-                    f"PASS({direction})"
-                )
-
-            elif matched:
-
-                status = "PASS"
-
-            elif reason:
-
-                status = (
-                    f"FAIL:{reason}"
-                )
-
-            else:
-
-                status = "FAIL"
-
-        else:
-
-            status = (
-                "PASS"
-                if bool(value)
-                else "FAIL"
-            )
-
-        strategy_status.append(
-            f"{name}={status}"
-        )
-
-    if strategy_status:
-
-        logger.info(
-            "STRATEGY_CHECK | %s | %s",
-            symbol,
-            " | ".join(strategy_status),
-        )
-# ============================================================
-# SIGNAL TEXT
+# SIGNAL MESSAGE
 # ============================================================
 
 def signal_text(symbol, result):
@@ -780,10 +842,21 @@ def signal_text(symbol, result):
 
     strategy_text = (
         ", ".join(
-            str(x) for x in strategies
+            str(item)
+            for item in strategies
         )
         if strategies
         else "NONE"
+    )
+
+    rsi_15m = result.get(
+        "15m_rsi",
+        result.get("rsi_15m"),
+    )
+
+    mtf_confirmation = result.get(
+        "mtf_confirmation",
+        result.get("mtf_confirmed"),
     )
 
     return (
@@ -798,28 +871,15 @@ def signal_text(symbol, result):
         f"📊 Score: "
         f"<b>{result.get('score')}</b>\n\n"
 
-        f"📅 Daily: "
-        f"{result.get('daily')}\n"
+        f"📅 Daily: {result.get('daily')}\n"
+        f"⏱ 4H: {result.get('4h')}\n"
+        f"🕐 1H: {result.get('1h')}\n"
 
-        f"⏱ 4H: "
-        f"{result.get('4h')}\n"
+        f"⏱ 15M RSI: {rsi_15m}\n"
+        f"📊 ADX 1H: {result.get('adx_1h')}\n"
+        f"📊 ADX 15M: {result.get('adx_15m')}\n"
+        f"✅ MTF 15M: {mtf_confirmation}\n\n"
 
-        f"🕐 1H: "
-        f"{result.get('1h')}\n"
-
-        f"⏱ 15M RSI: "
-        f"{result.get('15m_rsi', 
-          result.get('rsi_15m'))}\n"
-
-        f"📊 ADX 1H: "
-        f"{result.get('adx_1h')}\n"
-
-        f"📊 ADX 15M: "
-        f"{result.get('adx_15m')}\n"
-
-        f"✅ MTF 15M: "
-        f"{result.get('mtf_confirmation',
-           result.get('mtf_confirmed'))}\n\n"
         f"💰 Entry: "
         f"<b>{result.get('entry')}</b>\n"
 
@@ -835,11 +895,8 @@ def signal_text(symbol, result):
         f"🎯 TP3: "
         f"<b>{result.get('tp3')}</b>\n\n"
 
-        f"📏 Risk: "
-        f"{result.get('risk')}\n"
-
-        f"⚖️ RR: "
-        f"{result.get('rr')}\n\n"
+        f"📏 Risk: {result.get('risk')}\n"
+        f"⚖️ RR: {result.get('rr')}\n\n"
 
         f"🧠 Strategy:\n"
         f"<b>{strategy_text}</b>\n\n"
@@ -868,6 +925,10 @@ def analyze_symbol_raw(symbol):
     )
 
     if not isinstance(result, dict):
+        logger.warning(
+            "ANALYSIS_INVALID_RESULT | %s",
+            symbol,
+        )
         return None
 
     return result
@@ -881,16 +942,18 @@ async def start(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-    chat_ids = context.application.bot_data.setdefault(
-        "chat_ids",
-        set(),
+    chat_ids = (
+        context.application.bot_data.setdefault(
+            "chat_ids",
+            set(),
+        )
     )
 
     chat_ids.add(
         update.effective_chat.id
     )
 
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         f"🤖 CryptoBot فعال است.\n"
         f"📊 تعداد ارزهای در حال اسکن: "
         f"{len(SYMBOLS)}\n\n"
@@ -898,8 +961,10 @@ async def start(
         "دستورات:\n"
         "/price - قیمت BTC و SOL\n"
         "/signal - بررسی سیگنال‌های HIGH\n"
-        "/register - ثبت دریافت سیگنال خودکار\n"
-        "/stats - آمار تریدها"
+        "/register - دریافت سیگنال خودکار\n"
+        "/stats - آمار تریدها\n"
+        "/news - آخرین اخبار کریپتو\n"
+        "/news_test - آزمایش منابع خبری"
     )
 
 
@@ -911,38 +976,32 @@ async def price(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-    btc = get_price(
-        "BTC-SWAP-USDT"
+    btc = await asyncio.to_thread(
+        get_price,
+        "BTC-SWAP-USDT",
     )
 
-    sol = get_price(
-        "SOL-SWAP-USDT"
+    sol = await asyncio.to_thread(
+        get_price,
+        "SOL-SWAP-USDT",
     )
 
-    text = (
+    message = (
         "💰 <b>CryptoBot Prices</b>\n\n"
     )
 
     if btc is not None:
-        text += (
-            f"₿ BTC: <b>{btc}</b>\n"
-        )
+        message += f"₿ BTC: <b>{btc}</b>\n"
     else:
-        text += (
-            "₿ BTC: unavailable\n"
-        )
+        message += "₿ BTC: unavailable\n"
 
     if sol is not None:
-        text += (
-            f"◎ SOL: <b>{sol}</b>\n"
-        )
+        message += f"◎ SOL: <b>{sol}</b>\n"
     else:
-        text += (
-            "◎ SOL: unavailable\n"
-        )
+        message += "◎ SOL: unavailable\n"
 
-    await update.message.reply_text(
-        text,
+    await update.effective_message.reply_text(
+        message,
         parse_mode="HTML",
     )
 
@@ -955,20 +1014,16 @@ async def signal(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-    await update.message.reply_text(
-        f"🔎 در حال بررسی "
-        f"{len(SYMBOLS)} ارز...\n"
-
+    await update.effective_message.reply_text(
+        f"🔎 در حال بررسی {len(SYMBOLS)} ارز...\n"
         "Daily → 4H → 1H → 15M → 5M\n\n"
-
         "فقط سیگنال‌های HIGH نمایش داده می‌شوند.\n"
-        "این ممکن است چند دقیقه طول بکشد."
+        "این کار ممکن است چند دقیقه طول بکشد."
     )
 
     found = 0
 
     for symbol in SYMBOLS:
-
         try:
             result = await asyncio.to_thread(
                 analyze_symbol_raw,
@@ -998,6 +1053,16 @@ async def signal(
             ):
                 continue
 
+            await update.effective_message.reply_text(
+                signal_text(
+                    symbol,
+                    result,
+                ),
+                parse_mode="HTML",
+            )
+
+            found += 1
+
             trade = register_high_signal(
                 symbol,
                 result,
@@ -1009,16 +1074,6 @@ async def signal(
                     symbol,
                 )
 
-            await update.message.reply_text(
-                signal_text(
-                    symbol,
-                    result,
-                ),
-                parse_mode="HTML",
-            )
-
-            found += 1
-
         except Exception:
             logger.exception(
                 "Signal error %s",
@@ -1026,16 +1081,15 @@ async def signal(
             )
 
     if found == 0:
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             f"⏳ هیچ سیگنال HIGH در "
             f"{len(SYMBOLS)} ارز پیدا نشد.\n\n"
-
-            "🔍 جزئیات تشخیص در لاگ ثبت شد."
+            "🔍 جزئیات تشخیص در لاگ Belmo ثبت شد."
         )
 
 
 # ============================================================
-# AUTO SCANNER
+# AUTOMATIC SIGNAL SCANNER
 # ============================================================
 
 async def auto_signal(
@@ -1048,17 +1102,15 @@ async def auto_signal(
         return
 
     async with _scan_lock:
-
         logger.info(
             "Starting automatic market scan "
-            "across %s symbols...",
+            "across %s symbols",
             len(SYMBOLS),
         )
 
         found = 0
 
         for symbol in SYMBOLS:
-
             try:
                 result = await asyncio.to_thread(
                     analyze_symbol_raw,
@@ -1101,8 +1153,7 @@ async def auto_signal(
                 if trade is None:
                     logger.info(
                         "HIGH SIGNAL | %s | %s | "
-                        "Already tracked - "
-                        "Telegram alert skipped",
+                        "Already tracked or registration failed",
                         symbol,
                         result.get("direction"),
                     )
@@ -1126,8 +1177,7 @@ async def auto_signal(
                     )
                 )
 
-                for chat_id in chat_ids:
-
+                for chat_id in list(chat_ids):
                     try:
                         await context.bot.send_message(
                             chat_id=chat_id,
@@ -1147,14 +1197,15 @@ async def auto_signal(
 
             except Exception:
                 logger.exception(
-                    "Scan error %s",
+                    "Auto scan error %s",
                     symbol,
                 )
 
-        if found == 0:
-            logger.info(
-                "No HIGH signals."
-            )
+        logger.info(
+            "Automatic scan completed. "
+            "New signals=%s",
+            found,
+        )
 
 
 # ============================================================
@@ -1186,7 +1237,6 @@ async def track_open_trades(
         )
 
         for trade in open_trades:
-
             symbol = trade.get(
                 "symbol",
                 "UNKNOWN",
@@ -1227,20 +1277,17 @@ async def track_open_trades(
         )
 
         for event in events:
-
             trade = event.get(
                 "trade",
                 {},
             )
 
-            result = event.get(
+            event_name = event.get(
                 "event",
                 "UNKNOWN",
             )
 
-            price_now = event.get(
-                "price"
-            )
+            price_now = event.get("price")
 
             symbol = trade.get(
                 "symbol",
@@ -1252,46 +1299,26 @@ async def track_open_trades(
                 "UNKNOWN",
             )
 
-            strategy = trade.get(
+            strategy_name = trade.get(
                 "strategy",
                 "UNKNOWN",
             )
 
             message = (
                 "📊 <b>TRACKER UPDATE</b>\n\n"
-
                 f"🪙 {symbol}\n"
-
-                f"📈 Direction: "
-                f"<b>{direction}</b>\n"
-
-                f"🧠 Strategy: "
-                f"<b>{strategy}</b>\n\n"
-
-                f"💰 Current Price: "
-                f"<b>{price_now}</b>\n\n"
-
-                f"📌 Entry: "
-                f"{trade.get('entry')}\n"
-
-                f"🛑 SL: "
-                f"{trade.get('sl')}\n"
-
-                f"🎯 TP1: "
-                f"{trade.get('tp1')}\n"
-
-                f"🎯 TP2: "
-                f"{trade.get('tp2')}\n"
-
-                f"🎯 TP3: "
-                f"{trade.get('tp3')}\n\n"
-
-                f"📍 RESULT: "
-                f"<b>{result}</b>"
+                f"📈 Direction: <b>{direction}</b>\n"
+                f"🧠 Strategy: <b>{strategy_name}</b>\n\n"
+                f"💰 Current Price: <b>{price_now}</b>\n\n"
+                f"📌 Entry: {trade.get('entry')}\n"
+                f"🛑 SL: {trade.get('sl')}\n"
+                f"🎯 TP1: {trade.get('tp1')}\n"
+                f"🎯 TP2: {trade.get('tp2')}\n"
+                f"🎯 TP3: {trade.get('tp3')}\n\n"
+                f"📍 RESULT: <b>{event_name}</b>"
             )
 
-            for chat_id in chat_ids:
-
+            for chat_id in list(chat_ids):
                 try:
                     await context.bot.send_message(
                         chat_id=chat_id,
@@ -1309,7 +1336,7 @@ async def track_open_trades(
             logger.info(
                 "TRACKER | %s | %s | Price=%s",
                 symbol,
-                result,
+                event_name,
                 price_now,
             )
 
@@ -1327,23 +1354,25 @@ async def register_chat(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-    chat_ids = context.application.bot_data.setdefault(
-        "chat_ids",
-        set(),
+    chat_ids = (
+        context.application.bot_data.setdefault(
+            "chat_ids",
+            set(),
+        )
     )
 
     chat_ids.add(
         update.effective_chat.id
     )
 
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         "✅ این چت برای دریافت "
         "سیگنال‌های خودکار ثبت شد."
     )
 
 
 # ============================================================
-# TRACKER STATS
+# /STATS
 # ============================================================
 
 async def tracker_stats(
@@ -1380,7 +1409,7 @@ async def tracker_stats(
             f"{stats.get('sl', 0)}"
         )
 
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             message,
             parse_mode="HTML",
         )
@@ -1390,9 +1419,176 @@ async def tracker_stats(
             "Tracker stats error"
         )
 
-        await update.message.reply_text(
-            "❌ خطا در دریافت "
-            "آمار Tracker."
+        await update.effective_message.reply_text(
+            "❌ خطا در دریافت آمار Tracker."
+        )
+
+
+# ============================================================
+# /NEWS
+# ============================================================
+
+async def news_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    message = (
+        await update.effective_message.reply_text(
+            "📰 در حال دریافت اخبار کریپتو..."
+        )
+    )
+
+    try:
+        articles = await get_latest_news(
+            limit=8
+        )
+
+        if not articles:
+            await message.edit_text(
+                "⚠️ در حال حاضر خبری دریافت نشد.\n"
+                "ممکن است منابع RSS در دسترس نباشند."
+            )
+            return
+
+        lines = [
+            "📰 آخرین اخبار کریپتو\n"
+        ]
+
+        for index, article in enumerate(
+            articles,
+            start=1,
+        ):
+            importance = article.get(
+                "importance",
+                "NORMAL",
+            )
+
+            emoji = {
+                "CRITICAL": "🔴",
+                "HIGH": "🟠",
+                "NORMAL": "🟢",
+            }.get(
+                importance,
+                "⚪",
+            )
+
+            title = article.get(
+                "title",
+                "بدون عنوان",
+            )
+
+            source = article.get(
+                "source",
+                "Unknown",
+            )
+
+            asset = article.get(
+                "asset",
+                "UNKNOWN",
+            )
+
+            link = article.get(
+                "link",
+                "",
+            )
+
+            item = (
+                f"{index}. {emoji} {title}\n"
+                f"📡 منبع: {source}\n"
+                f"🪙 دارایی: {asset}\n"
+            )
+
+            if link.startswith(
+                ("https://", "http://")
+            ):
+                item += f"🔗 {link}\n"
+
+            lines.append(item)
+
+        output = "\n".join(lines)
+
+        if len(output) > 4000:
+            output = (
+                output[:3900]
+                + "\n\nادامه اخبار در اجرای بعدی."
+            )
+
+        await message.edit_text(
+            output,
+            disable_web_page_preview=True,
+        )
+
+    except Exception:
+        logger.exception(
+            "NEWS_COMMAND_ERROR"
+        )
+
+        await message.edit_text(
+            "❌ خطا هنگام دریافت اخبار.\n"
+            "لاگ Belmo را بررسی کن."
+        )
+
+
+# ============================================================
+# /NEWS_TEST
+# ============================================================
+
+async def news_test_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    message = (
+        await update.effective_message.reply_text(
+            "🔎 در حال آزمایش منابع خبری..."
+        )
+    )
+
+    try:
+        result = await news_diagnostics()
+
+        lines = [
+            "📊 گزارش آزمایش منابع خبری\n",
+            f"📰 مجموع اخبار: {result['total']}",
+            (
+                "🔴 اخبار CRITICAL: "
+                f"{result['critical_count']}"
+            ),
+            (
+                "🟠 اخبار HIGH: "
+                f"{result['high_count']}"
+            ),
+            "",
+            "وضعیت منابع:",
+        ]
+
+        for source, status in result["sources"].items():
+            icon = (
+                "✅"
+                if status.get("ok")
+                else "❌"
+            )
+
+            count = status.get(
+                "count",
+                0,
+            )
+
+            lines.append(
+                f"{icon} {source}: {count} خبر"
+            )
+
+        await message.edit_text(
+            "\n".join(lines)
+        )
+
+    except Exception:
+        logger.exception(
+            "NEWS_TEST_ERROR"
+        )
+
+        await message.edit_text(
+            "❌ آزمایش منابع خبری ناموفق بود.\n"
+            "لاگ Belmo را بررسی کن."
         )
 
 
@@ -1401,20 +1597,32 @@ async def tracker_stats(
 # ============================================================
 
 def main():
-
     if not TOKEN:
         raise RuntimeError(
             "BOT_TOKEN environment variable is missing."
         )
 
     logger.info("=" * 60)
+
     logger.info(
         "CryptoBot starting..."
     )
+
     logger.info(
         "Symbols to scan: %s",
         len(SYMBOLS),
     )
+
+    logger.info(
+        "Automatic scan interval: %s seconds",
+        AUTO_INTERVAL,
+    )
+
+    logger.info(
+        "Tracker interval: %s seconds",
+        TRACKER_INTERVAL,
+    )
+
     logger.info("=" * 60)
 
     application = (
@@ -1423,7 +1631,9 @@ def main():
         .build()
     )
 
-    # COMMANDS
+    # --------------------------------------------------------
+    # COMMAND HANDLERS
+    # --------------------------------------------------------
 
     application.add_handler(
         CommandHandler(
@@ -1445,6 +1655,7 @@ def main():
             signal,
         )
     )
+
     application.add_handler(
         CommandHandler(
             "register",
@@ -1473,22 +1684,35 @@ def main():
         )
     )
 
-    # TRADE TRACKER
+    # --------------------------------------------------------
+    # TRACKER SCHEDULE
+    # --------------------------------------------------------
 
     application.job_queue.run_repeating(
         track_open_trades,
-        interval=30,
-        first=30,
+        interval=TRACKER_INTERVAL,
+        first=TRACKER_INTERVAL,
     )
 
     logger.info(
-        "Trade tracker started: "
-        "every 30 seconds"
+        "Trade tracker scheduled every %s seconds",
+        TRACKER_INTERVAL,
+    )
+
+    # --------------------------------------------------------
+    # AUTOMATIC SCANNER SCHEDULE
+    # --------------------------------------------------------
+
+    application.job_queue.run_repeating(
+        auto_signal,
+        interval=AUTO_INTERVAL,
+        first=60,
     )
 
     logger.info(
-        "Auto signal scanner started: "
-        "every 5 minutes"
+        "Automatic signal scanner scheduled "
+        "every %s seconds",
+        AUTO_INTERVAL,
     )
 
     logger.info(
@@ -1499,120 +1723,10 @@ def main():
         drop_pending_updates=True
     )
 
+
 # ============================================================
 # ENTRY POINT
 # ============================================================
 
 if __name__ == "__main__":
     main()
-# ============================================================
-# NEWS COMMAND
-# ============================================================
-
-async def news_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-    message = await update.effective_message.reply_text(
-        "📰 در حال دریافت اخبار کریپتو..."
-    )
-
-    try:
-        articles = await get_latest_news(limit=8)
-
-        if not articles:
-            await message.edit_text(
-                "⚠️ در حال حاضر خبری دریافت نشد.\n"
-                "ممکن است منابع RSS در دسترس نباشند."
-            )
-            return
-
-        lines = ["📰 آخرین اخبار کریپتو\n"]
-
-        for index, article in enumerate(articles, start=1):
-            importance = article.get(
-                "importance", "NORMAL"
-            )
-
-            emoji = {
-                "CRITICAL": "🔴",
-                "HIGH": "🟠",
-                "NORMAL": "🟢",
-            }.get(importance, "⚪")
-
-            title = article.get("title", "بدون عنوان")
-            source = article.get("source", "Unknown")
-            asset = article.get("asset", "UNKNOWN")
-            link = article.get("link", "")
-
-            item = (
-                f"{index}. {emoji} {title}\n"
-                f"📡 منبع: {source}\n"
-                f"🪙 دارایی: {asset}\n"
-            )
-
-            if link.startswith(("https://", "http://")):
-                item += f"🔗 {link}\n"
-
-            lines.append(item)
-
-        output = "\n".join(lines)
-
-        # Telegram messages have a maximum length.
-        if len(output) > 4000:
-            output = output[:3900] + "\n\nادامه اخبار در اجرای بعدی."
-
-        await message.edit_text(
-            output,
-            disable_web_page_preview=True,
-        )
-
-    except Exception:
-        logging.exception("NEWS_COMMAND_ERROR")
-
-        await message.edit_text(
-            "❌ خطا هنگام دریافت اخبار.\n"
-            "لاگ Belmo را بررسی کن."
-        )
-
-
-# ============================================================
-# NEWS DIAGNOSTICS COMMAND
-# ============================================================
-
-async def news_test_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-    message = await update.effective_message.reply_text(
-        "🔎 در حال آزمایش منابع خبری..."
-    )
-
-    try:
-        result = await news_diagnostics()
-
-        lines = [
-            "📊 گزارش آزمایش منابع خبری\n",
-            f"📰 مجموع اخبار: {result['total']}",
-            f"🔴 اخبار CRITICAL: {result['critical_count']}",
-            f"🟠 اخبار HIGH: {result['high_count']}",
-            "",
-            "وضعیت منابع:",
-        ]
-
-        for source, status in result["sources"].items():
-            icon = "✅" if status["ok"] else "❌"
-
-            lines.append(
-                f"{icon} {source}: {status['count']} خبر"
-            )
-
-        await message.edit_text("\n".join(lines))
-
-    except Exception:
-        logging.exception("NEWS_TEST_ERROR")
-
-        await message.edit_text(
-            "❌ آزمایش منابع خبری ناموفق بود.\n"
-            "لاگ Belmo را بررسی کن."
-)
