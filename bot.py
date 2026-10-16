@@ -1439,7 +1439,7 @@ def main():
         )
     )
 
-    application.add_handler(
+        application.add_handler(
         CommandHandler(
             "signal",
             signal,
@@ -1452,6 +1452,7 @@ def main():
             register_chat,
         )
     )
+
     application.add_handler(
         CommandHandler(
             "stats",
@@ -1460,12 +1461,19 @@ def main():
     )
 
     application.add_handler(
-        CommandHandler("news", news_command)
+        CommandHandler(
+            "news",
+            news_command,
+        )
     )
 
     application.add_handler(
-        CommandHandler("news_test", news_test_command)
-)
+        CommandHandler(
+            "news_test",
+            news_test_command,
+        )
+    )
+
     # TRADE TRACKER
 
     application.job_queue.run_repeating(
@@ -1491,7 +1499,6 @@ def main():
     application.run_polling(
         drop_pending_updates=True
     )
-
 
 # ============================================================
 # ENTRY POINT
