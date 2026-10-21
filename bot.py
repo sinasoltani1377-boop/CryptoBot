@@ -8,15 +8,12 @@ import requests
 from datetime import datetime, timezone
 
 from news import get_latest_news, news_diagnostics
-
 from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    ContextTypes,
-)
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 from analysis import generate_signal
+from btc_context import fetch_btc_context
+from watchlist import get_symbols
 from market import get_futures_symbols
 
 from tracker import (
@@ -33,23 +30,12 @@ from tracker import (
 
 TOKEN = os.getenv("BOT_TOKEN")
 
-TOOBIT_KLINES_URL = (
-    "https://api.toobit.com/quote/v1/klines"
-)
-
-TOOBIT_TICKER_URL = (
-    "https://api.toobit.com/quote/v1/contract/ticker/price"
-)
-
-TOOBIT_TICKER_24H_URL = (
-    "https://api.toobit.com/quote/v1/contract/ticker/24hr"
-)
+TOOBIT_KLINES_URL = "https://api.toobit.com/quote/v1/klines"
+TOOBIT_TICKER_URL = "https://api.toobit.com/quote/v1/contract/ticker/price"
+TOOBIT_TICKER_24H_URL = "https://api.toobit.com/quote/v1/contract/ticker/24hr"
 
 AUTO_INTERVAL = 300
 TRACKER_INTERVAL = 30
-
-MIN_VOLUME_USDT = 50_000_000
-MAX_SYMBOLS = 30
 
 NEWS_BLOCK_MINUTES = 120
 NEWS_FETCH_LIMIT = 50
@@ -57,30 +43,17 @@ NEWS_FETCH_LIMIT = 50
 DEFAULT_LEVERAGE = 20
 DEFAULT_MARGIN_USDT = 10.0
 
-BTC_TREND_CACHE_SECONDS = 300
-
 _scan_lock = asyncio.Lock()
-
-_btc_trend_cache = {
-    "time": 0.0,
-    "trend": "UNKNOWN",
-}
-
 
 # ============================================================
 # LOGGING
 # ============================================================
 
 logging.basicConfig(
-    format=(
-        "%(asctime)s - %(name)s - "
-        "%(levelname)s - %(message)s"
-    ),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
-
 logger = logging.getLogger(__name__)
-
 
 # ============================================================
 # BASIC HELPERS
@@ -90,182 +63,36 @@ def safe_number(value, default=None):
     try:
         if value is None:
             return default
-
         number = float(value)
-
         if not math.isfinite(number):
             return default
-
         return number
-
     except (TypeError, ValueError, OverflowError):
         return default
 
-
 def display_number(value, decimals=8):
     number = safe_number(value)
-
     if number is None:
         return "N/A"
-
     return f"{number:.{decimals}f}".rstrip("0").rstrip(".")
-
 
 def safe_text(value, default="N/A"):
     if value is None:
         return default
-
     return html.escape(str(value))
-
 
 def safe_list(value):
     if isinstance(value, (list, tuple, set)):
         return list(value)
-
     if value is None:
         return []
-
     return [value]
 
-
 # ============================================================
-# SYMBOLS
+# SYMBOLS (Now using watchlist.py)
 # ============================================================
 
-def load_symbols(
-    min_volume_usdt=10_000_000,
-    max_symbols=30,
-):
-    try:
-        all_symbols = get_futures_symbols()
-
-        if not all_symbols:
-            logger.warning(
-                "No symbols returned from Toobit"
-            )
-            return []
-
-        logger.info(
-            "Fetched %s symbols from Toobit",
-            len(all_symbols),
-        )
-
-        candidates = []
-
-        for symbol in all_symbols:
-            try:
-                response = requests.get(
-                    TOOBIT_TICKER_24H_URL,
-                    params={"symbol": symbol},
-                    timeout=5,
-                )
-
-                if response.status_code != 200:
-                    continue
-
-                data = response.json()
-                volume = 0.0
-
-                if isinstance(data, dict):
-                    raw = (
-                        data.get("quoteVolume")
-                        or data.get("volume")
-                        or data.get("q")
-                        or data.get("v")
-                        or 0
-                    )
-
-                    volume = float(raw) if raw else 0.0
-
-                elif isinstance(data, list):
-                    for item in data:
-                        if not isinstance(item, dict):
-                            continue
-
-                        item_symbol = (
-                            item.get("symbol")
-                            or item.get("s")
-                        )
-
-                        if (
-                            item_symbol
-                            and item_symbol != symbol
-                        ):
-                            continue
-
-                        raw = (
-                            item.get("quoteVolume")
-                            or item.get("volume")
-                            or item.get("q")
-                            or item.get("v")
-                            or 0
-                        )
-
-                        volume = (
-                            float(raw) if raw else 0.0
-                        )
-                        break
-
-                if volume >= min_volume_usdt:
-                    candidates.append(
-                        (symbol, volume)
-                    )
-
-            except Exception:
-                logger.debug(
-                    "Volume check failed for %s",
-                    symbol,
-                    exc_info=True,
-                )
-                continue
-
-        candidates.sort(
-            key=lambda item: item[1],
-            reverse=True,
-        )
-
-        selected = [
-            symbol
-            for symbol, _ in candidates[:max_symbols]
-        ]
-
-        logger.info(
-            "Filtered %s/%s symbols, selected top %s",
-            len(candidates),
-            len(all_symbols),
-            len(selected),
-        )
-
-        if selected:
-            return selected
-
-        logger.warning(
-            "No symbols passed liquidity filter. "
-            "Using fallback symbols."
-        )
-
-    except Exception:
-        logger.exception("Failed to load symbols")
-
-    return [
-        "BTC-SWAP-USDT",
-        "ETH-SWAP-USDT",
-        "SOL-SWAP-USDT",
-        "BNB-SWAP-USDT",
-        "XRP-SWAP-USDT",
-        "DOGE-SWAP-USDT",
-        "ADA-SWAP-USDT",
-        "AVAX-SWAP-USDT",
-        "LINK-SWAP-USDT",
-        "DOT-SWAP-USDT",
-    ]
-
-
-SYMBOLS = load_symbols(
-    min_volume_usdt=MIN_VOLUME_USDT,
-    max_symbols=MAX_SYMBOLS,
-)
-
+SYMBOLS = get_symbols()
 
 INTERVALS = {
     "1d": "1d",
@@ -275,7 +102,6 @@ INTERVALS = {
     "5m": "5m",
 }
 
-
 # ============================================================
 # CANDLE NORMALIZATION
 # ============================================================
@@ -283,161 +109,76 @@ INTERVALS = {
 def normalize_candle(candle):
     if isinstance(candle, dict):
         return {
-            "timestamp": (
-                candle.get("timestamp")
-                or candle.get("time")
-                or candle.get("t")
-            ),
-            "open": safe_number(
-                candle.get("open", candle.get("o"))
-            ),
-            "high": safe_number(
-                candle.get("high", candle.get("h"))
-            ),
-            "low": safe_number(
-                candle.get("low", candle.get("l"))
-            ),
-            "close": safe_number(
-                candle.get("close", candle.get("c"))
-            ),
-            "volume": safe_number(
-                candle.get("volume", candle.get("v"))
-            ),
+            "timestamp": candle.get("timestamp") or candle.get("time") or candle.get("t"),
+            "open": safe_number(candle.get("open", candle.get("o"))),
+            "high": safe_number(candle.get("high", candle.get("h"))),
+            "low": safe_number(candle.get("low", candle.get("l"))),
+            "close": safe_number(candle.get("close", candle.get("c"))),
+            "volume": safe_number(candle.get("volume", candle.get("v"))),
         }
-
     if isinstance(candle, (list, tuple)):
         if len(candle) < 5:
             return None
-
         return {
             "timestamp": candle[0],
             "open": safe_number(candle[1]),
             "high": safe_number(candle[2]),
             "low": safe_number(candle[3]),
             "close": safe_number(candle[4]),
-            "volume": (
-                safe_number(candle[5])
-                if len(candle) > 5
-                else None
-            ),
+            "volume": safe_number(candle[5]) if len(candle) > 5 else None,
         }
-
     return None
-
 
 def extract_candle_rows(data):
     if isinstance(data, list):
         return data
-
     if isinstance(data, dict):
-        for key in (
-            "data",
-            "result",
-            "rows",
-            "klines",
-            "candles",
-        ):
+        for key in ("data", "result", "rows", "klines", "candles"):
             value = data.get(key)
-
             if isinstance(value, list):
                 return value
-
             if isinstance(value, dict):
-                for nested_key in (
-                    "data",
-                    "rows",
-                    "klines",
-                    "candles",
-                ):
+                for nested_key in ("data", "rows", "klines", "candles"):
                     nested = value.get(nested_key)
-
                     if isinstance(nested, list):
                         return nested
-
     return []
-
 
 def normalize_candles(data):
     rows = extract_candle_rows(data)
     candles = []
-
     for row in rows:
         candle = normalize_candle(row)
-
         if candle is None:
             continue
-
-        required = (
-            "open",
-            "high",
-            "low",
-            "close",
-        )
-
-        if any(
-            candle.get(key) is None
-            for key in required
-        ):
+        required = ("open", "high", "low", "close")
+        if any(candle.get(key) is None for key in required):
             continue
-
-        if (
-            candle["high"] < candle["low"]
-            or candle["high"] <= 0
-            or candle["low"] <= 0
-            or candle["close"] <= 0
-        ):
+        if (candle["high"] < candle["low"] or candle["high"] <= 0 or candle["low"] <= 0 or candle["close"] <= 0):
             continue
-
         candles.append(candle)
-
     return candles
-
 
 # ============================================================
 # TOOBIT MARKET DATA
 # ============================================================
 
-def get_klines(
-    symbol,
-    interval,
-    limit=200,
-):
+def get_klines(symbol, interval, limit=200):
     try:
         response = requests.get(
             TOOBIT_KLINES_URL,
-            params={
-                "symbol": symbol,
-                "interval": interval,
-                "limit": limit,
-            },
+            params={"symbol": symbol, "interval": interval, "limit": limit},
             timeout=15,
         )
-
         response.raise_for_status()
-
-        candles = normalize_candles(
-            response.json()
-        )
-
+        candles = normalize_candles(response.json())
         if len(candles) < 50:
-            logger.warning(
-                "%s %s: insufficient candles: %s",
-                symbol,
-                interval,
-                len(candles),
-            )
+            logger.warning("%s %s: insufficient candles: %s", symbol, interval, len(candles))
             return []
-
         return candles
-
     except Exception:
-        logger.exception(
-            "Kline error %s %s",
-            symbol,
-            interval,
-        )
+        logger.exception("Kline error %s %s", symbol, interval)
         return []
-
 
 def get_market_data(symbol):
     daily = get_klines(symbol, INTERVALS["1d"], 200)
@@ -447,20 +188,10 @@ def get_market_data(symbol):
     m5 = get_klines(symbol, INTERVALS["5m"], 200)
 
     if not all((daily, h4, h1, m15, m5)):
-        logger.warning(
-            "MARKET_DATA_INCOMPLETE | %s",
-            symbol,
-        )
+        logger.warning("MARKET_DATA_INCOMPLETE | %s", symbol)
         return None
 
-    return {
-        "1d": daily,
-        "4h": h4,
-        "1h": h1,
-        "15m": m15,
-        "5m": m5,
-    }
-
+    return {"1d": daily, "4h": h4, "1h": h1, "15m": m15, "5m": m5}
 
 # ============================================================
 # PRICE
@@ -468,23 +199,12 @@ def get_market_data(symbol):
 
 def get_price(symbol):
     try:
-        response = requests.get(
-            TOOBIT_TICKER_URL,
-            params={"symbol": symbol},
-            timeout=10,
-        )
-
+        response = requests.get(TOOBIT_TICKER_URL, params={"symbol": symbol}, timeout=10)
         response.raise_for_status()
         data = response.json()
 
         if isinstance(data, dict):
-            price_value = (
-                data.get("p")
-                or data.get("price")
-                or data.get("lastPrice")
-                or data.get("last")
-            )
-
+            price_value = data.get("p") or data.get("price") or data.get("lastPrice") or data.get("last")
             if price_value is not None:
                 return float(price_value)
 
@@ -492,197 +212,45 @@ def get_price(symbol):
             for item in data:
                 if not isinstance(item, dict):
                     continue
-
-                item_symbol = (
-                    item.get("symbol")
-                    or item.get("s")
-                )
-
-                if (
-                    item_symbol is not None
-                    and item_symbol != symbol
-                ):
+                item_symbol = item.get("symbol") or item.get("s")
+                if item_symbol is not None and item_symbol != symbol:
                     continue
-
-                price_value = (
-                    item.get("p")
-                    or item.get("price")
-                    or item.get("lastPrice")
-                    or item.get("last")
-                )
-
+                price_value = item.get("p") or item.get("price") or item.get("lastPrice") or item.get("last")
                 if price_value is not None:
                     return float(price_value)
 
-        logger.warning(
-            "PRICE API | %s | Price not found",
-            symbol,
-        )
-
+        logger.warning("PRICE API | %s | Price not found", symbol)
         return None
-
     except Exception:
         logger.exception("Price error %s", symbol)
         return None
-
 
 # ============================================================
 # PROFIT / ROI ESTIMATION
 # ============================================================
 
-def calculate_trade_roi(
-    direction,
-    entry,
-    target,
-    leverage=DEFAULT_LEVERAGE,
-    margin=DEFAULT_MARGIN_USDT,
-):
-    """
-    تخمین سود ناخالص با مارجین مشخص و اهرم مشخص.
-    کارمزد، فاندینگ و اسلیپیج محاسبه نمی‌شوند.
-    """
-
+def calculate_trade_roi(direction, entry, target, leverage=DEFAULT_LEVERAGE, margin=DEFAULT_MARGIN_USDT):
     entry = safe_number(entry)
     target = safe_number(target)
     leverage = safe_number(leverage)
     margin = safe_number(margin)
 
-    if (
-        entry is None
-        or target is None
-        or leverage is None
-        or margin is None
-        or entry <= 0
-        or target <= 0
-        or leverage <= 0
-        or margin <= 0
-    ):
+    if (entry is None or target is None or leverage is None or margin is None or entry <= 0 or target <= 0 or leverage <= 0 or margin <= 0):
         return None
 
     direction = str(direction).upper()
 
     if direction == "LONG":
-        price_change_pct = (
-            (target - entry) / entry
-        ) * 100
-
+        price_change_pct = ((target - entry) / entry) * 100
     elif direction == "SHORT":
-        price_change_pct = (
-            (entry - target) / entry
-        ) * 100
-
+        price_change_pct = ((entry - target) / entry) * 100
     else:
         return None
 
     roi_pct = price_change_pct * leverage
     pnl_usdt = margin * roi_pct / 100
 
-    return {
-        "price_change_pct": price_change_pct,
-        "roi_pct": roi_pct,
-        "pnl_usdt": pnl_usdt,
-    }
-
-
-def classify_candle_trend(candles):
-    if not isinstance(candles, list):
-        return "UNKNOWN"
-
-    closes = [
-        safe_number(c.get("close"))
-        for c in candles
-        if isinstance(c, dict)
-    ]
-
-    closes = [
-        value
-        for value in closes
-        if value is not None and value > 0
-    ]
-
-    if len(closes) < 50:
-        return "UNKNOWN"
-
-    recent = closes[-50:]
-
-    sma20 = sum(recent[-20:]) / 20
-    sma50 = sum(recent) / 50
-    last_close = recent[-1]
-
-    if last_close > sma20 > sma50:
-        return "BULLISH"
-
-    if last_close < sma20 < sma50:
-        return "BEARISH"
-
-    return "RANGE"
-
-
-def get_btc_trend():
-    now = datetime.now(timezone.utc).timestamp()
-
-    cached_time = _btc_trend_cache.get("time", 0.0)
-
-    if (
-        now - cached_time < BTC_TREND_CACHE_SECONDS
-        and _btc_trend_cache.get("trend") != "UNKNOWN"
-    ):
-        return _btc_trend_cache["trend"]
-
-    try:
-        daily = get_klines(
-            "BTC-SWAP-USDT",
-            "1d",
-            100,
-        )
-
-        h4 = get_klines(
-            "BTC-SWAP-USDT",
-            "4h",
-            100,
-        )
-
-        if not daily or not h4:
-            trend = "UNKNOWN"
-        else:
-            daily_trend = classify_candle_trend(daily)
-            h4_trend = classify_candle_trend(h4)
-
-            if (
-                daily_trend == "BULLISH"
-                and h4_trend == "BULLISH"
-            ):
-                trend = "BULLISH"
-
-            elif (
-                daily_trend == "BEARISH"
-                and h4_trend == "BEARISH"
-            ):
-                trend = "BEARISH"
-
-            elif (
-                daily_trend == "RANGE"
-                and h4_trend == "RANGE"
-            ):
-                trend = "RANGE"
-
-            else:
-                trend = "MIXED"
-
-        _btc_trend_cache["time"] = now
-        _btc_trend_cache["trend"] = trend
-
-        logger.info(
-            "BTC_TREND | %s",
-            trend,
-        )
-
-        return trend
-
-    except Exception:
-        logger.exception("BTC trend calculation error")
-        return "UNKNOWN"
-
+    return {"price_change_pct": price_change_pct, "roi_pct": roi_pct, "pnl_usdt": pnl_usdt}
 
 def add_signal_context(result):
     if not isinstance(result, dict):
@@ -691,440 +259,183 @@ def add_signal_context(result):
     result["leverage"] = DEFAULT_LEVERAGE
     result["margin_usdt"] = DEFAULT_MARGIN_USDT
 
-    btc_trend = get_btc_trend()
-    direction = str(
-        result.get("direction") or ""
-    ).upper()
-
-    result["btc_trend"] = btc_trend
-
-    if btc_trend == "UNKNOWN":
-        alignment = "UNKNOWN"
-
-    elif btc_trend in ("RANGE", "MIXED"):
-        alignment = "NEUTRAL"
-
-    elif (
-        btc_trend == "BULLISH"
-        and direction == "LONG"
-    ):
-        alignment = "ALIGNED"
-
-    elif (
-        btc_trend == "BEARISH"
-        and direction == "SHORT"
-    ):
-        alignment = "ALIGNED"
-
-    elif direction in ("LONG", "SHORT"):
-        alignment = "AGAINST"
-
-    else:
-        alignment = "UNKNOWN"
-
-    result["btc_alignment"] = alignment
-
     entry = result.get("entry")
     direction = result.get("direction")
-
     roi = {}
 
     for label in ("tp1", "tp2", "tp3", "sl"):
-        roi[label] = calculate_trade_roi(
-            direction,
-            entry,
-            result.get(label),
-        )
+        roi[label] = calculate_trade_roi(direction, entry, result.get(label))
 
     result["leverage_roi"] = roi
-
     return result
-
 
 def roi_line(label, roi_data):
     if not isinstance(roi_data, dict):
         return f"{label}: N/A"
-
     roi = safe_number(roi_data.get("roi_pct"))
     pnl = safe_number(roi_data.get("pnl_usdt"))
-
     if roi is None or pnl is None:
         return f"{label}: N/A"
-
-    return (
-        f"{label}: {roi:+.2f}% "
-        f"({pnl:+.2f} USDT)"
-    )
-
+    return f"{label}: {roi:+.2f}% ({pnl:+.2f} USDT)"
 
 # ============================================================
 # CRITICAL NEWS FILTER
 # ============================================================
 
 BEARISH_NEWS_TERMS = (
-    "market crash",
-    "crypto crash",
-    "bitcoin crashes",
-    "bitcoin plunges",
-    "market plunges",
-    "liquidation cascade",
-    "flash crash",
-    "stablecoin depeg",
-    "stablecoin collapse",
-    "exchange hacked",
-    "exchange hack",
-    "major crypto hack",
-    "security breach",
-    "bankruptcy",
-    "insolvency",
-    "etf rejected",
-    "etf rejection",
-    "sec rejects",
-    "higher than expected",
-    "hotter than expected",
-    "above expectations",
-    "above forecast",
-    "unexpectedly high",
-    "inflation accelerates",
-    "inflation hotter",
-    "ppi jumps",
-    "cpi jumps",
-    "producer prices surge",
+    "market crash", "crypto crash", "bitcoin crashes", "bitcoin plunges", "market plunges",
+    "liquidation cascade", "flash crash", "stablecoin depeg", "stablecoin collapse",
+    "exchange hacked", "exchange hack", "major crypto hack", "security breach", "bankruptcy",
+    "insolvency", "etf rejected", "etf rejection", "sec rejects", "higher than expected",
+    "hotter than expected", "above expectations", "above forecast", "unexpectedly high",
+    "inflation accelerates", "inflation hotter", "ppi jumps", "cpi jumps", "producer prices surge",
     "inflation surges",
 )
 
 BULLISH_NEWS_TERMS = (
-    "market-wide rally",
-    "crypto market surges",
-    "bitcoin surges",
-    "bitcoin rallies",
-    "lower than expected inflation",
-    "cooler than expected",
-    "below expectations",
-    "below forecast",
-    "inflation cools",
-    "inflation slows",
-    "unexpected rate cut",
-    "fed cuts rates",
-    "spot bitcoin etf approved",
-    "spot ethereum etf approved",
-    "sec approves spot etf",
+    "market-wide rally", "crypto market surges", "bitcoin surges", "bitcoin rallies",
+    "lower than expected inflation", "cooler than expected", "below expectations",
+    "below forecast", "inflation cools", "inflation slows", "unexpected rate cut",
+    "fed cuts rates", "spot bitcoin etf approved", "spot ethereum etf approved", "sec approves spot etf",
 )
 
-MACRO_TERMS = (
-    "ppi",
-    "cpi",
-    "inflation",
-    "producer price",
-    "consumer price",
-    "federal reserve",
-    "federal funds rate",
-    "interest rate",
-    "fed decision",
-    "rate decision",
-)
+MACRO_TERMS = ("ppi", "cpi", "inflation", "producer price", "consumer price", "federal reserve", "federal funds rate", "interest rate", "fed decision", "rate decision")
 
 MACRO_SURPRISE_TERMS = (
-    "higher than expected",
-    "hotter than expected",
-    "above expectations",
-    "above forecast",
-    "unexpectedly high",
-    "inflation accelerates",
-    "inflation hotter",
-    "ppi jumps",
-    "cpi jumps",
-    "producer prices surge",
-    "lower than expected inflation",
-    "cooler than expected",
-    "below expectations",
-    "below forecast",
-    "inflation cools",
-    "inflation slows",
-    "unexpected rate cut",
+    "higher than expected", "hotter than expected", "above expectations", "above forecast",
+    "unexpectedly high", "inflation accelerates", "inflation hotter", "ppi jumps", "cpi jumps",
+    "producer prices surge", "lower than expected inflation", "cooler than expected",
+    "below expectations", "below forecast", "inflation cools", "inflation slows", "unexpected rate cut",
 )
 
 CRITICAL_EVENT_TERMS = (
-    "exchange hacked",
-    "exchange hack",
-    "major crypto hack",
-    "security breach",
-    "stablecoin depeg",
-    "stablecoin collapse",
-    "liquidation cascade",
-    "flash crash",
-    "market crash",
-    "crypto crash",
-    "bitcoin plunges",
-    "bitcoin crashes",
-    "bankruptcy",
-    "insolvency",
+    "exchange hacked", "exchange hack", "major crypto hack", "security breach", "stablecoin depeg",
+    "stablecoin collapse", "liquidation cascade", "flash crash", "market crash", "crypto crash",
+    "bitcoin plunges", "bitcoin crashes", "bankruptcy", "insolvency",
 )
 
-BULLISH_CRITICAL_TERMS = (
-    "spot bitcoin etf approved",
-    "spot ethereum etf approved",
-    "sec approves spot etf",
-    "unexpected rate cut",
-    "fed cuts rates",
-)
+BULLISH_CRITICAL_TERMS = ("spot bitcoin etf approved", "spot ethereum etf approved", "sec approves spot etf", "unexpected rate cut", "fed cuts rates")
 
 BEARISH_CRITICAL_TERMS = (
-    "etf rejected",
-    "etf rejection",
-    "sec rejects",
-    "market crash",
-    "crypto crash",
-    "bitcoin plunges",
-    "bitcoin crashes",
-    "liquidation cascade",
-    "flash crash",
-    "stablecoin depeg",
-    "stablecoin collapse",
-    "exchange hacked",
-    "exchange hack",
-    "major crypto hack",
-    "security breach",
-    "bankruptcy",
-    "insolvency",
+    "etf rejected", "etf rejection", "sec rejects", "market crash", "crypto crash", "bitcoin plunges",
+    "bitcoin crashes", "liquidation cascade", "flash crash", "stablecoin depeg", "stablecoin collapse",
+    "exchange hacked", "exchange hack", "major crypto hack", "security breach", "bankruptcy", "insolvency",
 )
-
 
 def article_datetime(article):
     published = article.get("published")
-
     if not published:
         return None
-
     try:
         value = str(published).strip()
-
         if value.endswith("Z"):
             value = value[:-1] + "+00:00"
-
         parsed = datetime.fromisoformat(value)
-
         if parsed.tzinfo is None:
-            parsed = parsed.replace(
-                tzinfo=timezone.utc
-            )
-
+            parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed.astimezone(timezone.utc)
-
     except (TypeError, ValueError):
         return None
-
 
 def article_text(article):
     title = str(article.get("title") or "")
     summary = str(article.get("summary") or "")
-
     return f"{title} {summary}".lower()
-
 
 def contains_any(text, terms):
     return any(term in text for term in terms)
 
-
 def is_market_wide_news(text):
     market_terms = (
-        "crypto market",
-        "cryptocurrency market",
-        "global crypto",
-        "bitcoin crash",
-        "bitcoin plunges",
-        "market crash",
-        "crypto crash",
-        "liquidation cascade",
-        "flash crash",
-        "federal reserve",
-        "interest rate",
-        "rate decision",
-        "inflation",
-        "producer price",
-        "consumer price",
-        "ppi",
-        "cpi",
+        "crypto market", "cryptocurrency market", "global crypto", "bitcoin crash", "bitcoin plunges",
+        "market crash", "crypto crash", "liquidation cascade", "flash crash", "federal reserve",
+        "interest rate", "rate decision", "inflation", "producer price", "consumer price", "ppi", "cpi",
     )
-
     return contains_any(text, market_terms)
-
 
 def news_direction(text):
     bearish = contains_any(text, BEARISH_NEWS_TERMS)
     bullish = contains_any(text, BULLISH_NEWS_TERMS)
-
     if bearish and not bullish:
         return "BEARISH"
-
     if bullish and not bearish:
         return "BULLISH"
-
     return None
-
 
 def is_critical_news(text, importance):
     if contains_any(text, CRITICAL_EVENT_TERMS):
         return True
-
     macro_news = contains_any(text, MACRO_TERMS)
     macro_surprise = contains_any(text, MACRO_SURPRISE_TERMS)
-
     if macro_news and macro_surprise:
         return True
-
     if contains_any(text, BULLISH_CRITICAL_TERMS):
         return True
-
     if contains_any(text, BEARISH_CRITICAL_TERMS):
         return True
-
-    return (
-        importance == "CRITICAL"
-        and news_direction(text) is not None
-    )
-
+    return importance == "CRITICAL" and news_direction(text) is not None
 
 def news_applies_to_symbol(article, symbol, text):
     if is_market_wide_news(text):
         return True
-
-    asset = str(
-        article.get("asset") or "UNKNOWN"
-    ).upper()
-
+    asset = str(article.get("asset") or "UNKNOWN").upper()
     symbol_upper = symbol.upper()
-
     if asset == "MARKET":
         return True
-
     if asset == "BTC":
         return "BTC" in symbol_upper
-
     if asset == "ETH":
         return "ETH" in symbol_upper
-
     return False
-
 
 async def check_critical_news(symbol, direction):
     if direction not in ("LONG", "SHORT"):
         return False, "فیلتر خبر رد شد: جهت نامعتبر است."
-
     try:
-        articles = await get_latest_news(
-            limit=NEWS_FETCH_LIMIT
-        )
-
+        articles = await get_latest_news(limit=NEWS_FETCH_LIMIT)
         if not articles:
-            logger.warning(
-                "NEWS_FILTER_UNAVAILABLE | %s | No articles",
-                symbol,
-            )
-
-            return (
-                False,
-                "⚠️ اخبار در دسترس نیست؛ "
-                "فیلتر خبری بررسی کامل انجام نداد.",
-            )
-
+            logger.warning("NEWS_FILTER_UNAVAILABLE | %s | No articles", symbol)
+            return False, "⚠️ اخبار در دسترس نیست؛ فیلتر خبری بررسی کامل انجام نداد."
+        
         now = datetime.now(timezone.utc)
-
         for article in articles:
             if not isinstance(article, dict):
                 continue
-
             published_at = article_datetime(article)
-
             if published_at is None:
                 continue
-
-            age_minutes = (
-                now - published_at
-            ).total_seconds() / 60
-
-            if age_minutes < 0:
+            age_minutes = (now - published_at).total_seconds() / 60
+            if age_minutes < 0 or age_minutes > NEWS_BLOCK_MINUTES:
                 continue
-
-            if age_minutes > NEWS_BLOCK_MINUTES:
-                continue
-
+            
             text = article_text(article)
-
-            importance = str(
-                article.get("importance") or "NORMAL"
-            ).upper()
-
+            importance = str(article.get("importance") or "NORMAL").upper()
+            
             if not is_critical_news(text, importance):
                 continue
-
-            if not news_applies_to_symbol(
-                article,
-                symbol,
-                text,
-            ):
+            if not news_applies_to_symbol(article, symbol, text):
                 continue
-
+            
             direction_of_news = news_direction(text)
-
             if direction_of_news is None:
                 continue
-
-            conflict = (
-                direction == "LONG"
-                and direction_of_news == "BEARISH"
-            ) or (
-                direction == "SHORT"
-                and direction_of_news == "BULLISH"
-            )
-
+            
+            conflict = (direction == "LONG" and direction_of_news == "BEARISH") or (direction == "SHORT" and direction_of_news == "BULLISH")
             if not conflict:
                 continue
-
-            title = str(
-                article.get("title") or "Critical news"
-            )
-
-            source = str(
-                article.get("source") or "Unknown"
-            )
-
-            logger.warning(
-                "SIGNAL_BLOCKED_BY_NEWS | %s | "
-                "Direction=%s | NewsDirection=%s | "
-                "AgeMinutes=%.1f | Source=%s | Title=%s",
-                symbol,
-                direction,
-                direction_of_news,
-                age_minutes,
-                source,
-                title,
-            )
-
-            return (
-                True,
-                "⛔ سیگنال به دلیل خبر بحرانی متناقض مسدود شد.\n"
-                f"جهت معامله: {direction}\n"
-                f"جهت خبر: {direction_of_news}\n"
-                f"خبر: {title}",
-            )
-
-        logger.info(
-            "NEWS_FILTER_PASS | %s | Direction=%s",
-            symbol,
-            direction,
-        )
-
+            
+            title = str(article.get("title") or "Critical news")
+            source = str(article.get("source") or "Unknown")
+            
+            logger.warning("SIGNAL_BLOCKED_BY_NEWS | %s | Direction=%s | NewsDirection=%s | Age=%.1f | Source=%s | Title=%s",
+                symbol, direction, direction_of_news, age_minutes, source, title)
+            return True, f"⛔ سیگنال به دلیل خبر بحرانی متناقض مسدود شد.\nجهت معامله: {direction}\nجهت خبر: {direction_of_news}\nخبر: {title}"
+        
+        logger.info("NEWS_FILTER_PASS | %s | Direction=%s", symbol, direction)
         return False, "✅ خبر بحرانی متناقض شناسایی نشد."
-
     except Exception:
-        logger.exception(
-            "NEWS_FILTER_ERROR | %s",
-            symbol,
-        )
-
+        logger.exception("NEWS_FILTER_ERROR | %s", symbol)
         return False, "⚠️ فیلتر خبری موقتاً در دسترس نیست."
-
 
 # ============================================================
 # TRACKER HELPERS
@@ -1133,61 +444,35 @@ async def check_critical_news(symbol, direction):
 def already_tracking(symbol, direction):
     try:
         open_trades = get_open_trades()
-
         for trade in open_trades:
-            if (
-                trade.get("symbol") == symbol
-                and str(
-                    trade.get("direction", "")
-                ).upper() == direction
-            ):
+            if trade.get("symbol") == symbol and str(trade.get("direction", "")).upper() == direction:
                 return True
-
         return False
-
     except Exception:
-        logger.exception(
-            "Tracker duplicate-check error"
-        )
+        logger.exception("Tracker duplicate-check error")
         return False
-
 
 def is_valid_high_signal(result):
     if not isinstance(result, dict):
         return False
-
     if str(result.get("quality", "")).upper() != "HIGH":
         return False
 
-    direction = str(
-        result.get("direction") or ""
-    ).upper()
-
-    signal_value = str(
-        result.get("signal") or ""
-    ).upper()
-
+    direction = str(result.get("direction") or "").upper()
+    signal_value = str(result.get("signal") or "").upper()
     score = safe_number(result.get("score"))
 
-    if direction not in ("LONG", "SHORT"):
+    if direction not in ("LONG", "SHORT") or signal_value != direction:
         return False
 
-    if signal_value != direction:
+    # اصلاح: سقف Score حذف شد چون در v18 امتیازها ممکن است از ۱۲ بیشتر شوند
+    if score is None or score < 10:
         return False
 
-    if score is None or not (10 <= score <= 12):
-        return False
-
-    # Entry, SL and all targets must be positive numbers.
     for key in ("entry", "sl", "tp1", "tp2", "tp3"):
         value = safe_number(result.get(key))
-
         if value is None or value <= 0:
-            logger.info(
-                "SIGNAL_REJECTED | Missing/invalid %s=%s",
-                key,
-                result.get(key),
-            )
+            logger.info("SIGNAL_REJECTED | Missing/invalid %s=%s", key, result.get(key))
             return False
 
     entry = float(result["entry"])
@@ -1197,44 +482,23 @@ def is_valid_high_signal(result):
     tp3 = float(result["tp3"])
 
     if direction == "LONG":
-        levels_valid = (
-            sl < entry < tp1 <= tp2 <= tp3
-        )
+        levels_valid = (sl < entry < tp1 <= tp2 <= tp3)
     else:
-        levels_valid = (
-            sl > entry > tp1 >= tp2 >= tp3
-        )
+        levels_valid = (sl > entry > tp1 >= tp2 >= tp3)
 
     if not levels_valid:
-        logger.warning(
-            "SIGNAL_REJECTED | Invalid level ordering | "
-            "Direction=%s Entry=%s SL=%s TP1=%s TP2=%s TP3=%s",
-            direction,
-            entry,
-            sl,
-            tp1,
-            tp2,
-            tp3,
-        )
+        logger.warning("SIGNAL_REJECTED | Invalid level ordering | Direction=%s Entry=%s SL=%s TP1=%s TP2=%s TP3=%s",
+            direction, entry, sl, tp1, tp2, tp3)
         return False
 
     return True
 
-
 def register_high_signal(symbol, result):
     if not is_valid_high_signal(result):
         return None
-
-    direction = str(
-        result.get("direction")
-    ).upper()
-
+    direction = str(result.get("direction")).upper()
     if already_tracking(symbol, direction):
-        logger.info(
-            "TRACKER | ALREADY OPEN | %s | %s",
-            symbol,
-            direction,
-        )
+        logger.info("TRACKER | ALREADY OPEN | %s | %s", symbol, direction)
         return None
 
     payload = dict(result)
@@ -1247,38 +511,15 @@ def register_high_signal(symbol, result):
 
     try:
         registered = register_signal(payload)
-
         if not registered:
-            logger.warning(
-                "TRACKER | REGISTRATION FAILED | %s | %s",
-                symbol,
-                direction,
-            )
+            logger.warning("TRACKER | REGISTRATION FAILED | %s | %s", symbol, direction)
             return None
-
-        logger.info(
-            "TRACKER | REGISTERED | %s | %s | "
-            "Score=%s | Entry=%s | SL=%s | TP1=%s | "
-            "TP2=%s | TP3=%s",
-            symbol,
-            direction,
-            result.get("score"),
-            result.get("entry"),
-            result.get("sl"),
-            result.get("tp1"),
-            result.get("tp2"),
-            result.get("tp3"),
-        )
-
+        logger.info("TRACKER | REGISTERED | %s | %s | Score=%s | Entry=%s | SL=%s | TP1=%s | TP2=%s | TP3=%s",
+            symbol, direction, result.get("score"), result.get("entry"), result.get("sl"), result.get("tp1"), result.get("tp2"), result.get("tp3"))
         return payload
-
     except Exception:
-        logger.exception(
-            "TRACKER_REGISTER_ERROR | %s",
-            symbol,
-        )
+        logger.exception("TRACKER_REGISTER_ERROR | %s", symbol)
         return None
-
 
 # ============================================================
 # STRATEGY DIAGNOSTICS
@@ -1286,224 +527,82 @@ def register_high_signal(symbol, result):
 
 def log_strategy_details(symbol, result):
     diagnostics = result.get("strategy_diagnostics")
-
     if isinstance(diagnostics, dict):
         parts = []
-
-        for strategy in (
-            "TREND_FOLLOWING",
-            "PULLBACK",
-            "BREAKOUT",
-            "REVERSAL",
-            "RANGE_TRADING",
-        ):
+        for strategy in ("TREND_FOLLOWING", "PULLBACK", "BREAKOUT", "REVERSAL", "RANGE_TRADING"):
             value = diagnostics.get(strategy)
-
             if value is None:
                 parts.append(f"{strategy}=NO_DATA")
                 continue
-
             if isinstance(value, dict):
                 matched = value.get("matched")
-
-                reason = (
-                    value.get("reason")
-                    or value.get("blocked_reason")
-                    or value.get("failure_reason")
-                    or value.get("fail_reason")
-                    or value.get("status")
-                    or ""
-                )
-
+                reason = value.get("reason") or value.get("blocked_reason") or value.get("failure_reason") or value.get("fail_reason") or value.get("status") or ""
                 status = "PASS" if matched is True else "FAIL"
-
                 if reason:
                     status = f"{status}:{reason}"
-
                 parts.append(f"{strategy}={status}")
-
             elif isinstance(value, bool):
-                parts.append(
-                    f"{strategy}={'PASS' if value else 'FAIL'}"
-                )
-
+                parts.append(f"{strategy}={'PASS' if value else 'FAIL'}")
             else:
                 parts.append(f"{strategy}={value}")
-
-        logger.info(
-            "STRATEGY_CHECK | %s | %s",
-            symbol,
-            " | ".join(parts),
-        )
+        logger.info("STRATEGY_CHECK | %s | %s", symbol, " | ".join(parts))
         return
-
-    details = result.get("strategy_details")
-
-    if not isinstance(details, dict):
-        logger.info(
-            "STRATEGY_CHECK | %s | No strategy diagnostics returned",
-            symbol,
-        )
-        return
-
-    parts = []
-
-    for name, value in details.items():
-        if isinstance(value, dict):
-            matched = value.get("matched", False)
-            direction = value.get("direction")
-
-            reason = (
-                value.get("reason")
-                or value.get("blocked_reason")
-                or value.get("failure_reason")
-                or ""
-            )
-
-            if matched and direction:
-                status = f"PASS({direction})"
-            elif matched:
-                status = "PASS"
-            elif reason:
-                status = f"FAIL:{reason}"
-            else:
-                status = "FAIL"
-
-        else:
-            status = "PASS" if bool(value) else "FAIL"
-
-        parts.append(f"{name}={status}")
-
-    if parts:
-        logger.info(
-            "STRATEGY_CHECK | %s | %s",
-            symbol,
-            " | ".join(parts),
-        )
-
-
-# ============================================================
-# FULL SIGNAL DIAGNOSTIC
-# ============================================================
 
 def log_signal_diagnostic(symbol, result):
     if not isinstance(result, dict):
         return
-
     daily = result.get("daily", "UNKNOWN")
     h4 = result.get("4h", "UNKNOWN")
     h1 = result.get("1h", "UNKNOWN")
-
     direction = result.get("direction", "UNKNOWN")
     signal_value = result.get("signal", "UNKNOWN")
     score = result.get("score", "UNKNOWN")
     quality = result.get("quality", "UNKNOWN")
-
-    reason = (
-        result.get("reason")
-        or result.get("blocked_reason")
-        or "UNKNOWN"
-    )
-
-    strategies = (
-        result.get("strategy_matches")
-        or result.get("strategies")
-        or []
-    )
-
+    reason = result.get("reason") or result.get("blocked_reason") or "UNKNOWN"
+    strategies = result.get("strategy_matches") or result.get("strategies") or []
+    
     if isinstance(strategies, (list, tuple, set)):
-        strategies_text = (
-            ", ".join(str(item) for item in strategies)
-            if strategies else "NONE"
-        )
+        strategies_text = ", ".join(str(item) for item in strategies) if strategies else "NONE"
     else:
         strategies_text = str(strategies)
-
-    logger.info(
-        "DIAGNOSTIC | %s | Daily=%s | 4H=%s | "
-        "1H=%s | Direction=%s | Signal=%s | "
-        "Score=%s | Quality=%s | Reason=%s | Strategies=%s",
-        symbol,
-        daily,
-        h4,
-        h1,
-        direction,
-        signal_value,
-        score,
-        quality,
-        reason,
-        strategies_text,
-    )
-
-    rsi_15m = result.get(
-        "15m_rsi",
-        result.get("rsi_15m"),
-    )
-
-    logger.info(
-        "FILTERS | %s | 15M_RSI=%s | ADX_1H=%s | "
-        "ADX_15M=%s | MTF_15M=%s | VolumeSpike=%s | "
-        "Confirmation=%s",
-        symbol,
-        rsi_15m,
-        result.get("adx_1h"),
-        result.get("adx_15m"),
-        result.get(
-            "mtf_confirmation",
-            result.get("mtf_confirmed"),
-        ),
-        result.get("volume_spike"),
-        result.get("confirmation"),
-    )
-
+        
+    logger.info("DIAGNOSTIC | %s | Daily=%s | 4H=%s | 1H=%s | Direction=%s | Signal=%s | Score=%s | Quality=%s | Reason=%s | Strategies=%s",
+        symbol, daily, h4, h1, direction, signal_value, score, quality, reason, strategies_text)
+    
+    rsi_15m = result.get("15m_rsi", result.get("rsi_15m"))
+    logger.info("FILTERS | %s | 15M_RSI=%s | ADX_1H=%s | ADX_15M=%s | MTF_15M=%s | VolumeSpike=%s | Confirmation=%s",
+        symbol, rsi_15m, result.get("adx_1h"), result.get("adx_15m"), result.get("mtf_confirmation", result.get("mtf_confirmed")), result.get("volume_spike"), result.get("confirmation"))
+    
     log_strategy_details(symbol, result)
-
 
 # ============================================================
 # SIGNAL MESSAGE
 # ============================================================
 
 def signal_text(symbol, result):
-    direction = str(
-        result.get("direction", "UNKNOWN")
-    ).upper()
-
-    emoji = (
-        "🟢" if direction == "LONG"
-        else "🔴" if direction == "SHORT"
-        else "⚪"
-    )
-
-    strategies = (
-        result.get("strategy_matches")
-        or result.get("strategies")
-        or []
-    )
-
+    direction = str(result.get("direction", "UNKNOWN")).upper()
+    emoji = "🟢" if direction == "LONG" else "🔴" if direction == "SHORT" else "⚪"
+    strategies = result.get("strategy_matches") or result.get("strategies") or []
     strategies = safe_list(strategies)
-
-    strategy_text = (
-        ", ".join(str(item) for item in strategies)
-        if strategies else "NONE"
-    )
-
+    strategy_text = ", ".join(str(item) for item in strategies) if strategies else "NONE"
     roi = result.get("leverage_roi") or {}
+    news_note = result.get("_news_note", "بررسی نشده")
 
-    news_note = result.get(
-        "_news_note",
-        "بررسی نشده",
-    )
+    # --- بخش بیت‌کوین (جدید) ---
+    btc_dir = result.get("btc_dir", "UNKNOWN")
+    btc_relation = result.get("btc_relation", "NEUTRAL")
+    btc_warning = result.get("btc_warning", False)
+    btc_adx = result.get("btc_adx", 0.0)
 
-    alignment_labels = {
-        "ALIGNED": "✅ هم‌جهت با روند بیت‌کوین",
-        "AGAINST": "⚠️ خلاف جهت روند بیت‌کوین",
-        "NEUTRAL": "➖ روند بیت‌کوین خنثی یا ترکیبی",
-        "UNKNOWN": "❔ روند بیت‌کوین نامشخص",
-    }
-
-    alignment = str(
-        result.get("btc_alignment", "UNKNOWN")
-    )
+    if btc_relation == "ALIGNED":
+        alignment_text = "✅ هم‌جهت با روند بیت‌کوین"
+    elif btc_relation == "OPPOSED":
+        alignment_text = f"⚠️ خلاف جهت روند بیت‌کوین (ADX: {btc_adx})"
+        if btc_warning:
+            alignment_text = "🚨 " + alignment_text + " - احتیاط!"
+    else:
+        alignment_text = "➖ روند بیت‌کوین خنثی یا ترکیبی"
+    # ---------------------------
 
     return (
         f"{emoji} <b>{safe_text(symbol)}</b>\n\n"
@@ -1517,8 +616,8 @@ def signal_text(symbol, result):
         f"📊 ADX 1H: {safe_text(result.get('adx_1h'))}\n"
         f"📊 ADX 15M: {safe_text(result.get('adx_15m'))}\n"
         f"✅ MTF 15M: {safe_text(result.get('mtf_confirmation', result.get('mtf_confirmed')))}\n\n"
-        f"₿ BTC Trend: <b>{safe_text(result.get('btc_trend', 'UNKNOWN'))}</b>\n"
-        f"{alignment_labels.get(alignment, alignment_labels['UNKNOWN'])}\n\n"
+        f"₿ BTC Trend: <b>{safe_text(btc_dir)}</b>\n"
+        f"{alignment_text}\n\n"
         f"💰 Entry: <b>{display_number(result.get('entry'))}</b>\n"
         f"🛑 SL: <b>{display_number(result.get('sl'))}</b>\n"
         f"🎯 TP1: <b>{display_number(result.get('tp1'))}</b>\n"
@@ -1536,18 +635,15 @@ def signal_text(symbol, result):
         f"🧠 Strategy:\n<b>{safe_text(strategy_text)}</b>\n\n"
         f"📝 Reason:\n{safe_text(result.get('reason', 'N/A'))}\n\n"
         f"📰 News Filter:\n{safe_text(news_note)}\n\n"
-        f"⚠️ تخمین قبل از کارمزد و فاندینگ؛ "
-        f"سود واقعی ممکن است متفاوت باشد."
+        f"⚠️ تخمین قبل از کارمزد و فاندینگ؛ سود واقعی ممکن است متفاوت باشد."
     )
 
-
 # ============================================================
-# RAW ANALYSIS
+# RAW ANALYSIS (With BTC Context)
 # ============================================================
 
-def analyze_symbol_raw(symbol):
+def analyze_symbol_raw(symbol, btc_context):
     market_data = get_market_data(symbol)
-
     if market_data is None:
         return None
 
@@ -1557,28 +653,20 @@ def analyze_symbol_raw(symbol):
         market_data["1h"],
         market_data["15m"],
         market_data["5m"],
+        btc_context=btc_context
     )
-
+    
     if not isinstance(result, dict):
-        logger.warning(
-            "ANALYSIS_INVALID_RESULT | %s",
-            symbol,
-        )
+        logger.warning("ANALYSIS_INVALID_RESULT | %s", symbol)
         return None
-
     return result
 
-
 # ============================================================
-# COMMON SIGNAL PREPARATION
+# COMMON SIGNAL PREPARATION (With BTC Context)
 # ============================================================
 
-async def prepare_signal(symbol):
-    result = await asyncio.to_thread(
-        analyze_symbol_raw,
-        symbol,
-    )
-
+async def prepare_signal(symbol, btc_context):
+    result = await asyncio.to_thread(analyze_symbol_raw, symbol, btc_context)
     if result is None:
         return None, False, "No analysis result"
 
@@ -1587,39 +675,22 @@ async def prepare_signal(symbol):
     if not is_valid_high_signal(result):
         return result, False, "Not a valid HIGH signal"
 
-    blocked, news_note = await check_critical_news(
-        symbol,
-        result.get("direction"),
-    )
-
+    blocked, news_note = await check_critical_news(symbol, result.get("direction"))
     if blocked:
         return result, True, news_note
 
     result["_news_note"] = news_note
-
-    result = await asyncio.to_thread(
-        add_signal_context,
-        result,
-    )
+    result = await asyncio.to_thread(add_signal_context, result)
 
     return result, False, news_note
-
 
 # ============================================================
 # /START
 # ============================================================
 
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-    chat_ids = context.application.bot_data.setdefault(
-        "chat_ids",
-        set(),
-    )
-
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_ids = context.application.bot_data.setdefault("chat_ids", set())
     chat_ids.add(update.effective_chat.id)
-
     await update.effective_message.reply_text(
         f"🤖 CryptoBot فعال است.\n"
         f"📊 تعداد ارزهای در حال اسکن: {len(SYMBOLS)}\n\n"
@@ -1632,58 +703,41 @@ async def start(
         "/news_test - آزمایش منابع خبری"
     )
 
-
 # ============================================================
 # /PRICE
 # ============================================================
 
-async def price(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-    btc = await asyncio.to_thread(
-        get_price,
-        "BTC-SWAP-USDT",
-    )
-
-    sol = await asyncio.to_thread(
-        get_price,
-        "SOL-SWAP-USDT",
-    )
+async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    btc = await asyncio.to_thread(get_price, "BTC-SWAP-USDT")
+    sol = await asyncio.to_thread(get_price, "SOL-SWAP-USDT")
 
     message = "💰 <b>CryptoBot Prices</b>\n\n"
-
     if btc is not None:
         message += f"₿ BTC: <b>{display_number(btc)}</b>\n"
     else:
         message += "₿ BTC: unavailable\n"
-
     if sol is not None:
         message += f"◎ SOL: <b>{display_number(sol)}</b>\n"
     else:
         message += "◎ SOL: unavailable\n"
 
-    await update.effective_message.reply_text(
-        message,
-        parse_mode="HTML",
-    )
-
+    await update.effective_message.reply_text(message, parse_mode="HTML")
 
 # ============================================================
 # /SIGNAL
 # ============================================================
 
-async def signal(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
+async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(
         f"🔎 در حال بررسی {len(SYMBOLS)} ارز...\n"
         "Daily → 4H → 1H → 15M → 5M\n\n"
-        "فقط سیگنال‌های HIGH با امتیاز ۱۰ تا ۱۲.\n"
+        "فقط سیگنال‌های HIGH با امتیاز بالا.\n"
         "خبرهای بحرانی و روند بیت‌کوین بررسی می‌شوند.\n"
         "این کار ممکن است چند دقیقه طول بکشد."
     )
+
+    # دریافت کانتکست بیت‌کوین (یک‌بار در هر اسکن)
+    btc_context = await asyncio.to_thread(fetch_btc_context, get_klines)
 
     found = 0
     blocked_by_news = 0
@@ -1691,25 +745,17 @@ async def signal(
 
     for symbol in SYMBOLS:
         try:
-            result, blocked, note = await prepare_signal(symbol)
+            result, blocked, note = await prepare_signal(symbol, btc_context)
 
             if result is None:
                 continue
-
             if blocked:
                 blocked_by_news += 1
                 continue
-
             if not is_valid_high_signal(result):
                 continue
 
-            # ثبت معامله پیش از ارسال؛ تا سیگنال ارسالی
-            # بدون تلاش برای ثبت در Tracker رها نشود.
-            trade = register_high_signal(
-                symbol,
-                result,
-            )
-
+            trade = register_high_signal(symbol, result)
             if trade is None:
                 registration_failed += 1
                 continue
@@ -1718,14 +764,9 @@ async def signal(
                 signal_text(symbol, result),
                 parse_mode="HTML",
             )
-
             found += 1
-
         except Exception:
-            logger.exception(
-                "Signal error %s",
-                symbol,
-            )
+            logger.exception("Signal error %s", symbol)
 
     if found == 0:
         await update.effective_message.reply_text(
@@ -1736,71 +777,46 @@ async def signal(
             "جزئیات تشخیص در لاگ Belmo ثبت شد."
         )
 
-
 # ============================================================
 # AUTOMATIC SIGNAL SCANNER
 # ============================================================
 
-async def auto_signal(
-    context: ContextTypes.DEFAULT_TYPE,
-):
+async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
     if _scan_lock.locked():
-        logger.warning(
-            "Previous scan still running. Skipping."
-        )
+        logger.warning("Previous scan still running. Skipping.")
         return
 
     async with _scan_lock:
-        logger.info(
-            "Starting automatic market scan across %s symbols",
-            len(SYMBOLS),
-        )
+        logger.info("Starting automatic market scan across %s symbols", len(SYMBOLS))
+
+        # دریافت کانتکست بیت‌کوین (یک‌بار در هر اسکن)
+        btc_context = await asyncio.to_thread(fetch_btc_context, get_klines)
 
         found = 0
         blocked_by_news = 0
 
         for symbol in SYMBOLS:
             try:
-                result, blocked, note = await prepare_signal(symbol)
+                result, blocked, note = await prepare_signal(symbol, btc_context)
 
                 if result is None:
                     continue
-
                 if blocked:
                     blocked_by_news += 1
-                    logger.warning(
-                        "AUTO_SIGNAL_BLOCKED_BY_NEWS | %s",
-                        symbol,
-                    )
+                    logger.warning("AUTO_SIGNAL_BLOCKED_BY_NEWS | %s", symbol)
                     continue
-
                 if not is_valid_high_signal(result):
                     continue
 
-                trade = register_high_signal(
-                    symbol,
-                    result,
-                )
-
+                trade = register_high_signal(symbol, result)
                 if trade is None:
                     continue
 
                 found += 1
+                logger.info("NEW HIGH SIGNAL | %s | %s | Score=%s | Strategy=%s",
+                    symbol, result.get("direction"), result.get("score"), result.get("strategy"))
 
-                logger.info(
-                    "NEW HIGH SIGNAL | %s | %s | "
-                    "Score=%s | Strategy=%s",
-                    symbol,
-                    result.get("direction"),
-                    result.get("score"),
-                    result.get("strategy"),
-                )
-
-                chat_ids = context.application.bot_data.get(
-                    "chat_ids",
-                    set(),
-                )
-
+                chat_ids = context.application.bot_data.get("chat_ids", set())
                 for chat_id in list(chat_ids):
                     try:
                         await context.bot.send_message(
@@ -1808,103 +824,50 @@ async def auto_signal(
                             text=signal_text(symbol, result),
                             parse_mode="HTML",
                         )
-
                     except Exception:
-                        logger.exception(
-                            "Telegram send error for chat %s",
-                            chat_id,
-                        )
-
+                        logger.exception("Telegram send error for chat %s", chat_id)
             except Exception:
-                logger.exception(
-                    "Auto scan error %s",
-                    symbol,
-                )
+                logger.exception("Auto scan error %s", symbol)
 
-        logger.info(
-            "Automatic scan completed. "
-            "New signals=%s | Blocked by news=%s",
-            found,
-            blocked_by_news,
-        )
-
+        logger.info("Automatic scan completed. New signals=%s | Blocked by news=%s", found, blocked_by_news)
 
 # ============================================================
 # TRACK OPEN TRADES
 # ============================================================
 
-async def track_open_trades(
-    context: ContextTypes.DEFAULT_TYPE,
-):
+async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
     try:
-        open_trades = await asyncio.to_thread(
-            get_open_trades
-        )
-
+        open_trades = await asyncio.to_thread(get_open_trades)
         if not open_trades:
-            logger.info(
-                "TRACKER CHECK | No open trades"
-            )
+            logger.info("TRACKER CHECK | No open trades")
             return
 
-        logger.info(
-            "TRACKER CHECK | Open trades=%s",
-            len(open_trades),
-        )
+        logger.info("TRACKER CHECK | Open trades=%s", len(open_trades))
 
-        # این تابع رویدادها را به‌روزرسانی می‌کند.
-        # رویدادها در Tracker جدید دیکشنری‌های تخت هستند.
-        events = await asyncio.to_thread(
-            check_all_trades,
-            get_price,
-        )
-
+        events = await asyncio.to_thread(check_all_trades, get_price)
         if not events:
             return
 
-        chat_ids = context.application.bot_data.get(
-            "chat_ids",
-            set(),
-        )
+        chat_ids = context.application.bot_data.get("chat_ids", set())
 
         for event in events:
             if not isinstance(event, dict):
                 continue
 
-            event_name = str(
-                event.get("event", "UNKNOWN")
-            ).upper()
-
+            event_name = str(event.get("event", "UNKNOWN")).upper()
             symbol = event.get("symbol", "UNKNOWN")
             direction = event.get("direction", "UNKNOWN")
             strategy_name = event.get("strategy", "UNKNOWN")
-
             price_now = event.get("price")
             entry = event.get("entry")
             sl = event.get("sl")
             tp1 = event.get("tp1")
             tp2 = event.get("tp2")
             tp3 = event.get("tp3")
-
-            pnl = safe_number(
-                event.get("realized_pnl"),
-                0.0,
-            )
-
-            roi_pct = safe_number(
-                event.get("roi_percent"),
-                0.0,
-            )
-
-            margin = safe_number(
-                event.get("margin"),
-                DEFAULT_MARGIN_USDT,
-            )
-
-            leverage = safe_number(
-                event.get("leverage"),
-                DEFAULT_LEVERAGE,
-            )
+            pnl = safe_number(event.get("realized_pnl"), 0.0)
+            roi_pct = safe_number(event.get("roi_percent"), 0.0)
+            margin = safe_number(event.get("margin"), DEFAULT_MARGIN_USDT)
+            leverage = safe_number(event.get("leverage"), DEFAULT_LEVERAGE)
 
             title_map = {
                 "TP1": "🎯 تارگت اول لمس شد",
@@ -1914,11 +877,7 @@ async def track_open_trades(
                 "BE": "⚖️ خروج در نقطه سربه‌سر",
                 "BREAKEVEN": "⚖️ خروج در نقطه سربه‌سر",
             }
-
-            title = title_map.get(
-                event_name,
-                f"📊 رویداد Tracker: {event_name}",
-            )
+            title = title_map.get(event_name, f"📊 رویداد Tracker: {event_name}")
 
             message = (
                 f"<b>{title}</b>\n\n"
@@ -1940,87 +899,35 @@ async def track_open_trades(
 
             for chat_id in list(chat_ids):
                 try:
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=message,
-                        parse_mode="HTML",
-                    )
-
+                    await context.bot.send_message(chat_id=chat_id, text=message, parse_mode="HTML")
                 except Exception:
-                    logger.exception(
-                        "Tracker Telegram error for chat %s",
-                        chat_id,
-                    )
+                    logger.exception("Tracker Telegram error for chat %s", chat_id)
 
-            logger.info(
-                "TRACKER | %s | %s | Price=%s | PnL=%s | ROI=%s",
-                symbol,
-                event_name,
-                price_now,
-                pnl,
-                roi_pct,
-            )
+            logger.info("TRACKER | %s | %s | Price=%s | PnL=%s | ROI=%s", symbol, event_name, price_now, pnl, roi_pct)
 
     except Exception:
         logger.exception("Tracker error")
-
 
 # ============================================================
 # /REGISTER
 # ============================================================
 
-async def register_chat(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-    chat_ids = context.application.bot_data.setdefault(
-        "chat_ids",
-        set(),
-    )
-
+async def register_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_ids = context.application.bot_data.setdefault("chat_ids", set())
     chat_ids.add(update.effective_chat.id)
-
-    await update.effective_message.reply_text(
-        "✅ این چت برای دریافت سیگنال‌های خودکار ثبت شد."
-    )
-
+    await update.effective_message.reply_text("✅ این چت برای دریافت سیگنال‌های خودکار ثبت شد.")
 
 # ============================================================
 # /STATS
 # ============================================================
 
-async def tracker_stats(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
+async def tracker_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         stats = await asyncio.to_thread(get_stats)
-
-        realized_pnl = safe_number(
-            stats.get("realized_pnl"),
-            0.0,
-        )
-
-        realized_roi = safe_number(
-            stats.get("realized_roi"),
-            0.0,
-        )
-
-        closed_pnl = safe_number(
-            stats.get(
-                "closed_realized_pnl",
-                stats.get("realized_pnl"),
-            ),
-            0.0,
-        )
-
-        closed_roi = safe_number(
-            stats.get(
-                "closed_roi",
-                stats.get("realized_roi"),
-            ),
-            0.0,
-        )
+        realized_pnl = safe_number(stats.get("realized_pnl"), 0.0)
+        realized_roi = safe_number(stats.get("realized_roi"), 0.0)
+        closed_pnl = safe_number(stats.get("closed_realized_pnl", stats.get("realized_pnl")), 0.0)
+        closed_roi = safe_number(stats.get("closed_roi", stats.get("realized_roi")), 0.0)
 
         message = (
             "📊 <b>Tracker Statistics</b>\n\n"
@@ -2037,106 +944,53 @@ async def tracker_stats(
             f"🔒 Closed PnL: {closed_pnl:+.4f} USDT\n"
             f"📊 Closed ROI: {closed_roi:+.2f}%"
         )
-
-        await update.effective_message.reply_text(
-            message,
-            parse_mode="HTML",
-        )
-
+        await update.effective_message.reply_text(message, parse_mode="HTML")
     except Exception:
         logger.exception("Tracker stats error")
-
-        await update.effective_message.reply_text(
-            "❌ خطا در دریافت آمار Tracker."
-        )
-
+        await update.effective_message.reply_text("❌ خطا در دریافت آمار Tracker.")
 
 # ============================================================
 # /NEWS
 # ============================================================
 
-async def news_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-    message = await update.effective_message.reply_text(
-        "📰 در حال دریافت اخبار کریپتو..."
-    )
-
+async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = await update.effective_message.reply_text("📰 در حال دریافت اخبار کریپتو...")
     try:
         articles = await get_latest_news(limit=8)
-
         if not articles:
-            await message.edit_text(
-                "⚠️ در حال حاضر خبری دریافت نشد.\n"
-                "ممکن است منابع RSS در دسترس نباشند."
-            )
+            await message.edit_text("⚠️ در حال حاضر خبری دریافت نشد.\nممکن است منابع RSS در دسترس نباشند.")
             return
 
         lines = ["📰 آخرین اخبار کریپتو\n"]
-
         for index, article in enumerate(articles, start=1):
             importance = article.get("importance", "NORMAL")
-
-            emoji = {
-                "CRITICAL": "🔴",
-                "HIGH": "🟠",
-                "NORMAL": "🟢",
-            }.get(importance, "⚪")
-
+            emoji = {"CRITICAL": "🔴", "HIGH": "🟠", "NORMAL": "🟢"}.get(importance, "⚪")
             title = str(article.get("title", "بدون عنوان"))
             source = str(article.get("source", "Unknown"))
             asset = str(article.get("asset", "UNKNOWN"))
             link = str(article.get("link", ""))
-
-            item = (
-                f"{index}. {emoji} {title}\n"
-                f"📡 منبع: {source}\n"
-                f"🪙 دارایی: {asset}\n"
-            )
-
+            
+            item = f"{index}. {emoji} {title}\n📡 منبع: {source}\n🪙 دارایی: {asset}\n"
             if link.startswith(("https://", "http://")):
                 item += f"🔗 {link}\n"
-
             lines.append(item)
 
         output = "\n".join(lines)
-
         if len(output) > 4000:
-            output = (
-                output[:3900]
-                + "\n\nادامه اخبار در اجرای بعدی."
-            )
-
-        await message.edit_text(
-            output,
-            disable_web_page_preview=True,
-        )
-
+            output = output[:3900] + "\n\nادامه اخبار در اجرای بعدی."
+        await message.edit_text(output, disable_web_page_preview=True)
     except Exception:
         logger.exception("NEWS_COMMAND_ERROR")
-
-        await message.edit_text(
-            "❌ خطا هنگام دریافت اخبار.\n"
-            "لاگ Belmo را بررسی کن."
-        )
-
+        await message.edit_text("❌ خطا هنگام دریافت اخبار.\nلاگ Belmo را بررسی کن.")
 
 # ============================================================
 # /NEWS_TEST
 # ============================================================
 
-async def news_test_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-    message = await update.effective_message.reply_text(
-        "🔎 در حال آزمایش منابع خبری..."
-    )
-
+async def news_test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = await update.effective_message.reply_text("🔎 در حال آزمایش منابع خبری...")
     try:
         result = await news_diagnostics()
-
         lines = [
             "📊 گزارش آزمایش منابع خبری\n",
             f"📰 مجموع اخبار: {result.get('total', 0)}",
@@ -2145,27 +999,14 @@ async def news_test_command(
             "",
             "وضعیت منابع:",
         ]
-
         for source, status in result.get("sources", {}).items():
             icon = "✅" if status.get("ok") else "❌"
             count = status.get("count", 0)
-
-            lines.append(
-                f"{icon} {source}: {count} خبر"
-            )
-
-        await message.edit_text(
-            "\n".join(lines)
-        )
-
+            lines.append(f"{icon} {source}: {count} خبر")
+        await message.edit_text("\n".join(lines))
     except Exception:
         logger.exception("NEWS_TEST_ERROR")
-
-        await message.edit_text(
-            "❌ آزمایش منابع خبری ناموفق بود.\n"
-            "لاگ Belmo را بررسی کن."
-        )
-
+        await message.edit_text("❌ آزمایش منابع خبری ناموفق بود.\nلاگ Belmo را بررسی کن.")
 
 # ============================================================
 # MAIN
@@ -2173,105 +1014,46 @@ async def news_test_command(
 
 def main():
     if not TOKEN:
-        raise RuntimeError(
-            "BOT_TOKEN environment variable is missing."
-        )
+        raise RuntimeError("BOT_TOKEN environment variable is missing.")
 
     logger.info("=" * 60)
     logger.info("CryptoBot starting...")
     logger.info("Symbols to scan: %s", len(SYMBOLS))
-    logger.info(
-        "Automatic scan interval: %s seconds",
-        AUTO_INTERVAL,
-    )
-    logger.info(
-        "Tracker interval: %s seconds",
-        TRACKER_INTERVAL,
-    )
-    logger.info(
-        "Critical news window: %s minutes",
-        NEWS_BLOCK_MINUTES,
-    )
-    logger.info(
-        "Signal policy: HIGH quality, score 10-12"
-    )
-    logger.info(
-        "Estimated PnL settings: margin %.2f USDT, leverage %sx",
-        DEFAULT_MARGIN_USDT,
-        DEFAULT_LEVERAGE,
-    )
+    logger.info("Automatic scan interval: %s seconds", AUTO_INTERVAL)
+    logger.info("Tracker interval: %s seconds", TRACKER_INTERVAL)
+    logger.info("Critical news window: %s minutes", NEWS_BLOCK_MINUTES)
+    logger.info("Signal policy: HIGH quality, score >= 10")
+    logger.info("Estimated PnL settings: margin %.2f USDT, leverage %sx", DEFAULT_MARGIN_USDT, DEFAULT_LEVERAGE)
     logger.info("=" * 60)
 
-    application = (
-        Application.builder()
-        .token(TOKEN)
-        .build()
-    )
+    application = Application.builder().token(TOKEN).build()
 
-    application.add_handler(
-        CommandHandler("start", start)
-    )
-
-    application.add_handler(
-        CommandHandler("price", price)
-    )
-
-    application.add_handler(
-        CommandHandler("signal", signal)
-    )
-
-    application.add_handler(
-        CommandHandler("register", register_chat)
-    )
-
-    application.add_handler(
-        CommandHandler("stats", tracker_stats)
-    )
-
-    application.add_handler(
-        CommandHandler("news", news_command)
-    )
-
-    application.add_handler(
-        CommandHandler("news_test", news_test_command)
-    )
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("price", price))
+    application.add_handler(CommandHandler("signal", signal))
+    application.add_handler(CommandHandler("register", register_chat))
+    application.add_handler(CommandHandler("stats", tracker_stats))
+    application.add_handler(CommandHandler("news", news_command))
+    application.add_handler(CommandHandler("news_test", news_test_command))
 
     application.job_queue.run_repeating(
         track_open_trades,
         interval=TRACKER_INTERVAL,
         first=TRACKER_INTERVAL,
-        job_kwargs={
-            "max_instances": 1,
-            "coalesce": True,
-        },
+        job_kwargs={"max_instances": 1, "coalesce": True},
     )
-
-    logger.info(
-        "Trade tracker scheduled every %s seconds",
-        TRACKER_INTERVAL,
-    )
+    logger.info("Trade tracker scheduled every %s seconds", TRACKER_INTERVAL)
 
     application.job_queue.run_repeating(
         auto_signal,
         interval=AUTO_INTERVAL,
         first=60,
-        job_kwargs={
-            "max_instances": 1,
-            "coalesce": True,
-        },
+        job_kwargs={"max_instances": 1, "coalesce": True},
     )
-
-    logger.info(
-        "Automatic signal scanner scheduled every %s seconds",
-        AUTO_INTERVAL,
-    )
+    logger.info("Automatic signal scanner scheduled every %s seconds", AUTO_INTERVAL)
 
     logger.info("CryptoBot started successfully.")
-
-    application.run_polling(
-        drop_pending_updates=True
-    )
-
+    application.run_polling(drop_pending_updates=True)
 
 # ============================================================
 # ENTRY POINT
