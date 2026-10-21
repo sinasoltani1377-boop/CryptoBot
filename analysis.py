@@ -1,9 +1,10 @@
 # ============================================================
-# CryptoBot - Analysis Engine v17
+# CryptoBot - Analysis Engine v18
 #
 # v15: Trend Following fixes
 # v16: Partial PULLBACK fixes
 # v17: COMPLETE PULLBACK — all 15 criteria implemented
+# v18: BTC context integration (5 patches only)
 #
 # 1H  = Main trend / strategy environment
 # 15M = Setup confirmation
@@ -145,7 +146,6 @@ def ema(values: List[float], period: int) -> Optional[float]:
 
 
 def ema_series(values: List[float], period: int) -> List[Optional[float]]:
-    """Compute EMA series (for pullback counting)."""
     if len(values) < period:
         return []
     k = 2.0 / (period + 1.0)
@@ -393,7 +393,7 @@ def htf_breakout_confirm(h1: List[Any], direction: str,
 
 
 # ============================================================
-# CANDLE PATTERNS (COMPLETE — criteria #8)
+# CANDLE PATTERNS
 # ============================================================
 
 def is_doji(candle: Any, threshold: float = 0.20) -> bool:
@@ -418,7 +418,6 @@ def bear_engulfing(prev: Any, curr: Any) -> bool:
 
 
 def is_morning_star(c1: Any, c2: Any, c3: Any) -> bool:
-    """Bearish → Doji/Small → Bullish reversal."""
     if not bearish(c1) or not bullish(c3):
         return False
     if not is_doji(c2, 0.30):
@@ -447,34 +446,25 @@ def is_inside_bar(prev: Any, curr: Any) -> bool:
 
 
 def bullish_reversal_pattern(candles_ctx: List[Any]) -> bool:
-    """
-    Comprehensive bullish reversal pattern check.
-    Returns True if the last candle (or last 2-3 candles) shows a bullish reversal.
-    """
     if len(candles_ctx) < 2:
         return False
     last = candles_ctx[-1]
     prev = candles_ctx[-2]
 
-    # 1. Pin bar / Hammer
     r = candle_range(last)
     if r > 0 and lower_wick(last) / r >= 0.40 and lower_wick(last) >= body(last) * 0.8:
         return True
 
-    # 2. Bullish Engulfing
     if bull_engulfing(prev, last):
         return True
 
-    # 3. Doji at support (long lower wick, small body)
     if is_doji(last, 0.20) and lower_wick(last) / r >= 0.45 if r > 0 else False:
         return True
 
-    # 4. Morning Star (3 candles)
     if len(candles_ctx) >= 3:
         if is_morning_star(candles_ctx[-3], candles_ctx[-2], candles_ctx[-1]):
             return True
 
-    # 5. Inside bar breakout (previous bar was inside, current breaks up)
     if len(candles_ctx) >= 3:
         if is_inside_bar(candles_ctx[-3], candles_ctx[-2]):
             _, _, _, last_close, _ = candle_values(last)
@@ -516,7 +506,6 @@ def bearish_reversal_pattern(candles_ctx: List[Any]) -> bool:
 
 
 def rejection(candle: Any, direction: str, prev_candle: Optional[Any] = None) -> bool:
-    """Simple single/two candle rejection (used in RRZ)."""
     r = candle_range(candle)
     if r <= 0:
         return False
@@ -546,26 +535,20 @@ def recent_rejection(candles: List[Any], direction: str, lookback: int = 6) -> b
 
 
 # ============================================================
-# FIBONACCI + IMPULSE LEG (criteria #3)
+# FIBONACCI + IMPULSE LEG
 # ============================================================
 
 def find_last_impulse(h1: List[Any], direction: str,
                       lookback: int = 50) -> Tuple[Optional[float], Optional[float]]:
-    """
-    For LONG: returns (impulse_low, impulse_high) — the most recent completed rally.
-    For SHORT: returns (impulse_high, impulse_low) — the most recent completed decline.
-    """
     arr = h1[-lookback:] if len(h1) > lookback else h1
     if len(arr) < 15:
         return None, None
     hs, ls = highs(arr), lows(arr)
 
     if direction == "LONG":
-        # find the highest high (impulse end)
         peak_idx = hs.index(max(hs))
         if peak_idx < 3:
             return None, None
-        # find lowest low before peak (impulse start)
         before_peak = ls[:peak_idx]
         trough_idx = before_peak.index(min(before_peak))
         return before_peak[trough_idx], hs[peak_idx]
@@ -581,7 +564,6 @@ def find_last_impulse(h1: List[Any], direction: str,
 def fib_pullback_zone(h1: List[Any], direction: str,
                       low_pct: float = 0.35,
                       high_pct: float = 0.72) -> bool:
-    """Return True if price is inside the Fibonacci retracement pullback zone."""
     impulse_low, impulse_high = find_last_impulse(h1, direction)
     if impulse_low is None or impulse_high is None:
         return False
@@ -599,7 +581,6 @@ def fib_pullback_zone(h1: List[Any], direction: str,
 
 
 def fib_golden_zone(h1: List[Any], direction: str) -> bool:
-    """38.2% – 61.8% golden zone (bonus, not filter)."""
     impulse_low, impulse_high = find_last_impulse(h1, direction)
     if impulse_low is None or impulse_high is None:
         return False
@@ -615,13 +596,12 @@ def fib_golden_zone(h1: List[Any], direction: str) -> bool:
 
 
 # ============================================================
-# SWING LOW ZONE (criteria #4)
+# SWING LOW ZONE
 # ============================================================
 
 def near_swing_low_zone(h1: List[Any], direction: str,
                         lookback: int = 20,
                         atr_buffer: float = 0.6) -> bool:
-    """True if price is at/near the last confirmed swing low (or high for SHORT)."""
     arr = h1[-lookback:] if len(h1) > lookback else h1
     if len(arr) < 6:
         return False
@@ -643,7 +623,7 @@ def near_swing_low_zone(h1: List[Any], direction: str,
 
 
 # ============================================================
-# PULLBACK DETECTION (criteria #2 + #6)
+# PULLBACK DETECTION
 # ============================================================
 
 def near_ema_zone(h1: List[Any], direction: str) -> bool:
@@ -687,7 +667,6 @@ def pullback_detected(h1: List[Any], direction: str) -> bool:
 
 def pullback_duration_ok(h1: List[Any], direction: str,
                          min_bars: int = 3, max_bars: int = 10) -> bool:
-    """Count candles since the impulse peak — pullback should be 3–8 (allow 10)."""
     lookback = max_bars * 3
     arr = h1[-lookback:] if len(h1) > lookback else h1
     if len(arr) < min_bars + 2:
@@ -702,10 +681,6 @@ def pullback_duration_ok(h1: List[Any], direction: str,
 
     return min_bars <= bars_since_peak <= max_bars
 
-
-# ============================================================
-# PULLBACK DEPTH (criteria #5) + RSI (criteria #10)
-# ============================================================
 
 def pullback_depth_ok(h1: List[Any], direction: str,
                       lookback: int = 30,
@@ -739,17 +714,15 @@ def rsi_in_pullback_zone(h1: List[Any], direction: str,
     if direction == "LONG":
         return min_r <= r <= max_r
     if direction == "SHORT":
-        # Mirror the zone: pullback in a downtrend has RSI 45–60
         return (100.0 - max_r) <= r <= (100.0 - min_r)
     return False
 
 
 # ============================================================
-# REJECTION AT ZONE (criteria #7)
+# REJECTION AT ZONE
 # ============================================================
 
 def rejection_at_zone(h1: List[Any], direction: str, lookback: int = 3) -> bool:
-    """Comprehensive bullish/bearish reversal pattern occurring AT the pullback zone."""
     e20 = ema(closes(h1), 20)
     e50 = ema(closes(h1), 50)
     atr1 = atr(h1)
@@ -772,7 +745,6 @@ def rejection_at_zone(h1: List[Any], direction: str, lookback: int = 3) -> bool:
                        and h <= ema_high + zone_buffer * 2.0)
         if not at_zone:
             continue
-        # Use last 3-candle window up to i for pattern detection
         window = h1[max(0, i - 2):i + 1]
         if direction == "LONG" and bullish_reversal_pattern(window):
             return True
@@ -782,7 +754,7 @@ def rejection_at_zone(h1: List[Any], direction: str, lookback: int = 3) -> bool:
 
 
 # ============================================================
-# VOLUME DECREASING (criteria #9)
+# VOLUME DECREASING
 # ============================================================
 
 def volume_decreasing_in_pullback(h1: List[Any], direction: str, lookback: int = 4) -> bool:
@@ -797,11 +769,10 @@ def volume_decreasing_in_pullback(h1: List[Any], direction: str, lookback: int =
 
 
 # ============================================================
-# 15M PULLBACK CONFIRMATION (criteria #12)
+# 15M PULLBACK CONFIRMATION
 # ============================================================
 
 def mtf_pullback_confirmation(m15: List[Any], direction: str) -> bool:
-    """15M should show the pullback (price near EMA) + a rejection pattern."""
     if len(m15) < 30:
         return False
     cls = closes(m15)
@@ -823,7 +794,6 @@ def mtf_pullback_confirmation(m15: List[Any], direction: str) -> bool:
         if not near or price > e50 * 1.01:
             return False
 
-    # Check last 3 candles for reversal pattern
     window = m15[-3:]
     if direction == "LONG":
         return bullish_reversal_pattern(window)
@@ -832,13 +802,12 @@ def mtf_pullback_confirmation(m15: List[Any], direction: str) -> bool:
 
 
 # ============================================================
-# PULLBACK COUNT (criteria #13)
+# PULLBACK COUNT
 # ============================================================
 
 def count_recent_pullbacks(h1: List[Any], direction: str,
                            lookback: int = 60,
                            zone_atr: float = 0.6) -> int:
-    """Count number of pullbacks (price touching EMA20) in recent trend."""
     arr = h1[-lookback:] if len(h1) > lookback else h1
     if len(arr) < 25:
         return 1
@@ -875,11 +844,10 @@ def count_recent_pullbacks(h1: List[Any], direction: str,
 
 
 # ============================================================
-# ORDERLY PULLBACK (criteria #14)
+# ORDERLY PULLBACK
 # ============================================================
 
 def is_orderly_pullback(h1: List[Any], direction: str, lookback: int = 5) -> bool:
-    """Orderly = small-moderate bodies, no huge spike candles, volume not surging."""
     if len(h1) < lookback + 5:
         return False
     recent = h1[-lookback:]
@@ -887,7 +855,6 @@ def is_orderly_pullback(h1: List[Any], direction: str, lookback: int = 5) -> boo
     if avg_br > 0.60:
         return False
 
-    # No single explosive candle against the trend
     for c in recent:
         r = candle_range(c)
         if r <= 0:
@@ -1001,7 +968,6 @@ def detect_trend_following(h1, m15, m5, direction):
 
 
 def _mtf_basic(m15: List[Any], direction: str) -> bool:
-    """Fallback basic MTF check (used by TREND_FOLLOWING/BREAKOUT)."""
     if len(m15) < 25:
         return False
     cls = closes(m15)
@@ -1020,70 +986,53 @@ def _mtf_basic(m15: List[Any], direction: str) -> bool:
 
 
 def detect_pullback(h1, m15, m5, direction):
-    """
-    COMPLETE PULLBACK (v17) — all 15 criteria implemented.
-    Every filter below is HARD — if any fails, signal is rejected.
-    """
     expected = "BULLISH" if direction == "LONG" else "BEARISH"
 
-    # --- Criterion #1: Trend prerequisite ---
     structure = market_structure(h1)
     ema_dir = ema_direction(h1)
     if structure != expected and ema_dir != expected:
         return {"valid": False, "reason": "H1_TREND_MISSING"}
 
-    # --- Criterion #11: ADX filter (hard) ---
     adx1 = adx(h1)
     if adx1 < 22:
         return {"valid": False, "reason": "ADX_LOW"}
 
-    # --- Criterion #13: pullback count (fatigue) ---
     pullback_count = count_recent_pullbacks(h1, direction)
     if pullback_count >= 4:
         return {"valid": False, "reason": "LATE_TREND_FATIGUE"}
 
-    # --- Criterion #2 + #6: pullback detected + duration ---
     if not pullback_detected(h1, direction):
         return {"valid": False, "reason": "NO_PULLBACK_ZONE"}
     if not pullback_duration_ok(h1, direction, min_bars=3, max_bars=10):
         return {"valid": False, "reason": "PULLBACK_DURATION_INVALID"}
 
-    # --- Criterion #5: pullback depth 35–78% ---
     if not pullback_depth_ok(h1, direction, min_pct=0.35, max_pct=0.78):
         return {"valid": False, "reason": "PULLBACK_DEPTH_INVALID"}
 
-    # --- Criteria #2 + #3 + #4: at least one zone must match ---
     at_ema = near_ema_zone(h1, direction)
     at_fib = fib_pullback_zone(h1, direction)
     at_swing = near_swing_low_zone(h1, direction)
     if not (at_ema or at_fib or at_swing):
         return {"valid": False, "reason": "NOT_AT_ANY_ZONE"}
 
-    # --- Criterion #7: rejection at zone (patterns allowed) ---
     if not rejection_at_zone(h1, direction, lookback=3):
         return {"valid": False, "reason": "NO_REJECTION_AT_ZONE"}
 
-    # --- Criterion #10: RSI in pullback zone 40–55 ---
     if not rsi_in_pullback_zone(h1, direction, min_r=40, max_r=55):
         return {"valid": False, "reason": "RSI_OUT_OF_PULLBACK_ZONE"}
 
-    # --- Criterion #14: orderly pullback ---
     if not is_orderly_pullback(h1, direction):
         return {"valid": False, "reason": "DISORDERLY_PULLBACK"}
 
-    # --- Criterion #9: volume decreasing (hard) ---
     if not volume_decreasing_in_pullback(h1, direction):
         return {"valid": False, "reason": "VOLUME_INCREASING"}
 
-    # --- Criterion #12: 15M pattern confirmation ---
     if not mtf_pullback_confirmation(m15, direction):
         return {"valid": False, "reason": "NO_15M_PATTERN"}
 
-    # --- 5M entry trigger ---
     if not entry_trigger_5m(m5, direction):
         return {"valid": False, "reason": "5M_TRIGGER"}
 
-    # --- Quality scoring (all hard filters passed → valid) ---
     score = 7
     if at_ema:
         score += 1
@@ -1173,6 +1122,51 @@ def context_allows(strategy: str, daily: str, h4: str,
 
 
 # ============================================================
+# v18-BTC: BTC FILTER
+# ============================================================
+
+def btc_filter(direction: str, btc_context: Optional[Dict[str, Any]]) -> str:
+    """
+    Decide whether a signal should be allowed given BTC context.
+
+    Returns:
+        "ALLOW" — no restriction
+        "WARN"  — signal allowed but flagged
+        "BLOCK" — signal rejected
+    """
+    if not btc_context:
+        return "ALLOW"
+
+    expected = "BULLISH" if direction == "LONG" else "BEARISH"
+
+    btc_dir = btc_context.get("h4") or "RANGE"
+    btc_adx = float(btc_context.get("adx_h4") or 0.0)
+    daily_dir = btc_context.get("daily") or "RANGE"
+    daily_adx = float(btc_context.get("adx_daily") or 0.0)
+
+    btc_opposes = btc_dir in ("BULLISH", "BEARISH") and btc_dir != expected
+    daily_opposes = daily_dir in ("BULLISH", "BEARISH") and daily_dir != expected
+
+    # Rule 1: Both HTFs of BTC against, at least one strongly → BLOCK
+    if btc_opposes and daily_opposes and max(btc_adx, daily_adx) >= 30:
+        return "BLOCK"
+
+    # Rule 2: BTC 4H strongly against → BLOCK
+    if btc_opposes and btc_adx >= 30:
+        return "BLOCK"
+
+    # Rule 3: BTC 4H against moderately → WARN
+    if btc_opposes and btc_adx >= 22:
+        return "WARN"
+
+    # Rule 4: BTC Daily against, 4H neutral but Daily strong → WARN
+    if daily_opposes and daily_adx >= 30 and not btc_opposes:
+        return "WARN"
+
+    return "ALLOW"
+
+
+# ============================================================
 # TRADE LEVELS
 # ============================================================
 
@@ -1249,7 +1243,8 @@ def target_reachable(levels, h1, direction):
 # ============================================================
 
 def no_trade(reason, daily="RANGE", h4="RANGE", h1="RANGE",
-             direction=None, diagnostics=None, metrics=None):
+             direction=None, diagnostics=None, metrics=None, btc=None):
+    # v18-BTC: 'btc' param added
     result = {
         "signal": "NO_TRADE", "direction": direction, "score": 0,
         "quality": "LOW", "reason": reason,
@@ -1263,6 +1258,20 @@ def no_trade(reason, daily="RANGE", h4="RANGE", h1="RANGE",
     }
     if metrics:
         result.update(metrics)
+    # v18-BTC: attach BTC context fields
+    if btc:
+        result["btc_dir"] = btc.get("h4", "RANGE")
+        result["btc_adx"] = round(float(btc.get("adx_h4", 0.0)), 2)
+        if direction in ("LONG", "SHORT"):
+            expected = "BULLISH" if direction == "LONG" else "BEARISH"
+            btc_h4 = btc.get("h4", "RANGE")
+            result["btc_relation"] = (
+                "ALIGNED" if btc_h4 == expected
+                else "OPPOSED" if btc_h4 in ("BULLISH", "BEARISH")
+                else "NEUTRAL"
+            )
+        else:
+            result["btc_relation"] = "NEUTRAL"
     return result
 
 
@@ -1293,15 +1302,24 @@ def run_strategy(name, h1, m15, m5, direction):
 # MAIN ENGINE
 # ============================================================
 
-def generate_signal(daily, h4, h1, m15, m5):
+def generate_signal(daily, h4, h1, m15, m5,
+                    btc_context: Optional[Dict[str, Any]] = None):
+    # v18-BTC: btc_context parameter added
     d = closed(daily)
     h4c = closed(h4)
     h1c = closed(h1)
     m15c = closed(m15)
     m5c = closed(m5)
 
+    # v18-BTC: default neutral BTC context if not provided
+    if btc_context is None:
+        btc_context = {
+            "daily": "RANGE", "h4": "RANGE", "h1": "RANGE",
+            "adx_h1": 0.0, "adx_h4": 0.0, "adx_daily": 0.0,
+        }
+
     if min(len(d), len(h4c), len(h1c), len(m15c), len(m5c)) < 50:
-        return no_trade("INSUFFICIENT_DATA")
+        return no_trade("INSUFFICIENT_DATA", btc=btc_context)
 
     daily_dir = direction_from_tf(d)
     h4_dir = direction_from_tf(h4c)
@@ -1371,8 +1389,9 @@ def generate_signal(daily, h4, h1, m15, m5):
         metrics["confirmation"] = bool(entry_trigger_5m(m5c, diag_dir))
 
     if not strategy_results:
+        # v18-BTC: pass btc context to no_trade
         return no_trade("NO_VALID_STRATEGY", daily_dir, h4_dir,
-                        h1_dir, None, diagnostics, metrics)
+                        h1_dir, None, diagnostics, metrics, btc=btc_context)
 
     priority = {
         "TREND_FOLLOWING": 4, "PULLBACK": 3,
@@ -1403,7 +1422,6 @@ def generate_signal(daily, h4, h1, m15, m5):
         cand_metrics["mtf_confirmation"] = bool(_mtf_basic(m15c, direction))
         cand_metrics["confirmation"] = bool(entry_trigger_5m(m5c, direction))
 
-        # RSI extension filter
         if strategy in ("TREND_FOLLOWING", "PULLBACK", "BREAKOUT"):
             if direction == "LONG" and rsi15 >= 78:
                 diagnostics[strategy] = "HIGH_FAIL:RSI_TOO_EXTENDED"
@@ -1414,7 +1432,6 @@ def generate_signal(daily, h4, h1, m15, m5):
                 rejection_reasons.append("RSI_TOO_EXTENDED")
                 continue
 
-        # HIGH quality gate
         if strategy == "TREND_FOLLOWING":
             high = (
                 score >= 8 and adx1 >= 22
@@ -1422,7 +1439,6 @@ def generate_signal(daily, h4, h1, m15, m5):
                 and htf_breakout_confirm(h1c, direction)
             )
         elif strategy == "PULLBACK":
-            # detect_pullback already enforces all hard filters → just require score
             high = (
                 score >= 9
                 and cand_metrics["confirmation"]
@@ -1496,14 +1512,40 @@ def generate_signal(daily, h4, h1, m15, m5):
             final_reason = "RSI_TOO_EXTENDED"
         else:
             final_reason = "SIGNAL_QUALITY_TOO_LOW"
+        # v18-BTC: pass btc context to no_trade
         return no_trade(final_reason, daily_dir, h4_dir, h1_dir,
-                        None, diagnostics, metrics)
+                        None, diagnostics, metrics, btc=btc_context)
 
     high_candidates.sort(
         key=lambda item: (item["score"], item["priority"]),
         reverse=True,
     )
     selected = high_candidates[0]
+
+    # ========================================================
+    # v18-BTC: BTC FILTER (final gate)
+    # ========================================================
+    btc_status = btc_filter(selected["direction"], btc_context)
+
+    if btc_status == "BLOCK":
+        for s_name in list(diagnostics.keys()):
+            if diagnostics[s_name] == "VALID":
+                diagnostics[s_name] = "HIGH_FAIL:BTC_OPPOSES"
+        return no_trade(
+            "BTC_OPPOSES",
+            daily_dir, h4_dir, h1_dir,
+            selected["direction"], diagnostics, metrics,
+            btc=btc_context,
+        )
+
+    expected_dir = "BULLISH" if selected["direction"] == "LONG" else "BEARISH"
+    btc_h4 = btc_context.get("h4", "RANGE")
+    btc_relation = (
+        "ALIGNED" if btc_h4 == expected_dir
+        else "OPPOSED" if btc_h4 in ("BULLISH", "BEARISH")
+        else "NEUTRAL"
+    )
+    # ========================================================
 
     return {
         "signal": selected["direction"],
@@ -1522,6 +1564,11 @@ def generate_signal(daily, h4, h1, m15, m5):
         "mtf_confirmation": bool(selected["metrics"]["mtf_confirmation"]),
         "volume_spike": bool(selected["metrics"]["volume_spike"]),
         "confirmation": bool(selected["metrics"]["confirmation"]),
+        # v18-BTC: BTC context in output
+        "btc_warning": btc_status == "WARN",
+        "btc_dir": btc_h4,
+        "btc_adx": round(float(btc_context.get("adx_h4", 0.0)), 2),
+        "btc_relation": btc_relation,
         **selected["levels"],
     }
 
