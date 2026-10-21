@@ -1,5 +1,5 @@
 # ============================================================
-# watchlist.py — 50 coins configured for Toobit
+# watchlist.py — 50 coins configured for Toobit (Fixed Names)
 # ============================================================
 
 WATCHLIST = {
@@ -25,23 +25,26 @@ WATCHLIST = {
     "KAS":  {"symbol": "KAS-SWAP-USDT",  "category": "l1"},
     "HBAR": {"symbol": "HBAR-SWAP-USDT", "category": "l1"},
     "XLM":  {"symbol": "XLM-SWAP-USDT",  "category": "l1"},
+    "DOT":  {"symbol": "DOT-SWAP-USDT",  "category": "l1"},
+    "ATOM": {"symbol": "ATOM-SWAP-USDT", "category": "l1"},
 
     # ---- DEFI / ORACLE ----
     "UNI":    {"symbol": "UNI-SWAP-USDT",    "category": "defi"},
     "AAVE":   {"symbol": "AAVE-SWAP-USDT",   "category": "defi"},
-    "MKR":    {"symbol": "MKR-SWAP-USDT",    "category": "defi"},
     "ONDO":   {"symbol": "ONDO-SWAP-USDT",   "category": "defi"},
     "PENDLE": {"symbol": "PENDLE-SWAP-USDT", "category": "defi"},
     "JUP":    {"symbol": "JUP-SWAP-USDT",    "category": "defi"},
     "LDO":    {"symbol": "LDO-SWAP-USDT",    "category": "defi"},
     "CRV":    {"symbol": "CRV-SWAP-USDT",    "category": "defi"},
+    "INJ":    {"symbol": "INJ-SWAP-USDT",    "category": "defi"},
+    "RUNE":   {"symbol": "RUNE-SWAP-USDT",   "category": "defi"},
 
-    # ---- MEMECOINS ----
-    "PEPE":  {"symbol": "PEPE-SWAP-USDT",  "category": "meme"},
-    "SHIB":  {"symbol": "SHIB-SWAP-USDT",  "category": "meme"},
-    "WIF":   {"symbol": "WIF-SWAP-USDT",   "category": "meme"},
-    "BONK":  {"symbol": "BONK-SWAP-USDT",  "category": "meme"},
-    "FLOKI": {"symbol": "FLOKI-SWAP-USDT", "category": "meme"},
+    # ---- MEMECOINS (اصلاح شده با پیشوند 1000) ----
+    "PEPE":  {"symbol": "1000PEPE-SWAP-USDT",  "category": "meme"},
+    "SHIB":  {"symbol": "1000SHIB-SWAP-USDT",  "category": "meme"},
+    "BONK":  {"symbol": "1000BONK-SWAP-USDT",  "category": "meme"},
+    "FLOKI": {"symbol": "1000FLOKI-SWAP-USDT", "category": "meme"},
+    "WIF":   {"symbol": "WIF-SWAP-USDT",       "category": "meme"},
 
     # ---- AI / DEPIN ----
     "TAO":    {"symbol": "TAO-SWAP-USDT",    "category": "ai"},
@@ -53,12 +56,10 @@ WATCHLIST = {
     "ARB": {"symbol": "ARB-SWAP-USDT", "category": "l2"},
     "OP":  {"symbol": "OP-SWAP-USDT",  "category": "l2"},
     "IMX": {"symbol": "IMX-SWAP-USDT", "category": "l2"},
-    "MNT": {"symbol": "MNT-SWAP-USDT", "category": "l2"},
     "POL": {"symbol": "POL-SWAP-USDT", "category": "l2"},
 
     # ---- EXCHANGE TOKENS ----
     "OKB": {"symbol": "OKB-SWAP-USDT", "category": "exchange"},
-    "BGB": {"symbol": "BGB-SWAP-USDT", "category": "exchange"},
 
     # ---- RWA ----
     "XAUT": {"symbol": "XAUT-SWAP-USDT", "category": "rwa"},
@@ -67,13 +68,11 @@ WATCHLIST = {
     # ---- LEGACY ----
     "LTC": {"symbol": "LTC-SWAP-USDT", "category": "legacy"},
     "BCH": {"symbol": "BCH-SWAP-USDT", "category": "legacy"},
+    "ETC": {"symbol": "ETC-SWAP-USDT", "category": "legacy"},
 
     # ---- PRIVACY ----
     "XMR": {"symbol": "XMR-SWAP-USDT", "category": "privacy"},
     "ZEC": {"symbol": "ZEC-SWAP-USDT", "category": "privacy"},
-
-    # ---- EXTRA ----
-    "INJ": {"symbol": "INJ-SWAP-USDT", "category": "defi"},
 }
 
 def get_symbols():
