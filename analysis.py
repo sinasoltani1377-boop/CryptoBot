@@ -1,10 +1,11 @@
 # ============================================================
-# CryptoBot - Analysis Engine v18
+# CryptoBot - Analysis Engine v19
 #
 # v15: Trend Following fixes
 # v16: Partial PULLBACK fixes
 # v17: COMPLETE PULLBACK — all 15 criteria implemented
-# v18: BTC context integration (5 patches only)
+# v18: BTC context integration
+# v19: COMPLETE BREAKOUT — strict volume, squeeze, FOMO, and mandatory ADX
 #
 # 1H  = Main trend / strategy environment
 # 15M = Setup confirmation
@@ -868,7 +869,7 @@ def is_orderly_pullback(h1: List[Any], direction: str, lookback: int = 5) -> boo
 
 
 # ============================================================
-# BREAKOUT HELPERS
+# BREAKOUT HELPERS (v19)
 # ============================================================
 
 def local_breakout(m15: List[Any], direction: str, lookback: int = 20) -> Tuple[bool, float]:
@@ -895,6 +896,36 @@ def breakout_hold(m15: List[Any], direction: str, level: float) -> bool:
         return bullish(last) and c > level and h >= c
     if direction == "SHORT":
         return bearish(last) and c < level and l <= c
+    return False
+
+
+def is_squeeze(m15: List[Any], lookback: int = 20) -> bool:
+    """بررسی فشردگی قیمت: ATR فعلی باید کمتر از میانگین ATR باشد."""
+    if len(m15) < lookback + 15:
+        return False
+    current_atr = atr(m15[-15:], 14)
+    historical_atrs = []
+    for i in range(15, lookback + 15):
+        historical_atrs.append(atr(m15[-i-15:-i], 14))
+    avg_atr = sum(historical_atrs) / len(historical_atrs) if historical_atrs else 0
+    if avg_atr <= 0:
+        return False
+    return current_atr < avg_atr * 0.9  # ATR فعلی کمتر از 90% میانگین
+
+
+def not_overextended(m15: List[Any], direction: str, level: float, max_atr_mult: float = 1.5) -> bool:
+    """بررسی اینکه قیمت خیلی از سطح شکست فاصله نگرفته باشد (جلوگیری از FOMO)."""
+    if len(m15) < 20 or level <= 0:
+        return False
+    current_price = candle_values(m15[-1])[3]
+    m15_atr = atr(m15, 14)
+    if m15_atr <= 0:
+        return False
+    distance = abs(current_price - level)
+    if direction == "LONG":
+        return (current_price > level) and (distance <= max_atr_mult * m15_atr)
+    if direction == "SHORT":
+        return (current_price < level) and (distance <= max_atr_mult * m15_atr)
     return False
 
 
@@ -1055,24 +1086,51 @@ def detect_pullback(h1, m15, m5, direction):
 
 
 def detect_breakout(h1, m15, m5, direction):
+    # 1. سطح کلیدی و تشخیص شکست
     ok, level = local_breakout(m15, direction, 20)
     if not ok:
         return {"valid": False, "reason": "NO_BREAKOUT"}
+
     last = m15[-1]
-    if body_ratio(last) < 0.38:
+    # 2. کندل مومنتوم (حداقل 50% بدنه)
+    if body_ratio(last) < 0.50:
         return {"valid": False, "reason": "WEAK_BREAKOUT_CANDLE"}
-    if not volume_spike(m15, 1.08, 20):
-        return {"valid": False, "reason": "NO_VOLUME"}
+
+    # 3. حجم انفجاری (حداقل 1.5 برابر میانگین)
+    if not volume_spike(m15, 1.50, 20):
+        return {"valid": False, "reason": "NO_VOLUME_SPIKE"}
+
+    # 4. محافظت از FOMO (قیمت خیلی از سطح شکست دور نشده باشد)
+    if not not_overextended(m15, direction, level):
+        return {"valid": False, "reason": "OVEREXTENDED_FROM_LEVEL"}
+
+    # 5. فشردگی قبل از شکست (Squeeze)
+    if not is_squeeze(m15):
+        return {"valid": False, "reason": "NO_SQUEEZE_BEFORE_BREAKOUT"}
+
+    # 6. حفظ سطح و تریگر 5 دقیقه
     if not breakout_hold(m15, direction, level):
         return {"valid": False, "reason": "NO_HOLD"}
+
     if not entry_trigger_5m(m5, direction):
         return {"valid": False, "reason": "5M_TRIGGER"}
+
+    # 7. فیلتر ADX (اجباری نه امتیازی)
+    adx1 = adx(h1)
+    if adx1 < 22:
+        return {"valid": False, "reason": "ADX_LOW"}
+
+    # 8. MTF و امتیازدهی
     mtf = _mtf_basic(m15, direction)
     score = 6
+
     if mtf:
         score += 2
-    if adx(h1) >= 20:
+    if adx1 >= 30: # اگر ADX بالای 30 باشد امتیاز بیشتری بگیرد
         score += 1
+    if volume_spike(m15, 2.0, 20): # اگر حجم 2 برابر بود
+        score += 1
+
     return {"valid": True, "reason": "VALID", "score": score,
             "mtf": mtf, "level": level}
 
@@ -1126,14 +1184,6 @@ def context_allows(strategy: str, daily: str, h4: str,
 # ============================================================
 
 def btc_filter(direction: str, btc_context: Optional[Dict[str, Any]]) -> str:
-    """
-    Decide whether a signal should be allowed given BTC context.
-
-    Returns:
-        "ALLOW" — no restriction
-        "WARN"  — signal allowed but flagged
-        "BLOCK" — signal rejected
-    """
     if not btc_context:
         return "ALLOW"
 
@@ -1147,19 +1197,15 @@ def btc_filter(direction: str, btc_context: Optional[Dict[str, Any]]) -> str:
     btc_opposes = btc_dir in ("BULLISH", "BEARISH") and btc_dir != expected
     daily_opposes = daily_dir in ("BULLISH", "BEARISH") and daily_dir != expected
 
-    # Rule 1: Both HTFs of BTC against, at least one strongly → BLOCK
     if btc_opposes and daily_opposes and max(btc_adx, daily_adx) >= 30:
         return "BLOCK"
 
-    # Rule 2: BTC 4H strongly against → BLOCK
     if btc_opposes and btc_adx >= 30:
         return "BLOCK"
 
-    # Rule 3: BTC 4H against moderately → WARN
     if btc_opposes and btc_adx >= 22:
         return "WARN"
 
-    # Rule 4: BTC Daily against, 4H neutral but Daily strong → WARN
     if daily_opposes and daily_adx >= 30 and not btc_opposes:
         return "WARN"
 
@@ -1244,7 +1290,6 @@ def target_reachable(levels, h1, direction):
 
 def no_trade(reason, daily="RANGE", h4="RANGE", h1="RANGE",
              direction=None, diagnostics=None, metrics=None, btc=None):
-    # v18-BTC: 'btc' param added
     result = {
         "signal": "NO_TRADE", "direction": direction, "score": 0,
         "quality": "LOW", "reason": reason,
@@ -1258,7 +1303,6 @@ def no_trade(reason, daily="RANGE", h4="RANGE", h1="RANGE",
     }
     if metrics:
         result.update(metrics)
-    # v18-BTC: attach BTC context fields
     if btc:
         result["btc_dir"] = btc.get("h4", "RANGE")
         result["btc_adx"] = round(float(btc.get("adx_h4", 0.0)), 2)
@@ -1304,14 +1348,12 @@ def run_strategy(name, h1, m15, m5, direction):
 
 def generate_signal(daily, h4, h1, m15, m5,
                     btc_context: Optional[Dict[str, Any]] = None):
-    # v18-BTC: btc_context parameter added
     d = closed(daily)
     h4c = closed(h4)
     h1c = closed(h1)
     m15c = closed(m15)
     m5c = closed(m5)
 
-    # v18-BTC: default neutral BTC context if not provided
     if btc_context is None:
         btc_context = {
             "daily": "RANGE", "h4": "RANGE", "h1": "RANGE",
@@ -1329,7 +1371,9 @@ def generate_signal(daily, h4, h1, m15, m5,
     adx1 = round(adx(h1c), 2)
     adx15 = round(adx(m15c), 2)
     h4_adx = adx(h4c)
-    vol = volume_spike(m15c, 1.08, 20)
+    
+    # در این نسخه، حجم به 1.5 تغییر کرد تا برای Breakout معیار باشد
+    vol = volume_spike(m15c, 1.50, 20)
 
     diagnostics = {}
     metrics = {
@@ -1389,7 +1433,6 @@ def generate_signal(daily, h4, h1, m15, m5,
         metrics["confirmation"] = bool(entry_trigger_5m(m5c, diag_dir))
 
     if not strategy_results:
-        # v18-BTC: pass btc context to no_trade
         return no_trade("NO_VALID_STRATEGY", daily_dir, h4_dir,
                         h1_dir, None, diagnostics, metrics, btc=btc_context)
 
@@ -1444,9 +1487,10 @@ def generate_signal(daily, h4, h1, m15, m5,
                 and cand_metrics["confirmation"]
             )
         elif strategy == "BREAKOUT":
+            # در اینجا فیلتر ADX اجباری شد (>=22) و حجم 1.5
             high = (
                 score >= 9 and cand_metrics["confirmation"]
-                and vol and adx1 >= 20
+                and vol and adx1 >= 22 
             )
         elif strategy == "REVERSAL":
             high = (
@@ -1466,6 +1510,7 @@ def generate_signal(daily, h4, h1, m15, m5,
                 failed.append(f"SCORE={score}<{min_score}")
             if not cand_metrics["confirmation"]:
                 failed.append("NO_5M_CONFIRMATION")
+            
             if strategy == "TREND_FOLLOWING":
                 if adx1 < 22:
                     failed.append(f"ADX1_LOW={adx1}")
@@ -1474,7 +1519,7 @@ def generate_signal(daily, h4, h1, m15, m5,
             elif strategy == "BREAKOUT":
                 if not vol:
                     failed.append("NO_VOLUME_SPIKE")
-                if adx1 < 20:
+                if adx1 < 22:
                     failed.append(f"ADX1_LOW={adx1}")
             elif strategy == "REVERSAL":
                 if not structure_shift_5m(m5c, direction):
@@ -1512,7 +1557,6 @@ def generate_signal(daily, h4, h1, m15, m5,
             final_reason = "RSI_TOO_EXTENDED"
         else:
             final_reason = "SIGNAL_QUALITY_TOO_LOW"
-        # v18-BTC: pass btc context to no_trade
         return no_trade(final_reason, daily_dir, h4_dir, h1_dir,
                         None, diagnostics, metrics, btc=btc_context)
 
@@ -1522,9 +1566,6 @@ def generate_signal(daily, h4, h1, m15, m5,
     )
     selected = high_candidates[0]
 
-    # ========================================================
-    # v18-BTC: BTC FILTER (final gate)
-    # ========================================================
     btc_status = btc_filter(selected["direction"], btc_context)
 
     if btc_status == "BLOCK":
@@ -1545,7 +1586,6 @@ def generate_signal(daily, h4, h1, m15, m5,
         else "OPPOSED" if btc_h4 in ("BULLISH", "BEARISH")
         else "NEUTRAL"
     )
-    # ========================================================
 
     return {
         "signal": selected["direction"],
@@ -1564,7 +1604,6 @@ def generate_signal(daily, h4, h1, m15, m5,
         "mtf_confirmation": bool(selected["metrics"]["mtf_confirmation"]),
         "volume_spike": bool(selected["metrics"]["volume_spike"]),
         "confirmation": bool(selected["metrics"]["confirmation"]),
-        # v18-BTC: BTC context in output
         "btc_warning": btc_status == "WARN",
         "btc_dir": btc_h4,
         "btc_adx": round(float(btc_context.get("adx_h4", 0.0)), 2),
