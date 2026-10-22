@@ -445,7 +445,7 @@ def already_tracking(symbol, direction):
         open_trades = get_open_trades()
         
         # v20: Max 3 open trades total
-        if len(open_trades) >= 3:
+        if len(open_trades) >= 40:
             logger.warning(
                 "MAX_OPEN_TRADES_REACHED | %s | Existing=%d",
                 symbol, len(open_trades),
