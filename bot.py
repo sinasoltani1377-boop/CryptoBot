@@ -440,18 +440,40 @@ async def check_critical_news(symbol, direction):
 # ============================================================
 # TRACKER HELPERS
 # ============================================================
-
 def already_tracking(symbol, direction):
     try:
         open_trades = get_open_trades()
+        
+        # v20: Max 3 open trades total
+        if len(open_trades) >= 3:
+            logger.warning(
+                "MAX_OPEN_TRADES_REACHED | %s | Existing=%d",
+                symbol, len(open_trades),
+            )
+            return True
+        
+        # v20: Max 2 per direction
+        same_dir_count = sum(
+            1 for t in open_trades
+            if str(t.get("direction", "")).upper() == direction
+        )
+        if same_dir_count >= 2:
+            logger.warning(
+                "MAX_SAME_DIRECTION | %s | %s count=%d",
+                symbol, direction, same_dir_count,
+            )
+            return True
+        
+        # Original duplicate check
         for trade in open_trades:
-            if trade.get("symbol") == symbol and str(trade.get("direction", "")).upper() == direction:
+            if (trade.get("symbol") == symbol and 
+                str(trade.get("direction", "")).upper() == direction):
                 return True
+        
         return False
     except Exception:
         logger.exception("Tracker duplicate-check error")
         return False
-
 def is_valid_high_signal(result):
     if not isinstance(result, dict):
         return False
