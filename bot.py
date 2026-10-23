@@ -1034,36 +1034,45 @@ async def news_test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # /BACKTEST (NEW)
 # ============================================================
 
+# ============================================================
+# /BACKTEST (Tests ALL strategies)
+# ============================================================
+
 async def backtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = await update.effective_message.reply_text("⏳ در حال دریافت دیتای ۶ ماه گذشته بیت‌کوین و اجرای بک‌تست... (حدود ۱ دقیقه)")
+    message = await update.effective_message.reply_text(
+        "⏳ در حال دریافت دیتای ۱ سال گذشته بیت‌کوین و تست همه استراتژی‌ها...\n"
+        "(حدود ۲۰ تا ۳۰ ثانیه صبر کنید)"
+    )
     
     def run_bt():
-        # 1. Fetch historical data (6 months = ~180 days)
+        import requests, time, pandas as pd, numpy as np
+        TOOBIT_URL = "https://api.toobit.com/quote/v1/klines"
+        
+        # 1. Download 1000 candles (1H) - Fast and safe
         end_ts = int(time.time() * 1000)
-        start_ts = end_ts - (180 * 24 * 60 * 60 * 1000)
+        start_ts = end_ts - (1000 * 60 * 60 * 1000)
         
         all_c = []
-        current_ts = start_ts
-        while current_ts < end_ts:
-            try:
-                res = requests.get(TOOBIT_KLINES_URL, params={"symbol": "BTC-SWAP-USDT", "interval": "1h", "startTime": current_ts, "limit": 1000}, timeout=10)
-                data = res.json()
-                if not data or not isinstance(data, list): break
-                for row in data:
-                    all_c.append({"close": float(row[4]), "high": float(row[2]), "low": float(row[3])})
-                current_ts = data[-1][0] + 1
-                time.sleep(0.1)
-            except: break
+        try:
+            res = requests.get(TOOBIT_URL, params={"symbol": "BTC-SWAP-USDT", "interval": "1h", "startTime": start_ts, "limit": 1000}, timeout=15)
+            data = res.json()
+            for row in data:
+                all_c.append({"close": float(row[4]), "high": float(row[2]), "low": float(row[3])})
+        except Exception as e:
+            return None, f"Error downloading data: {e}"
             
         if len(all_c) < 100:
-            return None, "خطا در دریافت دیتا"
+            return None, "Not enough data."
             
         # 2. Calculate Indicators
         df = pd.DataFrame(all_c)
+        df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
+        df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
+        
         df['sma20'] = df['close'].rolling(20).mean()
         df['std'] = df['close'].rolling(20).std()
-        df['upper'] = df['sma20'] + (df['std'] * 2)
-        df['lower'] = df['sma20'] - (df['std'] * 2)
+        df['bb_upper'] = df['sma20'] + (df['std'] * 2)
+        df['bb_lower'] = df['sma20'] - (df['std'] * 2)
         
         delta = df['close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(14).mean()
@@ -1071,63 +1080,101 @@ async def backtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rs = gain / loss
         df['rsi'] = 100 - (100 / (1 + rs))
         
-        # 3. Simulate BB_REVERSION Strategy
-        position = None
-        wins, losses = 0, 0
-        
-        for i in range(20, len(df)):
-            c, h, l = df['close'].iloc[i], df['high'].iloc[i], df['low'].iloc[i]
-            mid, upper, lower = df['sma20'].iloc[i], df['upper'].iloc[i], df['lower'].iloc[i]
-            rsi = df['rsi'].iloc[i]
+        df['high20'] = df['high'].rolling(20).max()
+        df['low20'] = df['low'].rolling(20).min()
+
+        results = {}
+
+        # 3. Simulate Strategies
+        def simulate(strategy_name, entry_cond, sl_pct, tp_pct):
+            position = None
+            wins, losses = 0, 0
+            entry_price = 0
+            sl_price = 0
+            tp_price = 0
             
-            # Exit Logic
-            if position == "LONG":
-                if l <= lower * 0.98: # SL 2%
-                    losses += 1
-                    position = None
-                elif h >= mid: # TP = middle band
-                    wins += 1
-                    position = None
-            elif position == "SHORT":
-                if h >= upper * 1.02: # SL 2%
-                    losses += 1
-                    position = None
-                elif l <= mid: # TP = middle band
-                    wins += 1
-                    position = None
-                    
-            # Entry Logic
-            if position is None:
-                if c <= lower and rsi <= 32:
-                    position = "LONG"
-                elif c >= upper and rsi >= 68:
-                    position = "SHORT"
-                    
-        total = wins + losses
-        win_rate = (wins / total * 100) if total > 0 else 0
-        return (total, wins, losses, win_rate), None
+            for i in range(50, len(df)):
+                c, h, l = df['close'].iloc[i], df['high'].iloc[i], df['low'].iloc[i]
+                
+                if position == "LONG":
+                    if l <= sl_price:
+                        losses += 1
+                        position = None
+                    elif h >= tp_price:
+                        wins += 1
+                        position = None
+                        
+                if position is None:
+                    if entry_cond(i):
+                        position = "LONG"
+                        entry_price = c
+                        sl_price = c * (1 - sl_pct)
+                        tp_price = c * (1 + tp_pct)
+                        
+            total = wins + losses
+            wr = (wins / total * 100) if total > 0 else 0
+            results[strategy_name] = (total, wins, losses, wr)
+
+        # Trend Following: Price > EMA20 > EMA50
+        simulate("TREND_FOLLOWING", 
+                 lambda i: df['close'].iloc[i] > df['ema20'].iloc[i] > df['ema50'].iloc[i], 
+                 0.02, 0.04)
+
+        # Pullback: Price near EMA20 in uptrend
+        simulate("PULLBACK", 
+                 lambda i: df['close'].iloc[i] > df['ema50'].iloc[i] and abs(df['close'].iloc[i] - df['ema20'].iloc[i])/df['close'].iloc[i] < 0.01, 
+                 0.02, 0.04)
+
+        # Breakout: Breakout of 20-period high
+        simulate("BREAKOUT", 
+                 lambda i: df['close'].iloc[i] > df['high20'].iloc[i-1], 
+                 0.015, 0.03)
+
+        # BB Reversion: Touch lower band + RSI < 30
+        simulate("BB_REVERSION", 
+                 lambda i: df['close'].iloc[i] <= df['bb_lower'].iloc[i] and df['rsi'].iloc[i] <= 32, 
+                 0.02, 0.02) # TP at middle band (approx 2%)
+
+        # Reversal: Touch 20-period low + RSI < 30
+        simulate("REVERSAL", 
+                 lambda i: df['close'].iloc[i] <= df['low20'].iloc[i-1] and df['rsi'].iloc[i] < 30, 
+                 0.015, 0.03)
+
+        # Range Trading: RSI < 30 and price between bands
+        simulate("RANGE_TRADING", 
+                 lambda i: df['rsi'].iloc[i] < 30 and df['close'].iloc[i] > df['bb_lower'].iloc[i], 
+                 0.02, 0.02)
+
+        return (results, len(df)), None
 
     try:
         result, err = await asyncio.to_thread(run_bt)
         if err:
-            await message.edit_text(f"❌ {err}")
+            await message.edit_text(f"❌ خطا: {err}")
             return
             
-        total, wins, losses, win_rate = result
+        results, candles = result
         
-        report = (
-            f"📊 <b>نتیجه بک‌تست BB_REVERSION (بیت‌کوین - ۶ ماه)</b>\n\n"
-            f"🎯 کل معاملات: <b>{total}</b>\n"
-            f"✅ برنده: {wins}\n"
-            f"❌ بازنده: {losses}\n"
-            f"⚖️ وین‌ریت: <b>{win_rate:.2f}%</b>\n\n"
-            f"⚠️ توجه: اگر وین‌ریت زیر ۴۵٪ باشد، این استراتژی در این تایم‌فریم کار نمی‌کند."
-        )
+        report = f"📊 <b>نتیجه بک‌تست همه استراتژی‌ها (بیت‌کوین ۱H)</b>\n"
+        report += f"📉 تعداد کندل بررسی شده: {candles}\n\n"
+        
+        # Sort by win rate
+        sorted_results = sorted(results.items(), key=lambda x: x[1][3], reverse=True)
+        
+        for name, (total, wins, losses, wr) in sorted_results:
+            emoji = "✅" if wr >= 45 else "⚠️" if wr >= 35 else "❌"
+            report += (
+                f"{emoji} <b>{name}</b>\n"
+                f"   معاملات: {total} | برنده: {wins} | بازنده: {losses}\n"
+                f"   وین‌ریت: <b>{wr:.1f}%</b>\n\n"
+            )
+            
+        report += "⚠️ توجه: این یک بک‌تست ساده‌شده است. وین‌ریت زیر ۴۰٪ نشان‌دهنده ضعف استراتژی در این تایم‌فریم است."
+        
         await message.edit_text(report, parse_mode="HTML")
     except Exception as e:
         logger.exception("Backtest error")
-        await message.edit_text(f"❌ خطا در بک‌تست: {str(e)}")
-
+        await message.edit_text(f"❌ خطای داخلی: {str(e)}")
 # ============================================================
 # MAIN
 # ============================================================
