@@ -1175,7 +1175,7 @@ def main():
 
     logger.info("CryptoBot started successfully.")
     application.run_polling(drop_pending_updates=True)
-
+    application.add_handler(CommandHandler("backtest", backtest_command))
 # ============================================================
 # ENTRY POINT
 # ============================================================
