@@ -1295,13 +1295,13 @@ async def backtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"   💰 میانگین R: <b>{avg_r:+.2f}R</b>\n\n"
             )
         
-        report += "─" * 25 + "\n"
+        report += "=" * 25 + "\n\n"
         report += "📌 <b>راهنما:</b>\n"
         report += "• وین‌ریت > 50٪ و R مثبت = استراتژی سودده\n"
         report += "• وین‌ریت < 40٪ = استراتژی نیاز به بازنگری دارد\n"
         report += "• اگر استراتژی‌ای معامله‌ای نداشت، یعنی در این بازار فعال نشد."
         
-        await message.edit_text(report, parse_mode="HTML")
+        await message.edit_text(report)  # no parse_mode = safe
         
     except Exception as e:
         logger.exception("Backtest error")
