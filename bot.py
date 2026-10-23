@@ -1035,16 +1035,16 @@ async def news_test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 
 # ============================================================
-# /BACKTEST (v23 - Comprehensive Multi-Symbol Test)
+# /BACKTEST (v24 - 5000 Candles, 4 Symbols, 7 Months)
 # ============================================================
 
 async def backtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = await update.effective_message.reply_text(
-        "⏳ بک‌تست جامع شروع شد...\n\n"
+        "⏳ بک‌تست تاییدیه شروع شد...\n\n"
         "📊 ۴ ارز: BTC, ETH, SOL, BNB\n"
-        "📉 ۳۰۰۰ کندل ۱ ساعته برای هر ارز\n"
-        "🔢 مجموع: ۱۲۰۰۰ کندل\n"
-        "⏱ زمان تخمینی: ۲ تا ۳ دقیقه\n\n"
+        "📉 ۵۰۰۰ کندل ۱ ساعته برای هر ارز (~۷ ماه)\n"
+        "🔢 مجموع: ۲۰۰۰۰ کندل\n"
+        "⏱ زمان تخمینی: ۳ تا ۵ دقیقه\n\n"
         "لطفاً صبر کنید...",
     )
     
@@ -1085,18 +1085,18 @@ async def backtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         details = []
         
         for symbol in symbols:
-            # --- Download 3000 candles with pagination ---
+            # --- Download 5000 candles with pagination ---
             all_c = []
             end_ts = int(time.time() * 1000)
-            current_ts = end_ts - (3000 * 60 * 60 * 1000)
+            current_ts = end_ts - (5000 * 60 * 60 * 1000)
             
             attempts = 0
-            while len(all_c) < 3000 and attempts < 5:
+            while len(all_c) < 5000 and attempts < 8:
                 try:
                     res = requests.get(TOOBIT_URL, params={
                         "symbol": symbol, "interval": "1h",
                         "startTime": current_ts, "limit": 1000
-                    }, timeout=15)
+                    }, timeout=20)
                     data = res.json()
                     if not isinstance(data, list) or not data:
                         break
@@ -1137,7 +1137,6 @@ async def backtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sl_price = 0.0
             tp_price = 0.0
             active_strategy = None
-            symbol_trades = 0
             
             for i in range(60, len(df)):
                 c_close = df['close'].iloc[i]
@@ -1162,7 +1161,7 @@ async def backtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if hit_sl or hit_tp:
                         if hit_tp:
                             results[active_strategy]["wins"] += 1
-                            results[active_strategy]["r_sum"] += 2.0  # Approx R:R
+                            results[active_strategy]["r_sum"] += 2.0
                         else:
                             results[active_strategy]["losses"] += 1
                             results[active_strategy]["r_sum"] -= 1.0
@@ -1270,10 +1269,10 @@ async def backtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         results, symbols_done, details = result
         
-        report = "📊 <b>نتیجه بک‌تست جامع v23</b>\n\n"
+        report = "📊 <b>نتیجه بک‌تست تاییدیه v24 (۷ ماه داده)</b>\n\n"
         report += "".join(f"{d}\n" for d in details)
-        report += f"\n📈 <b>آمار کلی (۴ ارز، ~۱۲۰۰۰ کندل)</b>\n"
-        report += "─" * 25 + "\n\n"
+        report += f"\n📈 <b>آمار کلی (۴ ارز، ~۲۰۰۰۰ کندل)</b>\n"
+        report += "=" * 25 + "\n\n"
         
         # Sort by win rate
         sorted_results = []
@@ -1295,17 +1294,23 @@ async def backtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"   💰 میانگین R: <b>{avg_r:+.2f}R</b>\n\n"
             )
         
-        report += "=" * 25 + "\n\n"
+        report += "=" * 25 + "\n"
         report += "📌 <b>راهنما:</b>\n"
         report += "• وین‌ریت > 50٪ و R مثبت = استراتژی سودده\n"
         report += "• وین‌ریت < 40٪ = استراتژی نیاز به بازنگری دارد\n"
         report += "• اگر استراتژی‌ای معامله‌ای نداشت، یعنی در این بازار فعال نشد."
         
-        await message.edit_text(report)  # no parse_mode = safe
+        await message.edit_text(report)
         
     except Exception as e:
         logger.exception("Backtest error")
-        await message.edit_text(f"❌ خطای داخلی: {str(e)}")
+        try:
+            await message.edit_text(f"❌ خطای داخلی: {str(e)}")
+        except Exception:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"❌ خطای داخلی در بک‌تست: {str(e)}"
+            )
 # ============================================================
 # MAIN
 # ============================================================
