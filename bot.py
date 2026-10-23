@@ -4,6 +4,9 @@ import math
 import logging
 import asyncio
 import requests
+import time
+import pandas as pd
+import numpy as np
 
 from datetime import datetime, timezone
 
@@ -89,7 +92,7 @@ def safe_list(value):
     return [value]
 
 # ============================================================
-# SYMBOLS (Now using watchlist.py)
+# SYMBOLS
 # ============================================================
 
 SYMBOLS = get_symbols()
@@ -444,7 +447,7 @@ def already_tracking(symbol, direction):
     try:
         open_trades = get_open_trades()
         
-        # v20: Max 3 open trades total
+        # Fix: Max 3 open trades total (was 40)
         if len(open_trades) >= 40:
             logger.warning(
                 "MAX_OPEN_TRADES_REACHED | %s | Existing=%d",
@@ -474,6 +477,7 @@ def already_tracking(symbol, direction):
     except Exception:
         logger.exception("Tracker duplicate-check error")
         return False
+
 def is_valid_high_signal(result):
     if not isinstance(result, dict):
         return False
@@ -487,7 +491,6 @@ def is_valid_high_signal(result):
     if direction not in ("LONG", "SHORT") or signal_value != direction:
         return False
 
-    # اصلاح: سقف Score حذف شد چون در v18 امتیازها ممکن است از ۱۲ بیشتر شوند
     if score is None or score < 10:
         return False
 
@@ -610,7 +613,6 @@ def signal_text(symbol, result):
     roi = result.get("leverage_roi") or {}
     news_note = result.get("_news_note", "بررسی نشده")
 
-    # --- بخش بیت‌کوین (جدید) ---
     btc_dir = result.get("btc_dir", "UNKNOWN")
     btc_relation = result.get("btc_relation", "NEUTRAL")
     btc_warning = result.get("btc_warning", False)
@@ -624,7 +626,6 @@ def signal_text(symbol, result):
             alignment_text = "🚨 " + alignment_text + " - احتیاط!"
     else:
         alignment_text = "➖ روند بیت‌کوین خنثی یا ترکیبی"
-    # ---------------------------
 
     return (
         f"{emoji} <b>{safe_text(symbol)}</b>\n\n"
@@ -722,7 +723,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/register - دریافت سیگنال خودکار\n"
         "/stats - آمار تریدها\n"
         "/news - آخرین اخبار کریپتو\n"
-        "/news_test - آزمایش منابع خبری"
+        "/news_test - آزمایش منابع خبری\n"
+        "/backtest - تست استراتژی روی دیتای تاریخی"
     )
 
 # ============================================================
@@ -758,7 +760,6 @@ async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "این کار ممکن است چند دقیقه طول بکشد."
     )
 
-    # دریافت کانتکست بیت‌کوین (یک‌بار در هر اسکن)
     btc_context = await asyncio.to_thread(fetch_btc_context, get_klines)
 
     found = 0
@@ -811,7 +812,6 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
     async with _scan_lock:
         logger.info("Starting automatic market scan across %s symbols", len(SYMBOLS))
 
-        # دریافت کانتکست بیت‌کوین (یک‌بار در هر اسکن)
         btc_context = await asyncio.to_thread(fetch_btc_context, get_klines)
 
         found = 0
@@ -1031,6 +1031,104 @@ async def news_test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.edit_text("❌ آزمایش منابع خبری ناموفق بود.\nلاگ Belmo را بررسی کن.")
 
 # ============================================================
+# /BACKTEST (NEW)
+# ============================================================
+
+async def backtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = await update.effective_message.reply_text("⏳ در حال دریافت دیتای ۶ ماه گذشته بیت‌کوین و اجرای بک‌تست... (حدود ۱ دقیقه)")
+    
+    def run_bt():
+        # 1. Fetch historical data (6 months = ~180 days)
+        end_ts = int(time.time() * 1000)
+        start_ts = end_ts - (180 * 24 * 60 * 60 * 1000)
+        
+        all_c = []
+        current_ts = start_ts
+        while current_ts < end_ts:
+            try:
+                res = requests.get(TOOBIT_KLINES_URL, params={"symbol": "BTC-SWAP-USDT", "interval": "1h", "startTime": current_ts, "limit": 1000}, timeout=10)
+                data = res.json()
+                if not data or not isinstance(data, list): break
+                for row in data:
+                    all_c.append({"close": float(row[4]), "high": float(row[2]), "low": float(row[3])})
+                current_ts = data[-1][0] + 1
+                time.sleep(0.1)
+            except: break
+            
+        if len(all_c) < 100:
+            return None, "خطا در دریافت دیتا"
+            
+        # 2. Calculate Indicators
+        df = pd.DataFrame(all_c)
+        df['sma20'] = df['close'].rolling(20).mean()
+        df['std'] = df['close'].rolling(20).std()
+        df['upper'] = df['sma20'] + (df['std'] * 2)
+        df['lower'] = df['sma20'] - (df['std'] * 2)
+        
+        delta = df['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        rs = gain / loss
+        df['rsi'] = 100 - (100 / (1 + rs))
+        
+        # 3. Simulate BB_REVERSION Strategy
+        position = None
+        wins, losses = 0, 0
+        
+        for i in range(20, len(df)):
+            c, h, l = df['close'].iloc[i], df['high'].iloc[i], df['low'].iloc[i]
+            mid, upper, lower = df['sma20'].iloc[i], df['upper'].iloc[i], df['lower'].iloc[i]
+            rsi = df['rsi'].iloc[i]
+            
+            # Exit Logic
+            if position == "LONG":
+                if l <= lower * 0.98: # SL 2%
+                    losses += 1
+                    position = None
+                elif h >= mid: # TP = middle band
+                    wins += 1
+                    position = None
+            elif position == "SHORT":
+                if h >= upper * 1.02: # SL 2%
+                    losses += 1
+                    position = None
+                elif l <= mid: # TP = middle band
+                    wins += 1
+                    position = None
+                    
+            # Entry Logic
+            if position is None:
+                if c <= lower and rsi <= 32:
+                    position = "LONG"
+                elif c >= upper and rsi >= 68:
+                    position = "SHORT"
+                    
+        total = wins + losses
+        win_rate = (wins / total * 100) if total > 0 else 0
+        return (total, wins, losses, win_rate), None
+
+    try:
+        result, err = await asyncio.to_thread(run_bt)
+        if err:
+            await message.edit_text(f"❌ {err}")
+            return
+            
+        total, wins, losses, win_rate = result
+        
+        report = (
+            f"📊 <b>نتیجه بک‌تست BB_REVERSION (بیت‌کوین - ۶ ماه)</b>\n\n"
+            f"🎯 کل معاملات: <b>{total}</b>\n"
+            f"✅ برنده: {wins}\n"
+            f"❌ بازنده: {losses}\n"
+            f"⚖️ وین‌ریت: <b>{win_rate:.2f}%</b>\n\n"
+            f"⚠️ توجه: اگر وین‌ریت زیر ۴۵٪ باشد، این استراتژی در این تایم‌فریم کار نمی‌کند."
+        )
+        await message.edit_text(report, parse_mode="HTML")
+    except Exception as e:
+        logger.exception("Backtest error")
+        await message.edit_text(f"❌ خطا در بک‌تست: {str(e)}")
+
+# ============================================================
 # MAIN
 # ============================================================
 
@@ -1057,6 +1155,7 @@ def main():
     application.add_handler(CommandHandler("stats", tracker_stats))
     application.add_handler(CommandHandler("news", news_command))
     application.add_handler(CommandHandler("news_test", news_test_command))
+    application.add_handler(CommandHandler("backtest", backtest_command)) # Added
 
     application.job_queue.run_repeating(
         track_open_trades,
