@@ -1035,158 +1035,274 @@ async def news_test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 
 # ============================================================
-# /BACKTEST (v22 - Regime Aware)
+# /BACKTEST (v23 - Comprehensive Multi-Symbol Test)
 # ============================================================
 
 async def backtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = await update.effective_message.reply_text(
-        "⏳ در حال دریافت دیتای ۱ سال گذشته و شبیه‌سازی منطق v22...\n"
-        "(حدود ۲۰ تا ۳۰ ثانیه صبر کنید)"
+        "⏳ بک‌تست جامع شروع شد...\n\n"
+        "📊 ۴ ارز: BTC, ETH, SOL, BNB\n"
+        "📉 ۳۰۰۰ کندل ۱ ساعته برای هر ارز\n"
+        "🔢 مجموع: ۱۲۰۰۰ کندل\n"
+        "⏱ زمان تخمینی: ۲ تا ۳ دقیقه\n\n"
+        "لطفاً صبر کنید...",
     )
     
     def run_bt():
         import requests, time, pandas as pd, numpy as np
-        from analysis import adx, rsi, bollinger_bands, ema
         
         TOOBIT_URL = "https://api.toobit.com/quote/v1/klines"
+        symbols = ["BTC-SWAP-USDT", "ETH-SWAP-USDT", "SOL-SWAP-USDT", "BNB-SWAP-USDT"]
         
-        # 1. Download 1000 candles (1H)
-        end_ts = int(time.time() * 1000)
-        start_ts = end_ts - (1000 * 60 * 60 * 1000)
-        
-        all_c = []
-        try:
-            res = requests.get(TOOBIT_URL, params={"symbol": "BTC-SWAP-USDT", "interval": "1h", "startTime": start_ts, "limit": 1000}, timeout=15)
-            data = res.json()
-            for row in data:
-                all_c.append({"open": float(row[1]), "high": float(row[2]), "low": float(row[3]), "close": float(row[4]), "volume": float(row[5])})
-        except Exception as e:
-            return None, f"Error downloading data: {e}"
-            
-        if len(all_c) < 100:
-            return None, "Not enough data."
-            
-        # 2. Prepare candles for analysis engine
-        candles = []
-        for c in all_c:
-            candles.append([c["open"], c["high"], c["low"], c["close"], c["volume"]])
-
         results = {
-            "TREND_FOLLOWING": [0, 0], # [wins, losses]
-            "PULLBACK": [0, 0],
-            "BREAKOUT": [0, 0],
-            "BB_REVERSION": [0, 0],
-            "RANGE_TRADING": [0, 0],
-            "REVERSAL": [0, 0]
+            name: {"wins": 0, "losses": 0, "r_sum": 0.0}
+            for name in ["TREND_FOLLOWING", "PULLBACK", "BREAKOUT",
+                         "BB_REVERSION", "RANGE_TRADING", "REVERSAL"]
         }
-
-        position = None
-        entry_price = 0
-        sl_price = 0
-        tp_price = 0
-        active_strategy = None
-
-        # 3. Iterate and simulate
-        for i in range(50, len(candles)):
-            current_candles = candles[:i+1]
-            c_close = current_candles[-1][3]
-            c_high = current_candles[-1][1]
-            c_low = current_candles[-1][2]
+        
+        def calc_adx(df, period=14):
+            high, low, close = df['high'], df['low'], df['close']
+            plus_dm = high.diff()
+            minus_dm = -low.diff()
+            plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+            minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+            tr = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
+            atr = tr.ewm(alpha=1/period, adjust=False).mean()
+            plus_di = 100 * (plus_dm.ewm(alpha=1/period, adjust=False).mean() / atr.replace(0, np.nan))
+            minus_di = 100 * (minus_dm.ewm(alpha=1/period, adjust=False).mean() / atr.replace(0, np.nan))
+            dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+            adx = dx.ewm(alpha=1/period, adjust=False).mean()
+            return adx
+        
+        def calc_rsi(df, period=14):
+            delta = df['close'].diff()
+            gain = delta.where(delta > 0, 0).ewm(alpha=1/period, adjust=False).mean()
+            loss = -delta.where(delta < 0, 0).ewm(alpha=1/period, adjust=False).mean()
+            rs = gain / loss.replace(0, np.nan)
+            return 100 - (100 / (1 + rs))
+        
+        symbols_done = 0
+        details = []
+        
+        for symbol in symbols:
+            # --- Download 3000 candles with pagination ---
+            all_c = []
+            end_ts = int(time.time() * 1000)
+            current_ts = end_ts - (3000 * 60 * 60 * 1000)
             
-            # --- Manage open position ---
-            if position == "LONG":
-                if c_low <= sl_price:
-                    results[active_strategy][1] += 1
-                    position = None
-                elif c_high >= tp_price:
-                    results[active_strategy][0] += 1
-                    position = None
-                    
-            # --- Look for new position ---
-            if position is None:
-                # Calculate current regime indicators
-                current_adx = adx(current_candles, 14)
-                current_rsi = rsi(current_candles, 14)
+            attempts = 0
+            while len(all_c) < 3000 and attempts < 5:
+                try:
+                    res = requests.get(TOOBIT_URL, params={
+                        "symbol": symbol, "interval": "1h",
+                        "startTime": current_ts, "limit": 1000
+                    }, timeout=15)
+                    data = res.json()
+                    if not isinstance(data, list) or not data:
+                        break
+                    for row in data:
+                        all_c.append({
+                            "time": row[0], "open": float(row[1]),
+                            "high": float(row[2]), "low": float(row[3]),
+                            "close": float(row[4]), "volume": float(row[5])
+                        })
+                    if len(data) < 1000:
+                        break
+                    current_ts = data[-1][0] + 1
+                    time.sleep(0.05)
+                except Exception:
+                    break
+                attempts += 1
+            
+            if len(all_c) < 500:
+                details.append(f"⚠️ {symbol}: فقط {len(all_c)} کندل دریافت شد.")
+                continue
+            
+            # --- Calculate Indicators (Vectorized) ---
+            df = pd.DataFrame(all_c)
+            df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
+            df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
+            df['sma20'] = df['close'].rolling(20).mean()
+            df['std'] = df['close'].rolling(20).std()
+            df['bb_upper'] = df['sma20'] + 2 * df['std']
+            df['bb_lower'] = df['sma20'] - 2 * df['std']
+            df['rsi'] = calc_rsi(df, 14)
+            df['adx'] = calc_adx(df, 14)
+            df['high20_prev'] = df['high'].rolling(20).max().shift(1)
+            df['low20_prev'] = df['low'].rolling(20).min().shift(1)
+            
+            # --- Simulate ---
+            position = None
+            entry_price = 0.0
+            sl_price = 0.0
+            tp_price = 0.0
+            active_strategy = None
+            symbol_trades = 0
+            
+            for i in range(60, len(df)):
+                c_close = df['close'].iloc[i]
+                c_high = df['high'].iloc[i]
+                c_low = df['low'].iloc[i]
                 
-                if current_adx > 0: # Ensure enough data for ADX
+                # --- Exit check ---
+                if position is not None:
+                    hit_sl = False
+                    hit_tp = False
+                    if position == "LONG":
+                        if c_low <= sl_price:
+                            hit_sl = True
+                        elif c_high >= tp_price:
+                            hit_tp = True
+                    elif position == "SHORT":
+                        if c_high >= sl_price:
+                            hit_sl = True
+                        elif c_low <= tp_price:
+                            hit_tp = True
                     
-                    # REGIME SWITCH LOGIC
-                    if current_adx < 22:
-                        # --- RANGING MARKET ---
-                        # Test BB_REVERSION
-                        upper, mid, lower = bollinger_bands(current_candles, 20, 2.0)
-                        if lower > 0 and c_close <= lower and current_rsi <= 32:
-                            position = "LONG"
-                            active_strategy = "BB_REVERSION"
-                            entry_price = c_close
-                            sl_price = entry_price * 0.98
-                            tp_price = mid
-                            
-                        # Test RANGE_TRADING (Simplified: just RSI < 30)
-                        elif current_rsi <= 30:
-                            position = "LONG"
-                            active_strategy = "RANGE_TRADING"
-                            entry_price = c_close
-                            sl_price = entry_price * 0.98
-                            tp_price = entry_price * 1.02
-                            
-                    else:
-                        # --- TRENDING MARKET ---
-                        closes_list = [c[3] for c in current_candles]
-                        ema20 = ema(closes_list, 20)
-                        ema50 = ema(closes_list, 50)
-                        
-                        if ema20 and ema50:
-                            # Test TREND_FOLLOWING (Simplified: price > EMA20 > EMA50)
-                            if c_close > ema20 > ema50 and current_rsi < 70:
-                                position = "LONG"
-                                active_strategy = "TREND_FOLLOWING"
-                                entry_price = c_close
-                                sl_price = entry_price * 0.98
-                                tp_price = entry_price * 1.04
-                                
-                            # Test PULLBACK (Simplified: near EMA20 in uptrend)
-                            elif c_close > ema50 and abs(c_close - ema20)/c_close < 0.01 and current_rsi < 50:
-                                position = "LONG"
-                                active_strategy = "PULLBACK"
-                                entry_price = c_close
-                                sl_price = entry_price * 0.98
-                                tp_price = entry_price * 1.04
-
-        return (results, len(candles)), None
-
+                    if hit_sl or hit_tp:
+                        if hit_tp:
+                            results[active_strategy]["wins"] += 1
+                            results[active_strategy]["r_sum"] += 2.0  # Approx R:R
+                        else:
+                            results[active_strategy]["losses"] += 1
+                            results[active_strategy]["r_sum"] -= 1.0
+                        position = None
+                        active_strategy = None
+                    continue
+                
+                # --- Entry check ---
+                adx_val = df['adx'].iloc[i]
+                rsi_val = df['rsi'].iloc[i]
+                
+                if pd.isna(adx_val) or pd.isna(rsi_val):
+                    continue
+                
+                if adx_val < 22:
+                    # --- RANGING ---
+                    bb_lower = df['bb_lower'].iloc[i]
+                    bb_upper = df['bb_upper'].iloc[i]
+                    bb_mid = df['sma20'].iloc[i]
+                    
+                    if pd.isna(bb_lower) or pd.isna(bb_mid):
+                        continue
+                    
+                    # BB_REVERSION
+                    if c_close <= bb_lower and rsi_val <= 32:
+                        position = "LONG"
+                        active_strategy = "BB_REVERSION"
+                        entry_price = c_close
+                        sl_price = entry_price * 0.98
+                        tp_price = bb_mid
+                    elif c_close >= bb_upper and rsi_val >= 68:
+                        position = "SHORT"
+                        active_strategy = "BB_REVERSION"
+                        entry_price = c_close
+                        sl_price = entry_price * 1.02
+                        tp_price = bb_mid
+                    # RANGE_TRADING (RSI extreme)
+                    elif rsi_val <= 28:
+                        position = "LONG"
+                        active_strategy = "RANGE_TRADING"
+                        entry_price = c_close
+                        sl_price = entry_price * 0.98
+                        tp_price = entry_price * 1.02
+                    elif rsi_val >= 72:
+                        position = "SHORT"
+                        active_strategy = "RANGE_TRADING"
+                        entry_price = c_close
+                        sl_price = entry_price * 1.02
+                        tp_price = entry_price * 0.98
+                else:
+                    # --- TRENDING ---
+                    ema20 = df['ema20'].iloc[i]
+                    ema50 = df['ema50'].iloc[i]
+                    high20_prev = df['high20_prev'].iloc[i]
+                    low20_prev = df['low20_prev'].iloc[i]
+                    
+                    if pd.isna(ema20) or pd.isna(ema50):
+                        continue
+                    
+                    # TREND_FOLLOWING
+                    if c_close > ema20 > ema50 and rsi_val < 70:
+                        position = "LONG"
+                        active_strategy = "TREND_FOLLOWING"
+                        entry_price = c_close
+                        sl_price = entry_price * 0.98
+                        tp_price = entry_price * 1.04
+                    elif c_close < ema20 < ema50 and rsi_val > 30:
+                        position = "SHORT"
+                        active_strategy = "TREND_FOLLOWING"
+                        entry_price = c_close
+                        sl_price = entry_price * 1.02
+                        tp_price = entry_price * 0.96
+                    # PULLBACK
+                    elif c_close > ema50 and abs(c_close - ema20) / c_close < 0.01 and 40 <= rsi_val <= 60:
+                        position = "LONG"
+                        active_strategy = "PULLBACK"
+                        entry_price = c_close
+                        sl_price = entry_price * 0.98
+                        tp_price = entry_price * 1.04
+                    # BREAKOUT
+                    elif not pd.isna(high20_prev) and c_close > high20_prev and rsi_val < 72:
+                        position = "LONG"
+                        active_strategy = "BREAKOUT"
+                        entry_price = c_close
+                        sl_price = entry_price * 0.985
+                        tp_price = entry_price * 1.03
+                    elif not pd.isna(low20_prev) and c_close < low20_prev and rsi_val > 28:
+                        position = "SHORT"
+                        active_strategy = "BREAKOUT"
+                        entry_price = c_close
+                        sl_price = entry_price * 1.015
+                        tp_price = entry_price * 0.97
+            
+            details.append(f"✅ {symbol}: {len(df)} کندل بررسی شد.")
+            symbols_done += 1
+        
+        return (results, symbols_done, details), None
+    
     try:
         result, err = await asyncio.to_thread(run_bt)
+        
         if err:
             await message.edit_text(f"❌ خطا: {err}")
             return
-            
-        results, total_candles = result
         
-        report = f"📊 <b>نتیجه بک‌تست دقیق v22 (بیت‌کوین ۱H)</b>\n"
-        report += f"📉 تعداد کندل: {total_candles}\n\n"
+        results, symbols_done, details = result
+        
+        report = "📊 <b>نتیجه بک‌تست جامع v23</b>\n\n"
+        report += "".join(f"{d}\n" for d in details)
+        report += f"\n📈 <b>آمار کلی (۴ ارز، ~۱۲۰۰۰ کندل)</b>\n"
+        report += "─" * 25 + "\n\n"
         
         # Sort by win rate
         sorted_results = []
-        for name, (wins, losses) in results.items():
-            total = wins + losses
+        for name, data in results.items():
+            total = data["wins"] + data["losses"]
             if total > 0:
-                wr = (wins / total) * 100
-                sorted_results.append((name, total, wins, losses, wr))
-                
+                wr = (data["wins"] / total) * 100
+                avg_r = data["r_sum"] / total
+                sorted_results.append((name, total, data["wins"], data["losses"], wr, avg_r))
+        
         sorted_results.sort(key=lambda x: x[4], reverse=True)
         
-        for name, total, wins, losses, wr in sorted_results:
-            emoji = "✅" if wr >= 50 else "⚠️" if wr >= 40 else "❌"
+        for name, total, wins, losses, wr, avg_r in sorted_results:
+            emoji = "🏆" if wr >= 55 else "✅" if wr >= 45 else "⚠️" if wr >= 35 else "❌"
             report += (
                 f"{emoji} <b>{name}</b>\n"
-                f"   معاملات: {total} | برنده: {wins} | بازنده: {losses}\n"
-                f"   وین‌ریت: <b>{wr:.1f}%</b>\n\n"
+                f"   📊 معاملات: {total} (✅{wins} / ❌{losses})\n"
+                f"   🎯 وین‌ریت: <b>{wr:.1f}%</b>\n"
+                f"   💰 میانگین R: <b>{avg_r:+.2f}R</b>\n\n"
             )
-            
-        report += "⚠️ این تست دقیقاً منطق سوئیچ رژیم (ADX) را شبیه‌سازی کرده است."
+        
+        report += "─" * 25 + "\n"
+        report += "📌 <b>راهنما:</b>\n"
+        report += "• وین‌ریت > 50٪ و R مثبت = استراتژی سودده\n"
+        report += "• وین‌ریت < 40٪ = استراتژی نیاز به بازنگری دارد\n"
+        report += "• اگر استراتژی‌ای معامله‌ای نداشت، یعنی در این بازار فعال نشد."
         
         await message.edit_text(report, parse_mode="HTML")
+        
     except Exception as e:
         logger.exception("Backtest error")
         await message.edit_text(f"❌ خطای داخلی: {str(e)}")
