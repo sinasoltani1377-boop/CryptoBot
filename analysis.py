@@ -1,17 +1,10 @@
 # ============================================================
-# CryptoBot - Analysis Engine v21
+# CryptoBot - Analysis Engine v22
 #
-# v15-v20: (see history)
-# v21:
-#   - NEW STRATEGY: BB_REVERSION (Mean Reversion with Bollinger Bands)
-#   - BB_REVERSION works in ranging markets (ADX < 25)
-#   - Uses Bollinger Bands + RSI + Reversal Patterns
-#   - Custom TP/SL logic for BB_REVERSION:
-#       SL: Behind the band (with ATR buffer)
-#       TP1: Middle band (SMA20)
-#       TP2: Opposite band
-#       TP3: Beyond opposite band
-#   - context_allows handles BB_REVERSION like RANGE_TRADING
+# v22: Market Regime Switch
+#   - If ADX < 22 (Ranging): Only RANGE_TRADING, BB_REVERSION, REVERSAL
+#   - If ADX >= 22 (Trending): Only TREND_FOLLOWING, PULLBACK, BREAKOUT, REVERSAL
+#   - Saves compute, stops bot from buying fake breakouts in dead markets.
 # ============================================================
 
 from __future__ import annotations
@@ -272,7 +265,6 @@ def volume_spike(candles: List[Any], multiplier: float = 1.10, lookback: int = 2
 
 
 def bollinger_bands(candles: List[Any], period: int = 20, std_dev: float = 2.0) -> Tuple[float, float, float]:
-    """v21: Returns (upper_band, middle_band, lower_band)"""
     cls = closes(candles)
     if len(cls) < period:
         return 0.0, 0.0, 0.0
@@ -1230,19 +1222,15 @@ def detect_range_trading(h1, m15, m5, direction):
 
 
 def detect_bb_reversion(h1, m15, m5, direction):
-    """v21: Mean Reversion using Bollinger Bands + RSI + Reversal Patterns."""
     adx1 = adx(h1)
     if adx1 >= 25:
         return {"valid": False, "reason": "ADX_TOO_HIGH_FOR_REVERSION"}
-
     upper, mid, lower = bollinger_bands(h1, 20, 2.0)
     if upper == 0 or lower == 0:
         return {"valid": False, "reason": "BB_CALCULATION_FAILED"}
-
     last_candle = h1[-1]
     _, h, l, c, _ = candle_values(last_candle)
     r = rsi(h1, 14)
-
     if direction == "LONG":
         if l > lower * 1.005:
             return {"valid": False, "reason": "PRICE_NOT_AT_LOWER_BAND"}
@@ -1261,10 +1249,8 @@ def detect_bb_reversion(h1, m15, m5, direction):
             return {"valid": False, "reason": "NO_BEARISH_REVERSAL_PATTERN"}
     else:
         return {"valid": False, "reason": "INVALID_DIRECTION"}
-
     if not entry_trigger_5m(m5, direction):
         return {"valid": False, "reason": "5M_TRIGGER"}
-
     mtf = _mtf_basic(m15, direction)
     score = 8
     if mtf:
@@ -1287,7 +1273,6 @@ def context_allows(strategy: str, daily: str, h4: str,
     daily_opp = daily in ("BULLISH", "BEARISH") and daily != expected
     h4_opp = h4 in ("BULLISH", "BEARISH") and h4 != expected
 
-    # v21: Mean Reversion strategies work against HTF, with tighter guard
     if strategy in ("RANGE_TRADING", "BB_REVERSION"):
         if daily_opp and h4_opp and h4_adx >= 30:
             return False
@@ -1328,7 +1313,6 @@ def btc_filter(direction: str, btc_context: Optional[Dict[str, Any]],
     btc_opposes = btc_dir in ("BULLISH", "BEARISH") and btc_dir != expected
     daily_opposes = daily_dir in ("BULLISH", "BEARISH") and daily_dir != expected
 
-    # v21: Mean reversion strategies are protected differently
     if strategy in ("RANGE_TRADING", "BB_REVERSION"):
         if btc_opposes and btc_adx >= 35:
             return "BLOCK"
@@ -1346,7 +1330,7 @@ def btc_filter(direction: str, btc_context: Optional[Dict[str, Any]],
 
 
 # ============================================================
-# TRADE LEVELS (v21: strategy-aware, adds BB_REVERSION)
+# TRADE LEVELS
 # ============================================================
 
 def calculate_trade_levels(h1, m5, direction, strategy: str = "DEFAULT"):
@@ -1568,7 +1552,7 @@ def run_strategy(name, h1, m15, m5, direction):
 
 
 # ============================================================
-# MAIN ENGINE
+# MAIN ENGINE (v22 REGIME SWITCH)
 # ============================================================
 
 def generate_signal(daily, h4, h1, m15, m5,
@@ -1585,14 +1569,29 @@ def generate_signal(daily, h4, h1, m15, m5,
         }
     if min(len(d), len(h4c), len(h1c), len(m15c), len(m5c)) < 50:
         return no_trade("INSUFFICIENT_DATA", btc=btc_context)
+
     daily_dir = direction_from_tf(d)
     h4_dir = direction_from_tf(h4c)
     h1_dir = direction_from_tf(h1c)
+
     rsi15 = round(rsi(m15c), 2)
     adx1 = round(adx(h1c), 2)
     adx15 = round(adx(m15c), 2)
     h4_adx = adx(h4c)
     vol = volume_spike(m15c, 1.50, 20)
+
+    # ============================================================
+    # v22: MARKET REGIME SWITCH
+    # ============================================================
+    if adx1 < 22:
+        # Ranging Market: ONLY Mean Reversion
+        strategy_names = ["RANGE_TRADING", "BB_REVERSION", "REVERSAL"]
+        logger.info("REGIME_SWITCH | %s | RANGING (ADX=%.1f)", "MARKET", adx1)
+    else:
+        # Trending Market: ONLY Momentum
+        strategy_names = ["TREND_FOLLOWING", "PULLBACK", "BREAKOUT", "REVERSAL"]
+        logger.info("REGIME_SWITCH | %s | TRENDING (ADX=%.1f)", "MARKET", adx1)
+
     diagnostics = {}
     metrics = {
         "15m_rsi": rsi15, "adx_1h": adx1, "adx_15m": adx15,
@@ -1600,8 +1599,6 @@ def generate_signal(daily, h4, h1, m15, m5,
         "confirmation": False,
     }
     strategy_results = []
-    strategy_names = ["TREND_FOLLOWING", "PULLBACK", "BREAKOUT",
-                      "REVERSAL", "RANGE_TRADING", "BB_REVERSION"]
 
     for strategy_name in strategy_names:
         best_result = None
@@ -1612,15 +1609,20 @@ def generate_signal(daily, h4, h1, m15, m5,
                 result = run_strategy(strategy_name, h1c, m15c, m5c, direction)
             except Exception as exc:
                 result = {"valid": False, "reason": f"ERROR_{type(exc).__name__}"}
+            
+            # HTF Context
             if result.get("valid") and not context_allows(
                 strategy_name, daily_dir, h4_dir, direction, h4_adx
             ):
                 result["_htf_blocked"] = True
+            
             direction_results[direction] = result
+
             if result.get("valid") and not result.get("_htf_blocked"):
                 if best_result is None or result.get("score", 0) > best_result.get("score", 0):
                     best_result = result
                     best_direction = direction
+                    
         if best_result is not None:
             diagnostics[strategy_name] = "VALID"
             strategy_results.append((strategy_name, best_direction, best_result))
@@ -1643,6 +1645,7 @@ def generate_signal(daily, h4, h1, m15, m5,
     if diag_dir:
         metrics["mtf_confirmation"] = bool(_mtf_basic(m15c, diag_dir))
         metrics["confirmation"] = bool(entry_trigger_5m(m5c, diag_dir))
+        
     if not strategy_results:
         return no_trade("NO_VALID_STRATEGY", daily_dir, h4_dir,
                         h1_dir, None, diagnostics, metrics, btc=btc_context)
