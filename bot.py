@@ -7,7 +7,6 @@ import requests
 import time
 import pandas as pd
 import numpy as np
-
 from datetime import datetime, timezone, time as dt_time
 
 from news import get_latest_news, news_diagnostics
