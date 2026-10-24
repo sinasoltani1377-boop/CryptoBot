@@ -606,7 +606,74 @@ def get_stats() -> Dict[str, Any]:
         "strategies": strategies,
         "symbols": symbols,
     }
+# ============================================================
+# STATISTICS BY STRATEGY (v25)
+# ============================================================
 
+def get_stats_by_strategy() -> Dict[str, Dict[str, Any]]:
+    """
+    Return statistics grouped by strategy.
+    Each strategy gets its own breakdown of signals, targets, and stops.
+    """
+    with LOCK:
+        trades = _load_trades()
+
+    stats: Dict[str, Dict[str, Any]] = {}
+
+    for trade in trades:
+        strategy = str(trade.get("strategy", "UNKNOWN")).strip() or "UNKNOWN"
+
+        if strategy not in stats:
+            stats[strategy] = {
+                "total": 0,
+                "open": 0,
+                "closed": 0,
+                "tp1": 0,
+                "tp2": 0,
+                "tp3": 0,
+                "sl": 0,
+                "breakeven": 0,
+                "tp1_protected": 0,
+                "realized_pnl": 0.0,
+                "wins": 0,
+                "losses": 0,
+            }
+
+        s = stats[strategy]
+        s["total"] += 1
+
+        status = str(trade.get("status", "")).upper()
+        if status == "OPEN":
+            s["open"] += 1
+        elif status == "CLOSED":
+            s["closed"] += 1
+
+        if trade.get("tp1_hit"):
+            s["tp1"] += 1
+        if trade.get("tp2_hit"):
+            s["tp2"] += 1
+        if trade.get("tp3_hit"):
+            s["tp3"] += 1
+
+        reason = str(trade.get("close_reason", "")).upper()
+        if reason == "SL":
+            s["sl"] += 1
+            s["losses"] += 1
+        elif reason == "BREAKEVEN":
+            s["breakeven"] += 1
+        elif reason == "TP1_PROTECTED":
+            s["tp1_protected"] += 1
+            s["wins"] += 1
+        elif reason == "TP3":
+            s["wins"] += 1
+
+        s["realized_pnl"] += float(trade.get("realized_pnl", 0.0) or 0.0)
+
+    # Round pnl
+    for s in stats.values():
+        s["realized_pnl"] = round(s["realized_pnl"], 4)
+
+    return stats
 
 # ============================================================
 # DAILY / 7-DAY STATISTICS
