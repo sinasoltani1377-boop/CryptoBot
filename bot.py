@@ -8,7 +8,7 @@ import time
 import pandas as pd
 import numpy as np
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, time as dt_time
 
 from news import get_latest_news, news_diagnostics
 from telegram import Update
@@ -24,6 +24,7 @@ from tracker import (
     check_all_trades,
     get_open_trades,
     get_stats,
+    get_stats_by_strategy,
 )
 
 
@@ -447,7 +448,6 @@ def already_tracking(symbol, direction):
     try:
         open_trades = get_open_trades()
         
-        # Fix: Max 3 open trades total (was 40)
         if len(open_trades) >= 40:
             logger.warning(
                 "MAX_OPEN_TRADES_REACHED | %s | Existing=%d",
@@ -455,7 +455,6 @@ def already_tracking(symbol, direction):
             )
             return True
         
-        # v20: Max 2 per direction
         same_dir_count = sum(
             1 for t in open_trades
             if str(t.get("direction", "")).upper() == direction
@@ -467,7 +466,6 @@ def already_tracking(symbol, direction):
             )
             return True
         
-        # Original duplicate check
         for trade in open_trades:
             if (trade.get("symbol") == symbol and 
                 str(trade.get("direction", "")).upper() == direction):
@@ -554,7 +552,7 @@ def log_strategy_details(symbol, result):
     diagnostics = result.get("strategy_diagnostics")
     if isinstance(diagnostics, dict):
         parts = []
-        for strategy in ("TREND_FOLLOWING", "PULLBACK", "BREAKOUT", "REVERSAL", "RANGE_TRADING"):
+        for strategy in ("TREND_FOLLOWING", "PULLBACK", "BREAKOUT", "REVERSAL", "RANGE_TRADING", "BB_REVERSION"):
             value = diagnostics.get(strategy)
             if value is None:
                 parts.append(f"{strategy}=NO_DATA")
@@ -724,7 +722,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/stats - آمار تریدها\n"
         "/news - آخرین اخبار کریپتو\n"
         "/news_test - آزمایش منابع خبری\n"
-        "/backtest - تست استراتژی روی دیتای تاریخی"
+        "/backtest - تست استراتژی روی دیتای تاریخی\n"
+        "/report - گزارش روزانه استراتژی‌ها (دستی)"
     )
 
 # ============================================================
@@ -961,7 +960,8 @@ async def tracker_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🎯 TP2 Hit: {stats.get('tp2', 0)}\n"
             f"🎯 TP3 Hit: {stats.get('tp3', 0)}\n"
             f"🛑 SL Hit: {stats.get('sl', 0)}\n"
-            f"⚖️ Breakeven: {stats.get('breakeven', 0)}\n\n"
+            f"⚖️ Breakeven: {stats.get('breakeven', 0)}\n"
+            f"✅ TP1 Protected: {stats.get('tp1_protected', 0)}\n\n"
             f"💵 Realized PnL: {realized_pnl:+.4f} USDT\n"
             f"📈 Realized ROI: {realized_roi:+.2f}%\n"
             f"🔒 Closed PnL: {closed_pnl:+.4f} USDT\n"
@@ -1032,8 +1032,104 @@ async def news_test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.edit_text("❌ آزمایش منابع خبری ناموفق بود.\nلاگ Belmo را بررسی کن.")
 
 # ============================================================
-# /BACKTEST (NEW)
+# /DAILY_REPORT (auto + /report manual)
 # ============================================================
+
+async def daily_strategy_report(context: ContextTypes.DEFAULT_TYPE):
+    """
+    Daily report broken down by strategy.
+    Runs automatically every day at 20:30 UTC (00:00 Tehran).
+    """
+    try:
+        strategy_stats = await asyncio.to_thread(get_stats_by_strategy)
+        overall = await asyncio.to_thread(get_stats)
+
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        if not strategy_stats:
+            message = (
+                f"📊 <b>گزارش روزانه استراتژی‌ها</b>\n"
+                f"📅 {today}\n\n"
+                "هنوز هیچ معامله‌ای ثبت نشده است."
+            )
+        else:
+            sorted_strats = sorted(
+                strategy_stats.items(),
+                key=lambda x: x[1]["total"],
+                reverse=True,
+            )
+
+            lines = [
+                f"📊 <b>گزارش روزانه استراتژی‌ها</b>",
+                f"📅 {today}",
+                "=" * 30,
+                "",
+            ]
+
+            for name, s in sorted_strats:
+                if s["realized_pnl"] > 0:
+                    emoji = "🏆"
+                elif s["realized_pnl"] < 0:
+                    emoji = "❌"
+                else:
+                    emoji = "⚖️"
+
+                lines.append(f"{emoji} <b>{name}</b>")
+                lines.append(f"   📌 کل سیگنال: <b>{s['total']}</b>")
+                lines.append(f"   ⏳ باز: {s['open']} | 🔒 بسته: {s['closed']}")
+                lines.append(
+                    f"   🎯 TP1: {s['tp1']} | TP2: {s['tp2']} | TP3: {s['tp3']}"
+                )
+                lines.append(
+                    f"   🛑 SL: {s['sl']} | ⚖️ BE: {s['breakeven']}"
+                )
+                if s["tp1_protected"] > 0:
+                    lines.append(f"   ✅ TP1 Protected: {s['tp1_protected']}")
+                lines.append(
+                    f"   💰 PnL: <b>{s['realized_pnl']:+.4f} USDT</b>"
+                )
+                lines.append("")
+
+            lines.append("=" * 30)
+            lines.append(f"💵 <b>مجموع PnL:</b> {overall['realized_pnl']:+.4f} USDT")
+            lines.append(f"📈 <b>ROI:</b> {overall['realized_roi']:+.2f}%")
+            lines.append(
+                f"🎯 <b>TP1:</b> {overall['tp1']} | "
+                f"<b>TP2:</b> {overall['tp2']} | "
+                f"<b>TP3:</b> {overall['tp3']}"
+            )
+            lines.append(
+                f"🛑 <b>SL:</b> {overall['sl']} | "
+                f"⚖️ <b>BE:</b> {overall['breakeven']} | "
+                f"✅ <b>TP1 Prot:</b> {overall.get('tp1_protected', 0)}"
+            )
+
+            message = "\n".join(lines)
+
+        chat_ids = context.application.bot_data.get("chat_ids", set())
+        if not chat_ids:
+            logger.warning("DAILY_REPORT | No chat_ids registered. Skipping send.")
+            return
+
+        for chat_id in list(chat_ids):
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=message,
+                    parse_mode="HTML",
+                )
+                logger.info("DAILY_REPORT_SENT | chat_id=%s", chat_id)
+            except Exception:
+                logger.exception("Daily report send error for chat %s", chat_id)
+
+    except Exception:
+        logger.exception("Daily strategy report error")
+
+
+async def report_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manual trigger for the daily report (for testing)."""
+    await update.effective_message.reply_text("⏳ در حال ساخت گزارش...")
+    await daily_strategy_report(context)
 
 # ============================================================
 # /BACKTEST (v24 - 5000 Candles, 4 Symbols, 7 Months)
@@ -1072,8 +1168,7 @@ async def backtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             plus_di = 100 * (plus_dm.ewm(alpha=1/period, adjust=False).mean() / atr.replace(0, np.nan))
             minus_di = 100 * (minus_dm.ewm(alpha=1/period, adjust=False).mean() / atr.replace(0, np.nan))
             dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
-            adx = dx.ewm(alpha=1/period, adjust=False).mean()
-            return adx
+            return dx.ewm(alpha=1/period, adjust=False).mean()
         
         def calc_rsi(df, period=14):
             delta = df['close'].diff()
@@ -1082,11 +1177,9 @@ async def backtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             rs = gain / loss.replace(0, np.nan)
             return 100 - (100 / (1 + rs))
         
-        symbols_done = 0
         details = []
         
         for symbol in symbols:
-            # --- Download 5000 candles with pagination ---
             all_c = []
             end_ts = int(time.time() * 1000)
             current_ts = end_ts - (5000 * 60 * 60 * 1000)
@@ -1116,10 +1209,9 @@ async def backtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 attempts += 1
             
             if len(all_c) < 500:
-                details.append(f"⚠️ {symbol}: فقط {len(all_c)} کندل دریافت شد.")
+                details.append(f"⚠️ {symbol}: فقط {len(all_c)} کندل.")
                 continue
             
-            # --- Calculate Indicators (Vectorized) ---
             df = pd.DataFrame(all_c)
             df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
             df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
@@ -1132,7 +1224,6 @@ async def backtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             df['high20_prev'] = df['high'].rolling(20).max().shift(1)
             df['low20_prev'] = df['low'].rolling(20).min().shift(1)
             
-            # --- Simulate ---
             position = None
             entry_price = 0.0
             sl_price = 0.0
@@ -1144,7 +1235,6 @@ async def backtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 c_high = df['high'].iloc[i]
                 c_low = df['low'].iloc[i]
                 
-                # --- Exit check ---
                 if position is not None:
                     hit_sl = False
                     hit_tp = False
@@ -1170,7 +1260,6 @@ async def backtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         active_strategy = None
                     continue
                 
-                # --- Entry check ---
                 adx_val = df['adx'].iloc[i]
                 rsi_val = df['rsi'].iloc[i]
                 
@@ -1178,7 +1267,6 @@ async def backtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     continue
                 
                 if adx_val < 22:
-                    # --- RANGING ---
                     bb_lower = df['bb_lower'].iloc[i]
                     bb_upper = df['bb_upper'].iloc[i]
                     bb_mid = df['sma20'].iloc[i]
@@ -1186,34 +1274,19 @@ async def backtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if pd.isna(bb_lower) or pd.isna(bb_mid):
                         continue
                     
-                    # BB_REVERSION
                     if c_close <= bb_lower and rsi_val <= 32:
-                        position = "LONG"
-                        active_strategy = "BB_REVERSION"
-                        entry_price = c_close
-                        sl_price = entry_price * 0.98
-                        tp_price = bb_mid
+                        position = "LONG"; active_strategy = "BB_REVERSION"
+                        entry_price = c_close; sl_price = entry_price * 0.98; tp_price = bb_mid
                     elif c_close >= bb_upper and rsi_val >= 68:
-                        position = "SHORT"
-                        active_strategy = "BB_REVERSION"
-                        entry_price = c_close
-                        sl_price = entry_price * 1.02
-                        tp_price = bb_mid
-                    # RANGE_TRADING (RSI extreme)
+                        position = "SHORT"; active_strategy = "BB_REVERSION"
+                        entry_price = c_close; sl_price = entry_price * 1.02; tp_price = bb_mid
                     elif rsi_val <= 28:
-                        position = "LONG"
-                        active_strategy = "RANGE_TRADING"
-                        entry_price = c_close
-                        sl_price = entry_price * 0.98
-                        tp_price = entry_price * 1.02
+                        position = "LONG"; active_strategy = "RANGE_TRADING"
+                        entry_price = c_close; sl_price = entry_price * 0.98; tp_price = entry_price * 1.02
                     elif rsi_val >= 72:
-                        position = "SHORT"
-                        active_strategy = "RANGE_TRADING"
-                        entry_price = c_close
-                        sl_price = entry_price * 1.02
-                        tp_price = entry_price * 0.98
+                        position = "SHORT"; active_strategy = "RANGE_TRADING"
+                        entry_price = c_close; sl_price = entry_price * 1.02; tp_price = entry_price * 0.98
                 else:
-                    # --- TRENDING ---
                     ema20 = df['ema20'].iloc[i]
                     ema50 = df['ema50'].iloc[i]
                     high20_prev = df['high20_prev'].iloc[i]
@@ -1222,44 +1295,25 @@ async def backtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if pd.isna(ema20) or pd.isna(ema50):
                         continue
                     
-                    # TREND_FOLLOWING
                     if c_close > ema20 > ema50 and rsi_val < 70:
-                        position = "LONG"
-                        active_strategy = "TREND_FOLLOWING"
-                        entry_price = c_close
-                        sl_price = entry_price * 0.98
-                        tp_price = entry_price * 1.04
+                        position = "LONG"; active_strategy = "TREND_FOLLOWING"
+                        entry_price = c_close; sl_price = entry_price * 0.98; tp_price = entry_price * 1.04
                     elif c_close < ema20 < ema50 and rsi_val > 30:
-                        position = "SHORT"
-                        active_strategy = "TREND_FOLLOWING"
-                        entry_price = c_close
-                        sl_price = entry_price * 1.02
-                        tp_price = entry_price * 0.96
-                    # PULLBACK
+                        position = "SHORT"; active_strategy = "TREND_FOLLOWING"
+                        entry_price = c_close; sl_price = entry_price * 1.02; tp_price = entry_price * 0.96
                     elif c_close > ema50 and abs(c_close - ema20) / c_close < 0.01 and 40 <= rsi_val <= 60:
-                        position = "LONG"
-                        active_strategy = "PULLBACK"
-                        entry_price = c_close
-                        sl_price = entry_price * 0.98
-                        tp_price = entry_price * 1.04
-                    # BREAKOUT
+                        position = "LONG"; active_strategy = "PULLBACK"
+                        entry_price = c_close; sl_price = entry_price * 0.98; tp_price = entry_price * 1.04
                     elif not pd.isna(high20_prev) and c_close > high20_prev and rsi_val < 72:
-                        position = "LONG"
-                        active_strategy = "BREAKOUT"
-                        entry_price = c_close
-                        sl_price = entry_price * 0.985
-                        tp_price = entry_price * 1.03
+                        position = "LONG"; active_strategy = "BREAKOUT"
+                        entry_price = c_close; sl_price = entry_price * 0.985; tp_price = entry_price * 1.03
                     elif not pd.isna(low20_prev) and c_close < low20_prev and rsi_val > 28:
-                        position = "SHORT"
-                        active_strategy = "BREAKOUT"
-                        entry_price = c_close
-                        sl_price = entry_price * 1.015
-                        tp_price = entry_price * 0.97
+                        position = "SHORT"; active_strategy = "BREAKOUT"
+                        entry_price = c_close; sl_price = entry_price * 1.015; tp_price = entry_price * 0.97
             
-            details.append(f"✅ {symbol}: {len(df)} کندل بررسی شد.")
-            symbols_done += 1
+            details.append(f"✅ {symbol}: {len(df)} کندل.")
         
-        return (results, symbols_done, details), None
+        return (results, details), None
     
     try:
         result, err = await asyncio.to_thread(run_bt)
@@ -1268,14 +1322,13 @@ async def backtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await message.edit_text(f"❌ خطا: {err}")
             return
         
-        results, symbols_done, details = result
+        results, details = result
         
-        report = "📊 <b>نتیجه بک‌تست تاییدیه v24 (۷ ماه داده)</b>\n\n"
+        report = "📊 <b>نتیجه بک‌تست v24</b>\n\n"
         report += "".join(f"{d}\n" for d in details)
-        report += f"\n📈 <b>آمار کلی (۴ ارز، ~۲۰۰۰۰ کندل)</b>\n"
+        report += f"\n📈 <b>آمار کلی</b>\n"
         report += "=" * 25 + "\n\n"
         
-        # Sort by win rate
         sorted_results = []
         for name, data in results.items():
             total = data["wins"] + data["losses"]
@@ -1296,10 +1349,7 @@ async def backtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         
         report += "=" * 25 + "\n"
-        report += "📌 <b>راهنما:</b>\n"
-        report += "• وین‌ریت > 50٪ و R مثبت = استراتژی سودده\n"
-        report += "• وین‌ریت < 40٪ = استراتژی نیاز به بازنگری دارد\n"
-        report += "• اگر استراتژی‌ای معامله‌ای نداشت، یعنی در این بازار فعال نشد."
+        report += "📌 وین‌ریت > 50٪ و R مثبت = سودده"
         
         await message.edit_text(report)
         
@@ -1312,6 +1362,7 @@ async def backtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=update.effective_chat.id,
                 text=f"❌ خطای داخلی در بک‌تست: {str(e)}"
             )
+
 # ============================================================
 # MAIN
 # ============================================================
@@ -1332,6 +1383,7 @@ def main():
 
     application = Application.builder().token(TOKEN).build()
 
+    # ---- Commands ----
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("price", price))
     application.add_handler(CommandHandler("signal", signal))
@@ -1339,8 +1391,10 @@ def main():
     application.add_handler(CommandHandler("stats", tracker_stats))
     application.add_handler(CommandHandler("news", news_command))
     application.add_handler(CommandHandler("news_test", news_test_command))
-    application.add_handler(CommandHandler("backtest", backtest_command)) # Added
+    application.add_handler(CommandHandler("backtest", backtest_command))
+    application.add_handler(CommandHandler("report", report_now))
 
+    # ---- Repeating jobs ----
     application.job_queue.run_repeating(
         track_open_trades,
         interval=TRACKER_INTERVAL,
@@ -1357,9 +1411,18 @@ def main():
     )
     logger.info("Automatic signal scanner scheduled every %s seconds", AUTO_INTERVAL)
 
+    # ---- Daily report at 20:30 UTC (00:00 Tehran) ----
+    application.job_queue.run_daily(
+        daily_strategy_report,
+        time=dt_time(hour=20, minute=30, tzinfo=timezone.utc),
+        name="daily_strategy_report",
+    )
+    logger.info("Daily strategy report scheduled at 20:30 UTC (00:00 Tehran)")
+
     logger.info("CryptoBot started successfully.")
     application.run_polling(drop_pending_updates=True)
-    application.add_handler(CommandHandler("backtest", backtest_command))
+
+
 # ============================================================
 # ENTRY POINT
 # ============================================================
