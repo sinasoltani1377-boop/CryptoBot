@@ -897,7 +897,8 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
                 "TP3": "🏆 تارگت سوم لمس شد",
                 "SL": "🛑 حد ضرر لمس شد",
                 "BE": "⚖️ خروج در نقطه سربه‌سر",
-                "BREAKEVEN": "⚖️ خروج در نقطه سربه‌سر",
+                "BREAKEVEN": "⚖️ خروج در نقطه سربه‌سر (بدون ضرر)",
+                "TP1_PROTECTED": "✅ حد ضرر در تارگت اول (سود قفل شد)",
             }
             title = title_map.get(event_name, f"📊 رویداد Tracker: {event_name}")
 
