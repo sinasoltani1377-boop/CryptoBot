@@ -1,4 +1,4 @@
-.# ============================================================
+# ============================================================
 # CryptoBot - Analysis Engine v25
 #
 # v25: PROVEN WINNERS ONLY
@@ -1137,12 +1137,15 @@ def detect_pullback(h1, m15, m5, direction):
         score += 1
     return {"valid": True, "reason": "VALID", "score": score, "mtf": True}
 
-
 def detect_breakout(h1, m15, m5, direction):
-    """v25: PRIMARY STRATEGY (85.3% win rate in backtest)."""
+    """
+    Breakout strategy (v26) with 15-minute confirmation.
+    Prevents noisy 5-minute-only entries that caused OP-style false breaks.
+    """
     ok, level = local_breakout(m15, direction, 20)
     if not ok:
         return {"valid": False, "reason": "NO_BREAKOUT"}
+    
     last = m15[-1]
     if body_ratio(last) < 0.50:
         return {"valid": False, "reason": "WEAK_BREAKOUT_CANDLE"}
@@ -1156,9 +1159,15 @@ def detect_breakout(h1, m15, m5, direction):
         return {"valid": False, "reason": "NO_HOLD"}
     if not entry_trigger_5m(m5, direction):
         return {"valid": False, "reason": "5M_TRIGGER"}
+    
+    # NEW: 15-minute confirmation (prevents OP-style false breaks)
+    if not _mtf_basic(m15, direction):
+        return {"valid": False, "reason": "NO_15M_CONFIRMATION"}
+    
     adx1 = adx(h1)
     if adx1 < 22:
         return {"valid": False, "reason": "ADX_LOW"}
+    
     mtf = _mtf_basic(m15, direction)
     score = 6
     if mtf:
@@ -1310,32 +1319,52 @@ def context_allows(strategy: str, daily: str, h4: str,
 # ============================================================
 # BTC FILTER
 # ============================================================
-
 def btc_filter(direction: str, btc_context: Optional[Dict[str, Any]],
                strategy: str = "") -> str:
+    """
+    BTC context filter (v26).
+    Checks both 4H and 1H trends.
+    - 1H strongly against (ADX>=22) → BLOCK
+    - 4H strongly against (ADX>=30) → BLOCK
+    - 4H moderately against (ADX>=22) → WARN
+    """
     if not btc_context:
         return "ALLOW"
+    
     expected = "BULLISH" if direction == "LONG" else "BEARISH"
-    btc_dir = btc_context.get("h4") or "RANGE"
-    btc_adx = float(btc_context.get("adx_h4") or 0.0)
+    
+    btc_h4 = btc_context.get("h4") or "RANGE"
+    btc_h1 = btc_context.get("h1") or "RANGE"
+    btc_adx_h4 = float(btc_context.get("adx_h4") or 0.0)
+    btc_adx_h1 = float(btc_context.get("adx_h1") or 0.0)
+    
     daily_dir = btc_context.get("daily") or "RANGE"
     daily_adx = float(btc_context.get("adx_daily") or 0.0)
-    btc_opposes = btc_dir in ("BULLISH", "BEARISH") and btc_dir != expected
+    
+    btc_opposes_h4 = btc_h4 in ("BULLISH", "BEARISH") and btc_h4 != expected
+    btc_opposes_h1 = btc_h1 in ("BULLISH", "BEARISH") and btc_h1 != expected
     daily_opposes = daily_dir in ("BULLISH", "BEARISH") and daily_dir != expected
-
+    
+    # NEW: 1H strongly against → BLOCK
+    if btc_opposes_h1 and btc_adx_h1 >= 22:
+        return "BLOCK"
+    
+    # Range strategies → lenient (they work against HTF)
     if strategy in ("RANGE_TRADING", "BB_REVERSION"):
-        if btc_opposes and btc_adx >= 35:
+        if btc_opposes_h4 and btc_adx_h4 >= 35:
             return "BLOCK"
         return "ALLOW"
-
-    if btc_opposes and daily_opposes and max(btc_adx, daily_adx) >= 30:
+    
+    # Continuation strategies (BREAKOUT, etc.)
+    if btc_opposes_h4 and daily_opposes and max(btc_adx_h4, daily_adx) >= 30:
         return "BLOCK"
-    if btc_opposes and btc_adx >= 30:
+    if btc_opposes_h4 and btc_adx_h4 >= 30:
         return "BLOCK"
-    if btc_opposes and btc_adx >= 22:
+    if btc_opposes_h4 and btc_adx_h4 >= 22:
         return "WARN"
-    if daily_opposes and daily_adx >= 30 and not btc_opposes:
+    if daily_opposes and daily_adx >= 30 and not btc_opposes_h4:
         return "WARN"
+    
     return "ALLOW"
 
 
