@@ -1,4 +1,4 @@
-# ============================================================
+.# ============================================================
 # CryptoBot - Analysis Engine v25
 #
 # v25: PROVEN WINNERS ONLY
@@ -1357,37 +1357,154 @@ def calculate_trade_levels(h1, m5, direction, strategy: str = "DEFAULT"):
 
 
 def _calc_trend_levels(h1, m5, direction, entry):
+    """
+    Smart SL/TP calculation using real swing highs/lows.
+    
+    SL: Placed just beyond nearest swing low (LONG) or swing high (SHORT).
+        Clamped between 1.5% and 2.5% of entry for noise protection.
+    TP: Placed at real pivot highs (LONG) or pivot lows (SHORT).
+        Falls back to R multiples if pivots don't exist.
+    """
     atr_1h = atr(h1, 14)
     atr_5m = atr(m5, 14) if len(m5) >= 15 else 0.0
     if atr_1h <= 0:
         return None
-    candidates = [entry * 0.012]
-    if atr_5m > 0:
-        candidates.append(2.5 * atr_5m)
-    candidates.append(0.8 * atr_1h)
-    sl_dist = max(candidates)
-    if sl_dist > entry * 0.02:
-        sl_dist = entry * 0.02
+    
+    n = len(h1)
+    if n < 25:
+        return None
+    
+    # ---- 1. Smart SL: nearest swing ----
+    sl_swing = None
+    
     if direction == "LONG":
+        for i in range(n - 3, max(n - 25, 2), -1):
+            try:
+                low_i = candle_values(h1[i])[2]
+                low_prev1 = candle_values(h1[i-1])[2]
+                low_prev2 = candle_values(h1[i-2])[2]
+                low_next1 = candle_values(h1[i+1])[2]
+                
+                if low_i < low_prev1 and low_i < low_prev2 and low_i < low_next1:
+                    if low_i < entry * 0.995:
+                        sl_swing = low_i
+                        break
+            except Exception:
+                continue
+        
+        if sl_swing is not None:
+            sl_dist = (entry - sl_swing) + atr_1h * 0.35
+        else:
+            sl_dist = entry * 0.015
+        
+        min_sl = max(entry * 0.015, atr_5m * 3.0 if atr_5m > 0 else 0)
+        max_sl = entry * 0.025
+        sl_dist = max(min_sl, min(sl_dist, max_sl))
         sl = entry - sl_dist
-        tp1 = entry + sl_dist * 1.25
-        tp2 = entry + sl_dist * 2.50
-        tp3 = entry + sl_dist * 3.75
-        if not (sl < entry < tp1 < tp2 < tp3):
-            return None
-    else:
+    
+    else:  # SHORT
+        for i in range(n - 3, max(n - 25, 2), -1):
+            try:
+                high_i = candle_values(h1[i])[1]
+                high_prev1 = candle_values(h1[i-1])[1]
+                high_prev2 = candle_values(h1[i-2])[1]
+                high_next1 = candle_values(h1[i+1])[1]
+                
+                if high_i > high_prev1 and high_i > high_prev2 and high_i > high_next1:
+                    if high_i > entry * 1.005:
+                        sl_swing = high_i
+                        break
+            except Exception:
+                continue
+        
+        if sl_swing is not None:
+            sl_dist = (sl_swing - entry) + atr_1h * 0.35
+        else:
+            sl_dist = entry * 0.015
+        
+        min_sl = max(entry * 0.015, atr_5m * 3.0 if atr_5m > 0 else 0)
+        max_sl = entry * 0.025
+        sl_dist = max(min_sl, min(sl_dist, max_sl))
         sl = entry + sl_dist
-        tp1 = entry - sl_dist * 1.25
-        tp2 = entry - sl_dist * 2.50
-        tp3 = entry - sl_dist * 3.75
-        if not (sl > entry > tp1 > tp2 > tp3):
-            return None
+    
+    # ---- 2. Smart TPs: real pivot levels ----
+    pivots_above = []
+    pivots_below = []
+    
+    for i in range(2, n - 2):
+        try:
+            h_i = candle_values(h1[i])[1]
+            l_i = candle_values(h1[i])[2]
+            
+            if (h_i > candle_values(h1[i-1])[1] and h_i > candle_values(h1[i-2])[1] and
+                h_i > candle_values(h1[i+1])[1] and h_i > candle_values(h1[i+2])[1]):
+                if h_i > entry:
+                    pivots_above.append(h_i)
+            
+            if (l_i < candle_values(h1[i-1])[2] and l_i < candle_values(h1[i-2])[2] and
+                l_i < candle_values(h1[i+1])[2] and l_i < candle_values(h1[i+2])[2]):
+                if l_i < entry:
+                    pivots_below.append(l_i)
+        except Exception:
+            continue
+    
+    if direction == "LONG":
+        pivots_above.sort()
+        candidates = [p for p in pivots_above if (p - entry) >= sl_dist * 1.0][:3]
+        
+        base_tp1 = entry + sl_dist * 1.5
+        base_tp2 = entry + sl_dist * 2.5
+        base_tp3 = entry + sl_dist * 3.5
+        
+        tp1 = candidates[0] if len(candidates) > 0 else base_tp1
+        tp2 = candidates[1] if len(candidates) > 1 else max(base_tp2, tp1 + sl_dist * 0.8)
+        tp3 = candidates[2] if len(candidates) > 2 else max(base_tp3, tp2 + sl_dist * 0.8)
+        
+        # Minimum R:R for TP1
+        if tp1 < entry + sl_dist * 1.2:
+            tp1 = entry + sl_dist * 1.2
+        if tp2 < tp1 + sl_dist * 0.5:
+            tp2 = tp1 + sl_dist * 1.0
+        if tp3 < tp2 + sl_dist * 0.5:
+            tp3 = tp2 + sl_dist * 1.0
+    else:  # SHORT
+        pivots_below.sort(reverse=True)
+        candidates = [p for p in pivots_below if (entry - p) >= sl_dist * 1.0][:3]
+        
+        base_tp1 = entry - sl_dist * 1.5
+        base_tp2 = entry - sl_dist * 2.5
+        base_tp3 = entry - sl_dist * 3.5
+        
+        tp1 = candidates[0] if len(candidates) > 0 else base_tp1
+        tp2 = candidates[1] if len(candidates) > 1 else min(base_tp2, tp1 - sl_dist * 0.8)
+        tp3 = candidates[2] if len(candidates) > 2 else min(base_tp3, tp2 - sl_dist * 0.8)
+        
+        if tp1 > entry - sl_dist * 1.2:
+            tp1 = entry - sl_dist * 1.2
+        if tp2 > tp1 - sl_dist * 0.5:
+            tp2 = tp1 - sl_dist * 1.0
+        if tp3 > tp2 - sl_dist * 0.5:
+            tp3 = tp2 - sl_dist * 1.0
+    
+    # Validation
+    if direction == "LONG" and not (sl < entry < tp1 < tp2 < tp3):
+        return None
+    if direction == "SHORT" and not (sl > entry > tp1 > tp2 > tp3):
+        return None
+    
+    rr1 = abs(tp1 - entry) / abs(entry - sl)
+    rr2 = abs(tp2 - entry) / abs(entry - sl)
+    rr3 = abs(tp3 - entry) / abs(entry - sl)
+    
     return {
         "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "tp3": tp3,
-        "risk": sl_dist, "rr": "1:1.25/1:2.5/1:3.75",
+        "risk": abs(entry - sl),
+        "rr": f"1:{rr1:.2f}/1:{rr2:.2f}/1:{rr3:.2f}",
         "trail_mode": "BREAKEVEN_AT_TP1_THEN_ATR",
         "trail_atr_mult": 2.0, "trail_bar_count": 10,
         "breakeven_at_tp1": True,
+        "sl_source": "swing" if sl_swing is not None else "atr",
+        "tp_source": "pivot" if candidates else "r_multiple",
     }
 
 
