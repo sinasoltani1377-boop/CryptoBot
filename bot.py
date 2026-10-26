@@ -1480,7 +1480,6 @@ async def check_btc_trend_changes(context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 # MAIN
 # ============================================================
-
 def main():
     if not TOKEN:
         raise RuntimeError("BOT_TOKEN environment variable is missing.")
@@ -1524,6 +1523,15 @@ def main():
         job_kwargs={"max_instances": 1, "coalesce": True},
     )
     logger.info("Automatic signal scanner scheduled every %s seconds", AUTO_INTERVAL)
+
+    # ---- NEW: BTC trend change alert — every 5 minutes ----
+    application.job_queue.run_repeating(
+        check_btc_trend_changes,
+        interval=300,
+        first=120,
+        job_kwargs={"max_instances": 1, "coalesce": True},
+    )
+    logger.info("BTC trend change alert scheduled every 300 seconds")
 
     # ---- Daily report at 20:30 UTC (00:00 Tehran) ----
     application.job_queue.run_daily(
