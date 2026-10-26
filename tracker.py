@@ -425,7 +425,10 @@ def register_signal(
             "close_reason": None,
             "events": [],
         }
-
+            "btc_trend_at_entry": str(signal.get("btc_dir") or "UNKNOWN"),
+            "btc_adx_at_entry": float(signal.get("btc_adx") or 0.0),
+            "trend_change_alerted": False,
+            "trend_change_alerted_at": None,
         trades.append(trade)
 
         if not _save_trades(trades):
@@ -1063,3 +1066,17 @@ def format_7day_report() -> str:
         f"💵 Realized PnL: ${stats['realized_pnl']:.4f}\n\n"
         "Simulation only; fees and funding excluded."
     )
+    # ============================================================
+# BTC TREND CHANGE ALERTS
+# ============================================================
+
+def mark_trend_alert(trade_id: str) -> bool:
+    """Mark a trade as having received a trend-change alert (prevents spam)."""
+    with LOCK:
+        trades = _load_trades()
+        for trade in trades:
+            if trade.get("id") == trade_id:
+                trade["trend_change_alerted"] = True
+                trade["trend_change_alerted_at"] = utc_now()
+                return _save_trades(trades)
+    return False
