@@ -424,11 +424,14 @@ def register_signal(
 
             "close_reason": None,
             "events": [],
-        }
+
+            # NEW: BTC trend tracking for alerts
             "btc_trend_at_entry": str(signal.get("btc_dir") or "UNKNOWN"),
             "btc_adx_at_entry": float(signal.get("btc_adx") or 0.0),
             "trend_change_alerted": False,
             "trend_change_alerted_at": None,
+        }
+
         trades.append(trade)
 
         if not _save_trades(trades):
@@ -442,7 +445,6 @@ def register_signal(
     )
 
     return True
-
 
 # ============================================================
 # TRADE EVENT HELPERS
