@@ -550,20 +550,19 @@ def log_strategy_details(symbol, result):
     diagnostics = result.get("strategy_diagnostics")
     if isinstance(diagnostics, dict):
         parts = []
-        for strategy in ("TREND_FOLLOWING", "PULLBACK", "BREAKOUT", "REVERSAL", "RANGE_TRADING", "BB_REVERSION"):
+        for strategy in ("TREND_FOLLOWING", "PULLBACK", "BREAKOUT", 
+                         "REVERSAL", "RANGE_TRADING", "BB_REVERSION", "FAST_TREND"):
             value = diagnostics.get(strategy)
             if value is None:
                 parts.append(f"{strategy}=NO_DATA")
                 continue
             if isinstance(value, dict):
                 matched = value.get("matched")
-                reason = value.get("reason") or value.get("blocked_reason") or value.get("failure_reason") or value.get("fail_reason") or value.get("status") or ""
+                reason = value.get("reason") or value.get("blocked_reason") or ""
                 status = "PASS" if matched is True else "FAIL"
                 if reason:
                     status = f"{status}:{reason}"
                 parts.append(f"{strategy}={status}")
-            elif isinstance(value, bool):
-                parts.append(f"{strategy}={'PASS' if value else 'FAIL'}")
             else:
                 parts.append(f"{strategy}={value}")
         logger.info("STRATEGY_CHECK | %s | %s", symbol, " | ".join(parts))
