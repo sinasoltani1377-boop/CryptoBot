@@ -1,14 +1,20 @@
 # ============================================================
-# CryptoBot - Analysis Engine v25
+# CryptoBot - Analysis Engine v27
 #
 # v25: PROVEN WINNERS ONLY
-#   - Logger bug fixed (NameError: logger not defined)
-#   - Backtested over 20,000 candles (7 months, 4 symbols)
 #   - TREND_FOLLOWING: 23.5% win rate → REMOVED
 #   - PULLBACK: 0% win rate → REMOVED
 #   - BREAKOUT: 85.3% win rate, +1.56R → PRIMARY STRATEGY
 #   - BB_REVERSION: 44.4% win rate, +0.33R → KEPT FOR RANGING
-#   - RANGE_TRADING and REVERSAL kept (not yet fully tested)
+#
+# v26: (BTC 1H filter, 15M breakout confirmation, smart SL/TP)
+#
+# v27:
+#   - NEW STRATEGY: FAST_TREND — catch sharp momentum impulses
+#   - Uses ONLY BTC 15M for filter (not 4H/1H/Daily)
+#   - Tight TPs (1R/1.8R/2.5R) for quick exit
+#   - Active in BOTH regimes (RANGING + TRENDING)
+#   - Priority: BREAKOUT > BB_REVERSION > FAST_TREND > RANGE_TRADING > REVERSAL
 # ============================================================
 
 from __future__ import annotations
@@ -17,7 +23,7 @@ import logging
 import math
 from typing import Any, Dict, List, Optional, Tuple
 
-logger = logging.getLogger(__name__)  # FIX: was missing in v22
+logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -1137,15 +1143,114 @@ def detect_pullback(h1, m15, m5, direction):
         score += 1
     return {"valid": True, "reason": "VALID", "score": score, "mtf": True}
 
+
+# ⭐ v27 NEW: FAST_TREND strategy
+def detect_fast_trend(h1, m15, m5, direction):
+    """
+    FAST_TREND: Ride sharp momentum impulses.
+    Detects 2+ strong consecutive 1H candles with rising RSI on 15M.
+    Uses tight TPs (1R/1.8R/2.5R) for quick exit.
+    BTC filter uses ONLY 15M (handled in btc_filter).
+    """
+    if len(h1) < 25 or len(m15) < 25 or len(m5) < 10:
+        return {"valid": False, "reason": "INSUFFICIENT_DATA"}
+    
+    atr_1h = atr(h1, 14)
+    if atr_1h <= 0:
+        return {"valid": False, "reason": "NO_ATR"}
+    
+    last1 = h1[-1]
+    last2 = h1[-2]
+    
+    if direction == "LONG":
+        last2_strong = (
+            bullish(last1) and bullish(last2)
+            and body_ratio(last1) >= 0.40
+            and body_ratio(last2) >= 0.40
+        )
+    else:
+        last2_strong = (
+            bearish(last1) and bearish(last2)
+            and body_ratio(last1) >= 0.40
+            and body_ratio(last2) >= 0.40
+        )
+    
+    if not last2_strong:
+        return {"valid": False, "reason": "MOMENTUM_NOT_FRESH"}
+    
+    total_body = sum(body(c) for c in h1[-3:])
+    if total_body < atr_1h * 1.0:
+        return {"valid": False, "reason": "MOVE_TOO_SMALL"}
+    
+    strong_count = 0
+    for c in h1[-3:]:
+        if direction == "LONG" and bullish(c) and body_ratio(c) >= 0.55:
+            strong_count += 1
+        elif direction == "SHORT" and bearish(c) and body_ratio(c) >= 0.55:
+            strong_count += 1
+    
+    rsi_now = rsi(m15, 14)
+    m15_prev = m15[:-3]
+    rsi_prev = rsi(m15_prev, 14) if len(m15_prev) >= 15 else rsi_now
+    
+    if direction == "LONG":
+        if rsi_now < 48 or rsi_now > 82:
+            return {"valid": False, "reason": "RSI_OUT_OF_ZONE"}
+        if rsi_now <= rsi_prev:
+            return {"valid": False, "reason": "RSI_NOT_RISING"}
+    else:
+        if rsi_now > 52 or rsi_now < 18:
+            return {"valid": False, "reason": "RSI_OUT_OF_ZONE"}
+        if rsi_now >= rsi_prev:
+            return {"valid": False, "reason": "RSI_NOT_FALLING"}
+    
+    if not volume_spike(m15, 1.30, 20):
+        return {"valid": False, "reason": "NO_VOLUME"}
+    
+    last_5m = m5[-1]
+    if len(m5) >= 3:
+        prev_high = max(highs(m5[-3:-1]))
+        prev_low = min(lows(m5[-3:-1]))
+        last_close = candle_values(last_5m)[3]
+        
+        if direction == "LONG":
+            if not bullish(last_5m) or body_ratio(last_5m) < 0.40:
+                return {"valid": False, "reason": "WEAK_5M_BODY"}
+            if last_close <= prev_high:
+                return {"valid": False, "reason": "NO_5M_BREAK"}
+        else:
+            if not bearish(last_5m) or body_ratio(last_5m) < 0.40:
+                return {"valid": False, "reason": "WEAK_5M_BODY"}
+            if last_close >= prev_low:
+                return {"valid": False, "reason": "NO_5M_BREAK"}
+    
+    entry = closes(m5)[-1]
+    start_price = candle_values(h1[-3])[0]
+    distance = abs(entry - start_price)
+    if distance > atr_1h * 3.0:
+        return {"valid": False, "reason": "OVEREXTENDED"}
+    
+    score = 10
+    if strong_count >= 3:
+        score += 1
+    if direction == "LONG" and rsi_now > 60:
+        score += 1
+    if direction == "SHORT" and rsi_now < 40:
+        score += 1
+    
+    return {
+        "valid": True,
+        "reason": "VALID",
+        "score": min(score, 12),
+        "mtf": True,
+    }
+
+
 def detect_breakout(h1, m15, m5, direction):
-    """
-    Breakout strategy (v26) with 15-minute confirmation.
-    Prevents noisy 5-minute-only entries that caused OP-style false breaks.
-    """
+    """v26: Primary strategy with 15M confirmation."""
     ok, level = local_breakout(m15, direction, 20)
     if not ok:
         return {"valid": False, "reason": "NO_BREAKOUT"}
-    
     last = m15[-1]
     if body_ratio(last) < 0.50:
         return {"valid": False, "reason": "WEAK_BREAKOUT_CANDLE"}
@@ -1159,15 +1264,11 @@ def detect_breakout(h1, m15, m5, direction):
         return {"valid": False, "reason": "NO_HOLD"}
     if not entry_trigger_5m(m5, direction):
         return {"valid": False, "reason": "5M_TRIGGER"}
-    
-    # NEW: 15-minute confirmation (prevents OP-style false breaks)
     if not _mtf_basic(m15, direction):
         return {"valid": False, "reason": "NO_15M_CONFIRMATION"}
-    
     adx1 = adx(h1)
     if adx1 < 22:
         return {"valid": False, "reason": "ADX_LOW"}
-    
     mtf = _mtf_basic(m15, direction)
     score = 6
     if mtf:
@@ -1286,8 +1387,12 @@ def detect_bb_reversion(h1, m15, m5, direction):
 # HTF CONTEXT
 # ============================================================
 
+# ⭐ v27 CHANGED: handle FAST_TREND (skip HTF check — BTC 15M used instead)
 def context_allows(strategy: str, daily: str, h4: str,
                    direction: str, h4_adx: float) -> bool:
+    if strategy == "FAST_TREND":
+        return True
+    
     expected = "BULLISH" if direction == "LONG" else "BEARISH"
     daily_opp = daily in ("BULLISH", "BEARISH") and daily != expected
     h4_opp = h4 in ("BULLISH", "BEARISH") and h4 != expected
@@ -1319,43 +1424,41 @@ def context_allows(strategy: str, daily: str, h4: str,
 # ============================================================
 # BTC FILTER
 # ============================================================
+
+# ⭐ v27 CHANGED: FAST_TREND uses BTC 15M only
 def btc_filter(direction: str, btc_context: Optional[Dict[str, Any]],
                strategy: str = "") -> str:
-    """
-    BTC context filter (v26).
-    Checks both 4H and 1H trends.
-    - 1H strongly against (ADX>=22) → BLOCK
-    - 4H strongly against (ADX>=30) → BLOCK
-    - 4H moderately against (ADX>=22) → WARN
-    """
     if not btc_context:
         return "ALLOW"
     
     expected = "BULLISH" if direction == "LONG" else "BEARISH"
     
+    # FAST_TREND: only BTC 15M matters
+    if strategy == "FAST_TREND":
+        btc_m15 = btc_context.get("m15") or "RANGE"
+        if btc_m15 in ("BULLISH", "BEARISH") and btc_m15 != expected:
+            return "BLOCK"
+        return "ALLOW"
+    
     btc_h4 = btc_context.get("h4") or "RANGE"
     btc_h1 = btc_context.get("h1") or "RANGE"
     btc_adx_h4 = float(btc_context.get("adx_h4") or 0.0)
     btc_adx_h1 = float(btc_context.get("adx_h1") or 0.0)
-    
     daily_dir = btc_context.get("daily") or "RANGE"
     daily_adx = float(btc_context.get("adx_daily") or 0.0)
     
     btc_opposes_h4 = btc_h4 in ("BULLISH", "BEARISH") and btc_h4 != expected
     btc_opposes_h1 = btc_h1 in ("BULLISH", "BEARISH") and btc_h1 != expected
     daily_opposes = daily_dir in ("BULLISH", "BEARISH") and daily_dir != expected
-    
-    # NEW: 1H strongly against → BLOCK
+
     if btc_opposes_h1 and btc_adx_h1 >= 22:
         return "BLOCK"
-    
-    # Range strategies → lenient (they work against HTF)
+
     if strategy in ("RANGE_TRADING", "BB_REVERSION"):
         if btc_opposes_h4 and btc_adx_h4 >= 35:
             return "BLOCK"
         return "ALLOW"
-    
-    # Continuation strategies (BREAKOUT, etc.)
+
     if btc_opposes_h4 and daily_opposes and max(btc_adx_h4, daily_adx) >= 30:
         return "BLOCK"
     if btc_opposes_h4 and btc_adx_h4 >= 30:
@@ -1364,7 +1467,6 @@ def btc_filter(direction: str, btc_context: Optional[Dict[str, Any]],
         return "WARN"
     if daily_opposes and daily_adx >= 30 and not btc_opposes_h4:
         return "WARN"
-    
     return "ALLOW"
 
 
@@ -1372,6 +1474,7 @@ def btc_filter(direction: str, btc_context: Optional[Dict[str, Any]],
 # TRADE LEVELS
 # ============================================================
 
+# ⭐ v27 CHANGED: handle FAST_TREND
 def calculate_trade_levels(h1, m5, direction, strategy: str = "DEFAULT"):
     if direction not in ("LONG", "SHORT") or not h1 or not m5:
         return None
@@ -1382,18 +1485,12 @@ def calculate_trade_levels(h1, m5, direction, strategy: str = "DEFAULT"):
         return _calc_range_levels(h1, m5, direction, entry)
     if strategy == "BB_REVERSION":
         return _calc_bb_reversion_levels(h1, m5, direction, entry)
+    if strategy == "FAST_TREND":
+        return _calc_fast_trend_levels(h1, m5, direction, entry)
     return _calc_trend_levels(h1, m5, direction, entry)
 
 
 def _calc_trend_levels(h1, m5, direction, entry):
-    """
-    Smart SL/TP calculation using real swing highs/lows.
-    
-    SL: Placed just beyond nearest swing low (LONG) or swing high (SHORT).
-        Clamped between 1.5% and 2.5% of entry for noise protection.
-    TP: Placed at real pivot highs (LONG) or pivot lows (SHORT).
-        Falls back to R multiples if pivots don't exist.
-    """
     atr_1h = atr(h1, 14)
     atr_5m = atr(m5, 14) if len(m5) >= 15 else 0.0
     if atr_1h <= 0:
@@ -1403,7 +1500,6 @@ def _calc_trend_levels(h1, m5, direction, entry):
     if n < 25:
         return None
     
-    # ---- 1. Smart SL: nearest swing ----
     sl_swing = None
     
     if direction == "LONG":
@@ -1431,7 +1527,7 @@ def _calc_trend_levels(h1, m5, direction, entry):
         sl_dist = max(min_sl, min(sl_dist, max_sl))
         sl = entry - sl_dist
     
-    else:  # SHORT
+    else:
         for i in range(n - 3, max(n - 25, 2), -1):
             try:
                 high_i = candle_values(h1[i])[1]
@@ -1456,7 +1552,6 @@ def _calc_trend_levels(h1, m5, direction, entry):
         sl_dist = max(min_sl, min(sl_dist, max_sl))
         sl = entry + sl_dist
     
-    # ---- 2. Smart TPs: real pivot levels ----
     pivots_above = []
     pivots_below = []
     
@@ -1489,14 +1584,13 @@ def _calc_trend_levels(h1, m5, direction, entry):
         tp2 = candidates[1] if len(candidates) > 1 else max(base_tp2, tp1 + sl_dist * 0.8)
         tp3 = candidates[2] if len(candidates) > 2 else max(base_tp3, tp2 + sl_dist * 0.8)
         
-        # Minimum R:R for TP1
         if tp1 < entry + sl_dist * 1.2:
             tp1 = entry + sl_dist * 1.2
         if tp2 < tp1 + sl_dist * 0.5:
             tp2 = tp1 + sl_dist * 1.0
         if tp3 < tp2 + sl_dist * 0.5:
             tp3 = tp2 + sl_dist * 1.0
-    else:  # SHORT
+    else:
         pivots_below.sort(reverse=True)
         candidates = [p for p in pivots_below if (entry - p) >= sl_dist * 1.0][:3]
         
@@ -1515,7 +1609,6 @@ def _calc_trend_levels(h1, m5, direction, entry):
         if tp3 > tp2 - sl_dist * 0.5:
             tp3 = tp2 - sl_dist * 1.0
     
-    # Validation
     if direction == "LONG" and not (sl < entry < tp1 < tp2 < tp3):
         return None
     if direction == "SHORT" and not (sl > entry > tp1 > tp2 > tp3):
@@ -1621,6 +1714,42 @@ def _calc_bb_reversion_levels(h1, m5, direction, entry):
     }
 
 
+# ⭐ v27 NEW: FAST_TREND levels (tight TPs)
+def _calc_fast_trend_levels(h1, m5, direction, entry):
+    """
+    FAST_TREND levels: tight TPs for quick exit before momentum dies.
+    SL: same as _calc_trend_levels (structural)
+    TP: 1R / 1.8R / 2.5R (tight)
+    """
+    base = _calc_trend_levels(h1, m5, direction, entry)
+    if not base:
+        return None
+    
+    risk = base["risk"]
+    sl = base["sl"]
+    
+    if direction == "LONG":
+        tp1 = entry + risk * 1.0
+        tp2 = entry + risk * 1.8
+        tp3 = entry + risk * 2.5
+        if not (sl < entry < tp1 < tp2 < tp3):
+            return None
+    else:
+        tp1 = entry - risk * 1.0
+        tp2 = entry - risk * 1.8
+        tp3 = entry - risk * 2.5
+        if not (sl > entry > tp1 > tp2 > tp3):
+            return None
+    
+    return {
+        **base,
+        "tp1": tp1,
+        "tp2": tp2,
+        "tp3": tp3,
+        "rr": "1:1.0/1:1.8/1:2.5",
+    }
+
+
 def target_reachable(levels, h1, direction):
     entry = safe_float(levels.get("entry"))
     tp1 = safe_float(levels.get("tp1"))
@@ -1691,6 +1820,7 @@ def direction_from_tf(candles):
         return "RANGE"
 
 
+# ⭐ v27 CHANGED: add FAST_TREND dispatch
 def run_strategy(name, h1, m15, m5, direction):
     if name == "TREND_FOLLOWING":
         return detect_trend_following(h1, m15, m5, direction)
@@ -1704,11 +1834,13 @@ def run_strategy(name, h1, m15, m5, direction):
         return detect_range_trading(h1, m15, m5, direction)
     if name == "BB_REVERSION":
         return detect_bb_reversion(h1, m15, m5, direction)
+    if name == "FAST_TREND":
+        return detect_fast_trend(h1, m15, m5, direction)
     return {"valid": False, "reason": "UNKNOWN_STRATEGY"}
 
 
 # ============================================================
-# MAIN ENGINE (v25 REGIME SWITCH - PROVEN WINNERS ONLY)
+# MAIN ENGINE (v27 - adds FAST_TREND)
 # ============================================================
 
 def generate_signal(daily, h4, h1, m15, m5,
@@ -1720,8 +1852,8 @@ def generate_signal(daily, h4, h1, m15, m5,
     m5c = closed(m5)
     if btc_context is None:
         btc_context = {
-            "daily": "RANGE", "h4": "RANGE", "h1": "RANGE",
-            "adx_h1": 0.0, "adx_h4": 0.0, "adx_daily": 0.0,
+            "daily": "RANGE", "h4": "RANGE", "h1": "RANGE", "m15": "RANGE",
+            "adx_h1": 0.0, "adx_h4": 0.0, "adx_daily": 0.0, "adx_m15": 0.0,
         }
     if min(len(d), len(h4c), len(h1c), len(m15c), len(m5c)) < 50:
         return no_trade("INSUFFICIENT_DATA", btc=btc_context)
@@ -1736,16 +1868,12 @@ def generate_signal(daily, h4, h1, m15, m5,
     h4_adx = adx(h4c)
     vol = volume_spike(m15c, 1.50, 20)
 
-    # ============================================================
-    # v25: REGIME SWITCH - ONLY PROVEN STRATEGIES
-    # ============================================================
+    # ⭐ v27 CHANGED: add FAST_TREND to both regimes
     if adx1 < 22:
-        # Ranging: BB_REVERSION is the proven winner (44.4% wr, +0.33R)
-        strategy_names = ["BB_REVERSION", "RANGE_TRADING", "REVERSAL"]
+        strategy_names = ["BB_REVERSION", "RANGE_TRADING", "REVERSAL", "FAST_TREND"]
         logger.info("REGIME_SWITCH | MARKET | RANGING (ADX=%.1f)", adx1)
     else:
-        # Trending: BREAKOUT is the proven winner (85.3% wr, +1.56R)
-        strategy_names = ["BREAKOUT", "REVERSAL"]
+        strategy_names = ["BREAKOUT", "REVERSAL", "FAST_TREND"]
         logger.info("REGIME_SWITCH | MARKET | TRENDING (ADX=%.1f)", adx1)
 
     diagnostics = {}
@@ -1806,10 +1934,11 @@ def generate_signal(daily, h4, h1, m15, m5,
         return no_trade("NO_VALID_STRATEGY", daily_dir, h4_dir,
                         h1_dir, None, diagnostics, metrics, btc=btc_context)
 
-    # v25: BREAKOUT has highest priority (proven winner)
+    # ⭐ v27 CHANGED: add FAST_TREND priority
     priority = {
         "BREAKOUT": 6,
         "BB_REVERSION": 5,
+        "FAST_TREND": 4,
         "RANGE_TRADING": 3,
         "REVERSAL": 2,
     }
@@ -1855,6 +1984,9 @@ def generate_signal(daily, h4, h1, m15, m5,
             high = score >= 8 and cand_metrics["confirmation"]
         elif strategy == "BB_REVERSION":
             high = score >= 8 and cand_metrics["confirmation"]
+        # ⭐ v27 NEW: FAST_TREND HIGH check
+        elif strategy == "FAST_TREND":
+            high = score >= 10 and _mtf_basic(m15c, direction)
         else:
             high = False
 
@@ -1863,6 +1995,7 @@ def generate_signal(daily, h4, h1, m15, m5,
             min_score = {
                 "BREAKOUT": 9, "REVERSAL": 9,
                 "RANGE_TRADING": 8, "BB_REVERSION": 8,
+                "FAST_TREND": 10,
             }.get(strategy, 999)
             if score < min_score:
                 failed.append(f"SCORE={score}<{min_score}")
@@ -1876,6 +2009,10 @@ def generate_signal(daily, h4, h1, m15, m5,
             elif strategy == "REVERSAL":
                 if not structure_shift_5m(m5c, direction):
                     failed.append("NO_5M_STRUCTURE_SHIFT")
+            # ⭐ v27 NEW: FAST_TREND failed checks
+            elif strategy == "FAST_TREND":
+                if not _mtf_basic(m15c, direction):
+                    failed.append("NO_15M_CONFIRMATION")
             diagnostics[strategy] = (
                 "HIGH_FAIL:" + "|".join(failed) if failed else "HIGH_FAIL:UNKNOWN"
             )
@@ -1937,7 +2074,8 @@ def generate_signal(daily, h4, h1, m15, m5,
     return {
         "signal": selected["direction"],
         "direction": selected["direction"],
-        "score": selected["score"],
+        # ⭐ v27 CHANGED: cap score at 12
+        "score": min(selected["score"], 12),
         "quality": "HIGH",
         "reason": f"VALID_{selected['strategy']}",
         "strategies": [
