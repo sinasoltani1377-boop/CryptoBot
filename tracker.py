@@ -487,7 +487,7 @@ def _close_trade(
 
 
 # ============================================================
-# MANUAL CLOSE (NEW)
+# MANUAL CLOSE
 # ============================================================
 
 def close_trade_manually(
@@ -552,6 +552,30 @@ def close_trade_manually(
             }
 
     return None
+
+
+# ============================================================
+# FORCE CLOSE (NEW — required by bot.py for timeout & manual close)
+# ============================================================
+
+def force_close_trade(
+    trade_id: str,
+    close_price: float,
+    reason: str = "TIMEOUT",
+) -> bool:
+    """
+    Force-close an OPEN trade at the given price with the given reason.
+
+    Thin wrapper around close_trade_manually() that returns a boolean
+    so bot.py can use a simple True/False API for both timeout and
+    /close commands.
+
+    Returns:
+        True  - trade was closed successfully
+        False - trade not found, not open, or invalid price
+    """
+    result = close_trade_manually(trade_id, close_price, reason)
+    return result is not None
 
 
 # ============================================================
@@ -929,6 +953,13 @@ def get_stats_by_strategy() -> Dict[str, Dict[str, Any]]:
             elif reason == "TP3":
                 s["wins"] += 1
             elif reason == "MANUAL_CLOSE":
+                s["manual"] += 1
+                pnl = float(trade.get("realized_pnl", 0.0) or 0.0)
+                if pnl > 0:
+                    s["wins"] += 1
+                elif pnl < 0:
+                    s["losses"] += 1
+            elif reason == "TIMEOUT":
                 s["manual"] += 1
                 pnl = float(trade.get("realized_pnl", 0.0) or 0.0)
                 if pnl > 0:
