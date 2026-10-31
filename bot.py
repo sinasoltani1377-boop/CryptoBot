@@ -1670,31 +1670,31 @@ async def open_trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 # ============================================================
 # /CLOSE <id> — manual close
 # ============================================================
-
 async def close_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args or not context.args[0].isdigit():
+    if not context.args:
         await update.effective_message.reply_text(
-            "فرمت: /close <id>\n"
-            "مثال: /close 12\n\n"
-            "برای دیدن id معاملات باز از /open استفاده کن."
+            "فرمت: /close &lt;id&gt;\n"
+            "مثال: <code>/close BTC-SWAP-USDT_LONG_1730000000.123</code>\n\n"
+            "برای دیدن id دقیق از /open استفاده کن (روی id بزن تا کپی شه).",
+            parse_mode="HTML",
         )
         return
 
-    trade_id = int(context.args[0])
+    # ID is a string like "BTC-SWAP-USDT_LONG_1730000000.123"
+    trade_id = str(context.args[0]).strip().lstrip("#")
 
     open_trades = await asyncio.to_thread(get_open_trades)
     target = None
     for t in open_trades:
-        try:
-            if int(t.get("id")) == trade_id:
-                target = t
-                break
-        except (TypeError, ValueError):
-            continue
+        if str(t.get("id")) == trade_id:
+            target = t
+            break
 
     if target is None:
         await update.effective_message.reply_text(
-            f"❌ معامله باز با id={trade_id} پیدا نشد.\n/open رو بزن."
+            f"❌ معامله باز با id پیدا نشد:\n<code>{safe_text(trade_id)}</code>\n\n"
+            "دستور /open رو بزن و id دقیق رو کپی کن.",
+            parse_mode="HTML",
         )
         return
 
@@ -1704,13 +1704,13 @@ async def close_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     price = await asyncio.to_thread(get_price, symbol)
     if price is None:
         await update.effective_message.reply_text(
-            f"❌ قیمت لحظه‌ای {symbol} در دسترس نیست."
+            f"❌ قیمت لحظه‌ای {safe_text(symbol)} در دسترس نیست."
         )
         return
 
     try:
         closed = await asyncio.to_thread(
-            force_close_trade, trade_id, price, "MANUAL"
+            force_close_trade, trade_id, price, "MANUAL_CLOSE"
         )
     except Exception:
         logger.exception("MANUAL_CLOSE | failed")
@@ -1741,8 +1741,7 @@ async def close_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = (
         f"🔒 <b>بستن دستی معامله</b>\n\n"
         f"🪙 <b>{safe_text(symbol)}</b>\n"
-        f"📈 Direction: <b>{safe_text(direction)}</b>\n"
-        f"🆔 ID: {trade_id}\n\n"
+        f"📈 Direction: <b>{safe_text(direction)}</b>\n\n"
         f"📌 Entry: {display_number(entry)}\n"
         f"💰 قیمت بستن: <b>{display_number(price)}</b>\n\n"
         f"💵 PnL: <b>{pnl_text}</b>\n"
