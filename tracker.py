@@ -19,12 +19,10 @@ TRADES_FILE = os.getenv(
 DEFAULT_MARGIN = 10.0
 DEFAULT_LEVERAGE = 20.0
 
-# Only HIGH signals with score 10, 11 or 12 are accepted.
 MIN_SIGNAL_SCORE = 10
 MAX_SIGNAL_SCORE = 12
 
 LOCK = threading.RLock()
-
 logger = logging.getLogger(__name__)
 
 
@@ -110,6 +108,15 @@ def get_all_trades() -> List[Dict[str, Any]]:
         return _load_trades()
 
 
+def get_trade_by_id(trade_id: str) -> Optional[Dict[str, Any]]:
+    with LOCK:
+        for trade in _load_trades():
+            if str(trade.get("id")) == str(trade_id):
+                return dict(trade)
+
+    return None
+
+
 # ============================================================
 # NUMBER HELPERS
 # ============================================================
@@ -153,14 +160,7 @@ def _valid_levels(
     breakeven_active: bool = False,
     tp2_hit: bool = False,
 ) -> bool:
-    """
-    Validate trade levels taking into account stop movement.
 
-    States:
-    - Initial:     sl < entry < tp1 < tp2 < tp3  (LONG)
-    - After TP1:   sl == entry  (breakeven_active = True)
-    - After TP2:   sl == tp1    (tp2_hit = True)
-    """
     if min(entry, sl, tp1, tp2, tp3) <= 0:
         return False
 
@@ -169,19 +169,25 @@ def _valid_levels(
     if direction == "LONG":
         if not (entry < tp1 < tp2 < tp3):
             return False
+
         if tp2_hit and abs(sl - tp1) < tol:
             return True
+
         if breakeven_active and abs(sl - entry) < tol:
             return True
+
         return sl < entry
 
     if direction == "SHORT":
         if not (tp3 < tp2 < tp1 < entry):
             return False
+
         if tp2_hit and abs(sl - tp1) < tol:
             return True
+
         if breakeven_active and abs(sl - entry) < tol:
             return True
+
         return sl > entry
 
     return False
@@ -196,6 +202,7 @@ def _price_return(
     entry: float,
     exit_price: float,
 ) -> float:
+
     if entry <= 0:
         return 0.0
 
@@ -210,6 +217,7 @@ def _pnl_for_fraction(
     exit_price: float,
     fraction: float,
 ) -> float:
+
     entry = _positive(trade.get("entry"))
     leverage = _positive(trade.get("leverage"))
     margin = _positive(trade.get("margin"))
@@ -237,6 +245,9 @@ def _record_realized_pnl(
     exit_price: float,
     fraction: float,
 ) -> float:
+
+    fraction = max(0.0, min(1.0, fraction))
+
     pnl = _pnl_for_fraction(
         trade,
         exit_price,
@@ -275,9 +286,8 @@ def _roi_percent(trade: Dict[str, Any]) -> float:
 # SIGNAL REGISTRATION
 # ============================================================
 
-def register_signal(
-    signal: Dict[str, Any],
-) -> bool:
+def register_signal(signal: Dict[str, Any]) -> bool:
+
     if not isinstance(signal, dict):
         return False
 
@@ -323,9 +333,7 @@ def register_signal(
     tp3 = _positive(signal.get("tp3"))
 
     if None in (entry, sl, tp1, tp2, tp3):
-        logger.info(
-            "Rejected signal: one or more trade levels are missing."
-        )
+        logger.info("Rejected signal: missing trade levels.")
         return False
 
     if not _valid_levels(
@@ -336,18 +344,11 @@ def register_signal(
         tp2,
         tp3,
     ):
-        logger.info(
-            "Rejected signal: invalid entry, SL or TP ordering."
-        )
+        logger.info("Rejected signal: invalid trade level ordering.")
         return False
 
-    margin = _positive(
-        signal.get("margin")
-    ) or DEFAULT_MARGIN
-
-    leverage = _positive(
-        signal.get("leverage")
-    ) or DEFAULT_LEVERAGE
+    margin = _positive(signal.get("margin")) or DEFAULT_MARGIN
+    leverage = _positive(signal.get("leverage")) or DEFAULT_LEVERAGE
 
     with LOCK:
         trades = _load_trades()
@@ -395,7 +396,6 @@ def register_signal(
 
             "margin": margin,
             "leverage": leverage,
-
             "position_notional": margin * leverage,
 
             "status": "OPEN",
@@ -423,11 +423,15 @@ def register_signal(
             "closed_at": None,
 
             "close_reason": None,
+            "manual_close_price": None,
             "events": [],
 
-            # NEW: BTC trend tracking for alerts
-            "btc_trend_at_entry": str(signal.get("btc_dir") or "UNKNOWN"),
-            "btc_adx_at_entry": float(signal.get("btc_adx") or 0.0),
+            "btc_trend_at_entry": str(
+                signal.get("btc_dir") or "UNKNOWN"
+            ),
+            "btc_adx_at_entry": float(
+                signal.get("btc_adx") or 0.0
+            ),
             "trend_change_alerted": False,
             "trend_change_alerted_at": None,
         }
@@ -446,6 +450,7 @@ def register_signal(
 
     return True
 
+
 # ============================================================
 # TRADE EVENT HELPERS
 # ============================================================
@@ -456,6 +461,7 @@ def _add_event(
     price: float,
     pnl: float = 0.0,
 ) -> None:
+
     events = trade.get("events")
 
     if not isinstance(events, list):
@@ -476,11 +482,186 @@ def _close_trade(
     reason: str,
     price: float,
 ) -> None:
+
     trade["status"] = "CLOSED"
     trade["close_reason"] = reason
     trade["closed_at"] = utc_now()
     trade["updated_at"] = utc_now()
     trade["last_price"] = price
+
+
+# ============================================================
+# MANUAL CLOSE
+# ============================================================
+
+def close_trade_manually(
+    trade_id: str,
+    get_price,
+) -> Dict[str, Any]:
+    """
+    Close exactly one OPEN trade at the latest available market price.
+
+    This changes tracker records only.
+    It does NOT place or close an exchange order.
+    """
+
+    if not trade_id:
+        return {
+            "success": False,
+            "error": "MISSING_TRADE_ID",
+        }
+
+    # First read the symbol without holding the lock during API lookup.
+    with LOCK:
+        trades = _load_trades()
+
+        selected = next(
+            (
+                trade for trade in trades
+                if str(trade.get("id")) == str(trade_id)
+            ),
+            None
+        )
+
+        if selected is None:
+            return {
+                "success": False,
+                "error": "TRADE_NOT_FOUND",
+            }
+
+        if str(selected.get("status", "")).upper() != "OPEN":
+            return {
+                "success": False,
+                "error": "TRADE_ALREADY_CLOSED",
+            }
+
+        symbol = str(selected.get("symbol", "")).strip().upper()
+
+    if not symbol:
+        return {
+            "success": False,
+            "error": "INVALID_SYMBOL",
+        }
+
+    # Fetch current price from the bot's Toobit price function.
+    try:
+        market_price = _positive(get_price(symbol))
+    except Exception as exc:
+        logger.warning(
+            "Manual close price lookup failed for %s: %s",
+            symbol,
+            exc
+        )
+        market_price = None
+
+    if not market_price:
+        return {
+            "success": False,
+            "error": "PRICE_UNAVAILABLE",
+        }
+
+    # Recheck status under lock to prevent double closing.
+    with LOCK:
+        trades = _load_trades()
+
+        trade = next(
+            (
+                item for item in trades
+                if str(item.get("id")) == str(trade_id)
+            ),
+            None
+        )
+
+        if trade is None:
+            return {
+                "success": False,
+                "error": "TRADE_NOT_FOUND",
+            }
+
+        if str(trade.get("status", "")).upper() != "OPEN":
+            return {
+                "success": False,
+                "error": "TRADE_ALREADY_CLOSED",
+            }
+
+        previous_pnl = float(
+            trade.get("realized_pnl", 0.0) or 0.0
+        )
+
+        already_realized = float(
+            trade.get("realized_fraction", 0.0) or 0.0
+        )
+
+        remaining_fraction = max(
+            0.0,
+            min(1.0, 1.0 - already_realized)
+        )
+
+        manual_pnl = 0.0
+
+        if remaining_fraction > 0:
+            manual_pnl = _record_realized_pnl(
+                trade,
+                market_price,
+                remaining_fraction
+            )
+
+        trade["manual_close_price"] = market_price
+
+        _add_event(
+            trade,
+            "MANUAL_CLOSE",
+            market_price,
+            manual_pnl
+        )
+
+        _close_trade(
+            trade,
+            "MANUAL_CLOSE",
+            market_price
+        )
+
+        if not _save_trades(trades):
+            return {
+                "success": False,
+                "error": "SAVE_FAILED",
+            }
+
+        total_pnl = float(
+            trade.get("realized_pnl", 0.0) or 0.0
+        )
+
+        result = {
+            "success": True,
+            "trade_id": str(trade.get("id")),
+            "symbol": trade.get("symbol"),
+            "direction": trade.get("direction"),
+            "strategy": trade.get("strategy"),
+            "entry": trade.get("entry"),
+            "exit_price": market_price,
+            "manual_close_pnl": round(manual_pnl, 8),
+            "previous_realized_pnl": round(previous_pnl, 8),
+            "realized_pnl": round(total_pnl, 8),
+            "roi_percent": round(_roi_percent(trade), 4),
+            "margin": trade.get("margin", DEFAULT_MARGIN),
+            "leverage": trade.get("leverage", DEFAULT_LEVERAGE),
+            "realized_fraction": trade.get("realized_fraction", 0.0),
+            "close_reason": "MANUAL_CLOSE",
+            "tp1_hit": bool(trade.get("tp1_hit")),
+            "tp2_hit": bool(trade.get("tp2_hit")),
+            "tp3_hit": bool(trade.get("tp3_hit")),
+            "closed_at": trade.get("closed_at"),
+        }
+
+    logger.info(
+        "MANUAL CLOSE | %s | %s | Price=%s | PnL=%s",
+        result["symbol"],
+        result["direction"],
+        result["exit_price"],
+        result["realized_pnl"]
+    )
+
+    return result
 
 
 # ============================================================
@@ -491,19 +672,7 @@ def update_trade(
     trade: Dict[str, Any],
     price: float,
 ) -> Tuple[bool, Optional[str]]:
-    """
-    Update one trade using the latest available price.
 
-    Trailing Stop Logic:
-      - After TP1: SL moves to Entry (Breakeven)
-      - After TP2: SL moves to TP1 (Profit Locked)
-      - After TP3: Close remaining position
-
-    Stop-Loss categorization:
-      - Before any TP hit: SL (Real Loss)
-      - After TP1 hit only: BREAKEVEN (No Loss)
-      - After TP2 hit: TP1_PROTECTED (TP1 Profit Locked)
-    """
     if not isinstance(trade, dict):
         return False, None
 
@@ -530,8 +699,13 @@ def update_trade(
         )
         return False, None
 
-    breakeven_active = bool(trade.get("breakeven_active", False))
-    tp2_hit_flag = bool(trade.get("tp2_hit", False))
+    breakeven_active = bool(
+        trade.get("breakeven_active", False)
+    )
+
+    tp2_hit_flag = bool(
+        trade.get("tp2_hit", False)
+    )
 
     if not _valid_levels(
         direction,
@@ -563,33 +737,36 @@ def update_trade(
 
     if stop_touched:
         tp1_hit_flag = bool(trade.get("tp1_hit", False))
-        
-        # Fraction of the position that is still open
+
         remaining_fraction = max(
-            0.0, 
+            0.0,
             1.0 - float(trade.get("realized_fraction", 0.0))
         )
 
-        # Execute at SL price
         exit_price = sl
-        pnl = _record_realized_pnl(trade, exit_price, remaining_fraction) if remaining_fraction > 0 else 0.0
 
-        # Categorize the exit
+        pnl = (
+            _record_realized_pnl(
+                trade,
+                exit_price,
+                remaining_fraction
+            )
+            if remaining_fraction > 0
+            else 0.0
+        )
+
         if tp2_hit_flag:
-            # After TP2: SL was at TP1 → profit locked
             trade["tp1_protected_hit"] = True
             _add_event(trade, "TP1_PROTECTED", exit_price, pnl)
             _close_trade(trade, "TP1_PROTECTED", exit_price)
             return True, "TP1_PROTECTED"
 
         if tp1_hit_flag:
-            # After TP1: SL was at Entry → breakeven
             trade["breakeven_hit"] = True
             _add_event(trade, "BREAKEVEN", exit_price, pnl)
             _close_trade(trade, "BREAKEVEN", exit_price)
             return True, "BREAKEVEN"
 
-        # No TP hit → real stop loss
         trade["sl_hit"] = True
         _add_event(trade, "SL", exit_price, pnl)
         _close_trade(trade, "SL", exit_price)
@@ -610,38 +787,55 @@ def update_trade(
         tp2_touched = current_price <= tp2
         tp3_touched = current_price <= tp3
 
-    # --- TP1: close 50%, SL -> Entry ---
+    # TP1: close 50%, move SL to Entry.
+
     if tp1_touched and not trade.get("tp1_hit", False):
-        pnl = _record_realized_pnl(trade, tp1, 0.50)
-        
+        pnl = _record_realized_pnl(
+            trade,
+            tp1,
+            0.50
+        )
+
         trade["tp1_hit"] = True
         trade["tp1_pnl"] = round(pnl, 8)
-        
+
         trade["sl"] = entry
         trade["breakeven_active"] = True
-        
+
         _add_event(trade, "TP1", tp1, pnl)
         events.append("TP1")
 
-    # --- TP2: SL -> TP1 (NEW) ---
+    # TP2: move SL to TP1.
+
     if tp2_touched and not trade.get("tp2_hit", False):
         trade["tp2_hit"] = True
         trade["sl"] = tp1
-        
+
         _add_event(trade, "TP2", tp2, 0.0)
         events.append("TP2")
 
-    # --- TP3: close remaining ---
+    # TP3: close the remaining position.
+
     if tp3_touched and not trade.get("tp3_hit", False):
         trade["tp3_hit"] = True
         trade["sl"] = tp2
 
         remaining_fraction = max(
-            0.0, 
+            0.0,
             1.0 - float(trade.get("realized_fraction", 0.0))
         )
-        
-        pnl = _record_realized_pnl(trade, tp3, remaining_fraction) if remaining_fraction > 0 else 0.0
+
+        pnl = (
+            _record_realized_pnl(
+                trade,
+                tp3,
+                remaining_fraction
+            )
+            if remaining_fraction > 0
+            else 0.0
+        )
+
+        trade["tp3_pnl"] = round(pnl, 8)
 
         _add_event(trade, "TP3", tp3, pnl)
         _close_trade(trade, "TP3", tp3)
@@ -657,9 +851,8 @@ def update_trade(
 # CHECK ALL OPEN TRADES
 # ============================================================
 
-def check_all_trades(
-    get_price,
-) -> List[Dict[str, Any]]:
+def check_all_trades(get_price) -> List[Dict[str, Any]]:
+
     emitted_events = []
 
     with LOCK:
@@ -670,27 +863,40 @@ def check_all_trades(
             if str(trade.get("status", "")).upper() != "OPEN":
                 continue
 
-            symbol = str(trade.get("symbol", "")).strip().upper()
+            symbol = str(
+                trade.get("symbol", "")
+            ).strip().upper()
+
             if not symbol:
                 continue
 
             try:
                 price = get_price(symbol)
             except Exception as exc:
-                logger.warning("Price lookup failed for %s: %s", symbol, exc)
+                logger.warning(
+                    "Price lookup failed for %s: %s",
+                    symbol,
+                    exc
+                )
                 continue
 
             current_price = _positive(price)
+
             if not current_price:
                 continue
 
-            changed, event = update_trade(trade, current_price)
+            changed, event = update_trade(
+                trade,
+                current_price
+            )
+
             if not changed:
                 continue
 
             changed_any = True
 
             emitted_events.append({
+                "trade_id": trade.get("id"),
                 "symbol": symbol,
                 "direction": trade.get("direction"),
                 "strategy": trade.get("strategy"),
@@ -727,7 +933,8 @@ def check_all_trades(
 def get_open_trades() -> List[Dict[str, Any]]:
     with LOCK:
         return [
-            trade for trade in _load_trades()
+            dict(trade)
+            for trade in _load_trades()
             if str(trade.get("status", "")).upper() == "OPEN"
         ]
 
@@ -737,12 +944,21 @@ def get_open_trades() -> List[Dict[str, Any]]:
 # ============================================================
 
 def get_stats() -> Dict[str, Any]:
+
     with LOCK:
         trades = _load_trades()
 
     total = len(trades)
-    open_trades = [t for t in trades if str(t.get("status", "")).upper() == "OPEN"]
-    closed_trades = [t for t in trades if str(t.get("status", "")).upper() == "CLOSED"]
+
+    open_trades = [
+        t for t in trades
+        if str(t.get("status", "")).upper() == "OPEN"
+    ]
+
+    closed_trades = [
+        t for t in trades
+        if str(t.get("status", "")).upper() == "CLOSED"
+    ]
 
     tp1_count = sum(bool(t.get("tp1_hit")) for t in trades)
     tp2_count = sum(bool(t.get("tp2_hit")) for t in trades)
@@ -752,23 +968,49 @@ def get_stats() -> Dict[str, Any]:
         str(t.get("close_reason", "")).upper() == "SL"
         for t in trades
     )
+
     breakeven_count = sum(
         str(t.get("close_reason", "")).upper() == "BREAKEVEN"
         for t in trades
     )
+
     tp1_protected_count = sum(
         str(t.get("close_reason", "")).upper() == "TP1_PROTECTED"
         for t in trades
     )
 
-    realized_pnl = sum(float(t.get("realized_pnl", 0.0) or 0.0) for t in trades)
-    total_margin = sum(float(t.get("margin", DEFAULT_MARGIN) or DEFAULT_MARGIN) for t in trades)
-    closed_margin = sum(float(t.get("margin", DEFAULT_MARGIN) or DEFAULT_MARGIN) for t in closed_trades)
+    manual_close_count = sum(
+        str(t.get("close_reason", "")).upper() == "MANUAL_CLOSE"
+        for t in trades
+    )
 
-    realized_roi = (realized_pnl / total_margin * 100.0) if total_margin > 0 else 0.0
+    realized_pnl = sum(
+        float(t.get("realized_pnl", 0.0) or 0.0)
+        for t in trades
+    )
+
+    total_margin = sum(
+        float(t.get("margin", DEFAULT_MARGIN) or DEFAULT_MARGIN)
+        for t in trades
+    )
+
+    closed_margin = sum(
+        float(t.get("margin", DEFAULT_MARGIN) or DEFAULT_MARGIN)
+        for t in closed_trades
+    )
+
+    realized_roi = (
+        realized_pnl / total_margin * 100.0
+        if total_margin > 0 else 0.0
+    )
+
+    closed_pnl = sum(
+        float(t.get("realized_pnl", 0.0) or 0.0)
+        for t in closed_trades
+    )
+
     closed_roi = (
-        sum(float(t.get("realized_pnl", 0.0) or 0.0) for t in closed_trades)
-        / closed_margin * 100.0
+        closed_pnl / closed_margin * 100.0
         if closed_margin > 0 else 0.0
     )
 
@@ -792,13 +1034,14 @@ def get_stats() -> Dict[str, Any]:
         "sl": sl_count,
         "breakeven": breakeven_count,
         "tp1_protected": tp1_protected_count,
-        "tp3_rate": (tp3_count / total * 100.0) if total > 0 else 0.0,
+        "manual_close": manual_close_count,
+        "tp3_rate": (
+            tp3_count / total * 100.0
+            if total > 0 else 0.0
+        ),
         "realized_pnl": round(realized_pnl, 8),
         "realized_roi": round(realized_roi, 4),
-        "closed_realized_pnl": round(
-            sum(float(t.get("realized_pnl", 0.0) or 0.0) for t in closed_trades),
-            8
-        ),
+        "closed_realized_pnl": round(closed_pnl, 8),
         "closed_roi": round(closed_roi, 4),
         "strategies": strategies,
         "symbols": symbols,
@@ -806,21 +1049,21 @@ def get_stats() -> Dict[str, Any]:
 
 
 # ============================================================
-# STATISTICS BY STRATEGY (Added for Daily Report)
+# STATISTICS BY STRATEGY
 # ============================================================
 
 def get_stats_by_strategy() -> Dict[str, Dict[str, Any]]:
-    """
-    Return statistics grouped by strategy.
-    Each strategy gets its own breakdown of signals, targets, and stops.
-    """
+
     with LOCK:
         trades = _load_trades()
 
     stats: Dict[str, Dict[str, Any]] = {}
 
     for trade in trades:
-        strategy = str(trade.get("strategy", "UNKNOWN")).strip() or "UNKNOWN"
+        strategy = (
+            str(trade.get("strategy", "UNKNOWN")).strip()
+            or "UNKNOWN"
+        )
 
         if strategy not in stats:
             stats[strategy] = {
@@ -833,6 +1076,7 @@ def get_stats_by_strategy() -> Dict[str, Dict[str, Any]]:
                 "sl": 0,
                 "breakeven": 0,
                 "tp1_protected": 0,
+                "manual_close": 0,
                 "realized_pnl": 0.0,
                 "wins": 0,
                 "losses": 0,
@@ -842,6 +1086,7 @@ def get_stats_by_strategy() -> Dict[str, Dict[str, Any]]:
         s["total"] += 1
 
         status = str(trade.get("status", "")).upper()
+
         if status == "OPEN":
             s["open"] += 1
         elif status == "CLOSED":
@@ -849,28 +1094,50 @@ def get_stats_by_strategy() -> Dict[str, Dict[str, Any]]:
 
         if trade.get("tp1_hit"):
             s["tp1"] += 1
+
         if trade.get("tp2_hit"):
             s["tp2"] += 1
+
         if trade.get("tp3_hit"):
             s["tp3"] += 1
 
-        reason = str(trade.get("close_reason", "")).upper()
+        reason = str(
+            trade.get("close_reason", "")
+        ).upper()
+
+        pnl = float(
+            trade.get("realized_pnl", 0.0) or 0.0
+        )
+
         if reason == "SL":
             s["sl"] += 1
             s["losses"] += 1
+
         elif reason == "BREAKEVEN":
             s["breakeven"] += 1
+
         elif reason == "TP1_PROTECTED":
             s["tp1_protected"] += 1
             s["wins"] += 1
+
         elif reason == "TP3":
             s["wins"] += 1
 
-        s["realized_pnl"] += float(trade.get("realized_pnl", 0.0) or 0.0)
+        elif reason == "MANUAL_CLOSE":
+            s["manual_close"] += 1
 
-    # Round pnl
+            if pnl > 0:
+                s["wins"] += 1
+            elif pnl < 0:
+                s["losses"] += 1
+
+        s["realized_pnl"] += pnl
+
     for s in stats.values():
-        s["realized_pnl"] = round(s["realized_pnl"], 4)
+        s["realized_pnl"] = round(
+            s["realized_pnl"],
+            4
+        )
 
     return stats
 
@@ -880,7 +1147,9 @@ def get_stats_by_strategy() -> Dict[str, Dict[str, Any]]:
 # ============================================================
 
 def get_daily_stats() -> Dict[str, Any]:
+
     now = datetime.now(timezone.utc)
+
     start = now.replace(
         hour=0,
         minute=0,
@@ -894,9 +1163,7 @@ def get_daily_stats() -> Dict[str, Any]:
     daily_trades = []
 
     for trade in trades:
-        created = parse_time(
-            trade.get("created_at")
-        )
+        created = parse_time(trade.get("created_at"))
 
         if created and created >= start:
             daily_trades.append(trade)
@@ -911,43 +1178,37 @@ def get_daily_stats() -> Dict[str, Any]:
         "total": len(daily_trades),
 
         "open": sum(
-            str(trade.get("status", "")).upper() == "OPEN"
-            for trade in daily_trades
+            str(t.get("status", "")).upper() == "OPEN"
+            for t in daily_trades
         ),
 
         "closed": sum(
-            str(trade.get("status", "")).upper() == "CLOSED"
-            for trade in daily_trades
+            str(t.get("status", "")).upper() == "CLOSED"
+            for t in daily_trades
         ),
 
-        "tp1": sum(
-            bool(trade.get("tp1_hit"))
-            for trade in daily_trades
-        ),
-
-        "tp2": sum(
-            bool(trade.get("tp2_hit"))
-            for trade in daily_trades
-        ),
-
-        "tp3": sum(
-            bool(trade.get("tp3_hit"))
-            for trade in daily_trades
-        ),
+        "tp1": sum(bool(t.get("tp1_hit")) for t in daily_trades),
+        "tp2": sum(bool(t.get("tp2_hit")) for t in daily_trades),
+        "tp3": sum(bool(t.get("tp3_hit")) for t in daily_trades),
 
         "sl": sum(
-            str(trade.get("close_reason", "")).upper() == "SL"
-            for trade in daily_trades
+            str(t.get("close_reason", "")).upper() == "SL"
+            for t in daily_trades
         ),
 
         "breakeven": sum(
-            str(trade.get("close_reason", "")).upper() == "BREAKEVEN"
-            for trade in daily_trades
+            str(t.get("close_reason", "")).upper() == "BREAKEVEN"
+            for t in daily_trades
         ),
 
         "tp1_protected": sum(
-            str(trade.get("close_reason", "")).upper() == "TP1_PROTECTED"
-            for trade in daily_trades
+            str(t.get("close_reason", "")).upper() == "TP1_PROTECTED"
+            for t in daily_trades
+        ),
+
+        "manual_close": sum(
+            str(t.get("close_reason", "")).upper() == "MANUAL_CLOSE"
+            for t in daily_trades
         ),
 
         "realized_pnl": round(realized_pnl, 8),
@@ -959,6 +1220,7 @@ def get_daily_stats() -> Dict[str, Any]:
 # ============================================================
 
 def get_7day_report() -> Dict[str, Any]:
+
     now = datetime.now(timezone.utc)
     start = now - timedelta(days=7)
 
@@ -968,9 +1230,7 @@ def get_7day_report() -> Dict[str, Any]:
     recent_trades = []
 
     for trade in trades:
-        created = parse_time(
-            trade.get("created_at")
-        )
+        created = parse_time(trade.get("created_at"))
 
         if created and created >= start:
             recent_trades.append(trade)
@@ -984,43 +1244,37 @@ def get_7day_report() -> Dict[str, Any]:
         "total": len(recent_trades),
 
         "open": sum(
-            str(trade.get("status", "")).upper() == "OPEN"
-            for trade in recent_trades
+            str(t.get("status", "")).upper() == "OPEN"
+            for t in recent_trades
         ),
 
         "closed": sum(
-            str(trade.get("status", "")).upper() == "CLOSED"
-            for trade in recent_trades
+            str(t.get("status", "")).upper() == "CLOSED"
+            for t in recent_trades
         ),
 
-        "tp1": sum(
-            bool(trade.get("tp1_hit"))
-            for trade in recent_trades
-        ),
-
-        "tp2": sum(
-            bool(trade.get("tp2_hit"))
-            for trade in recent_trades
-        ),
-
-        "tp3": sum(
-            bool(trade.get("tp3_hit"))
-            for trade in recent_trades
-        ),
+        "tp1": sum(bool(t.get("tp1_hit")) for t in recent_trades),
+        "tp2": sum(bool(t.get("tp2_hit")) for t in recent_trades),
+        "tp3": sum(bool(t.get("tp3_hit")) for t in recent_trades),
 
         "sl": sum(
-            str(trade.get("close_reason", "")).upper() == "SL"
-            for trade in recent_trades
+            str(t.get("close_reason", "")).upper() == "SL"
+            for t in recent_trades
         ),
 
         "breakeven": sum(
-            str(trade.get("close_reason", "")).upper() == "BREAKEVEN"
-            for trade in recent_trades
+            str(t.get("close_reason", "")).upper() == "BREAKEVEN"
+            for t in recent_trades
         ),
 
         "tp1_protected": sum(
-            str(trade.get("close_reason", "")).upper() == "TP1_PROTECTED"
-            for trade in recent_trades
+            str(t.get("close_reason", "")).upper() == "TP1_PROTECTED"
+            for t in recent_trades
+        ),
+
+        "manual_close": sum(
+            str(t.get("close_reason", "")).upper() == "MANUAL_CLOSE"
+            for t in recent_trades
         ),
 
         "realized_pnl": round(realized_pnl, 8),
@@ -1032,6 +1286,7 @@ def get_7day_report() -> Dict[str, Any]:
 # ============================================================
 
 def format_daily_report() -> str:
+
     stats = get_daily_stats()
 
     return (
@@ -1045,13 +1300,15 @@ def format_daily_report() -> str:
         f"🎯 TP3 Hit: {stats['tp3']}\n"
         f"🛑 SL Hit: {stats['sl']}\n"
         f"⚖️ Break-even: {stats['breakeven']}\n"
-        f"✅ TP1 Protected: {stats['tp1_protected']}\n\n"
+        f"✅ TP1 Protected: {stats['tp1_protected']}\n"
+        f"✋ Manual Close: {stats['manual_close']}\n\n"
         f"💵 Realized PnL: ${stats['realized_pnl']:.4f}\n\n"
         "Simulation only; fees and funding excluded."
     )
 
 
 def format_7day_report() -> str:
+
     stats = get_7day_report()
 
     return (
@@ -1064,21 +1321,30 @@ def format_7day_report() -> str:
         f"🎯 TP3 Hit: {stats['tp3']}\n"
         f"🛑 SL Hit: {stats['sl']}\n"
         f"⚖️ Break-even: {stats['breakeven']}\n"
-        f"✅ TP1 Protected: {stats['tp1_protected']}\n\n"
+        f"✅ TP1 Protected: {stats['tp1_protected']}\n"
+        f"✋ Manual Close: {stats['manual_close']}\n\n"
         f"💵 Realized PnL: ${stats['realized_pnl']:.4f}\n\n"
         "Simulation only; fees and funding excluded."
     )
-    # ============================================================
+
+
+# ============================================================
 # BTC TREND CHANGE ALERTS
 # ============================================================
 
 def mark_trend_alert(trade_id: str) -> bool:
-    """Mark a trade as having received a trend-change alert (prevents spam)."""
+    """
+    Mark a trade as having received a trend-change alert.
+    Prevents repeated alerts.
+    """
+
     with LOCK:
         trades = _load_trades()
+
         for trade in trades:
-            if trade.get("id") == trade_id:
+            if str(trade.get("id")) == str(trade_id):
                 trade["trend_change_alerted"] = True
                 trade["trend_change_alerted_at"] = utc_now()
                 return _save_trades(trades)
+
     return False
