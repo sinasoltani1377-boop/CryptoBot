@@ -23,7 +23,8 @@ from tracker import (
     get_open_trades,
     get_stats,
     get_stats_by_strategy,
-    mark_trend_alert,          # ← جدید
+    mark_trend_alert,
+    force_close_trade,
 )
 
 # ============================================================
@@ -44,6 +45,15 @@ NEWS_FETCH_LIMIT = 50
 
 DEFAULT_LEVERAGE = 20
 DEFAULT_MARGIN_USDT = 10.0
+
+# ============================================================
+# TIMEOUT CONFIG
+# ============================================================
+SIGNAL_TIMEOUT_HOURS     = float(os.getenv("SIGNAL_TIMEOUT_HOURS", "48"))
+TIMEOUT_CHECK_INTERVAL   = int(os.getenv("TIMEOUT_CHECK_INTERVAL", "600"))
+TIMEOUT_ENABLED          = os.getenv("TIMEOUT_ENABLED", "1") == "1"
+TIMEOUT_CLOSE_IF_TP1_HIT = os.getenv("TIMEOUT_CLOSE_IF_TP1_HIT", "0") == "1"
+TIMEOUT_CLOSE_AT         = os.getenv("TIMEOUT_CLOSE_AT", "MARKET").upper()
 
 _scan_lock = asyncio.Lock()
 
@@ -709,14 +719,22 @@ async def prepare_signal(symbol, btc_context):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_ids = context.application.bot_data.setdefault("chat_ids", set())
     chat_ids.add(update.effective_chat.id)
+    timeout_status = (
+        f"⏱ تایم‌اوت بستن خودکار: {SIGNAL_TIMEOUT_HOURS:.0f} ساعت"
+        if TIMEOUT_ENABLED
+        else "⏱ تایم‌اوت بستن خودکار: غیرفعال"
+    )
     await update.effective_message.reply_text(
         f"🤖 CryptoBot فعال است.\n"
-        f"📊 تعداد ارزهای در حال اسکن: {len(SYMBOLS)}\n\n"
+        f"📊 تعداد ارزهای در حال اسکن: {len(SYMBOLS)}\n"
+        f"{timeout_status}\n\n"
         "دستورات:\n"
         "/price - قیمت BTC و SOL\n"
         "/signal - بررسی سیگنال‌های HIGH\n"
         "/register - دریافت سیگنال خودکار\n"
         "/stats - آمار تریدها\n"
+        "/open - لیست معاملات باز\n"
+        "/close <id> - بستن دستی معامله\n"
         "/news - آخرین اخبار کریپتو\n"
         "/news_test - آزمایش منابع خبری\n"
         "/backtest - تست استراتژی روی دیتای تاریخی\n"
@@ -895,6 +913,7 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
                 "BE": "⚖️ خروج در نقطه سربه‌سر",
                 "BREAKEVEN": "⚖️ خروج در نقطه سربه‌سر (بدون ضرر)",
                 "TP1_PROTECTED": "✅ حد ضرر در تارگت اول (سود قفل شد)",
+                "TP2_PROTECTED": "✅ حد ضرر در تارگت دوم (سود بیشتر قفل شد)",
             }
             title = title_map.get(event_name, f"📊 رویداد Tracker: {event_name}")
 
@@ -1033,10 +1052,6 @@ async def news_test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 
 async def daily_strategy_report(context: ContextTypes.DEFAULT_TYPE):
-    """
-    Daily report broken down by strategy.
-    Runs automatically every day at 20:30 UTC (00:00 Tehran).
-    """
     try:
         strategy_stats = await asyncio.to_thread(get_stats_by_strategy)
         overall = await asyncio.to_thread(get_stats)
@@ -1124,7 +1139,6 @@ async def daily_strategy_report(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def report_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manual trigger for the daily report (for testing)."""
     await update.effective_message.reply_text("⏳ در حال ساخت گزارش...")
     await daily_strategy_report(context)
 
@@ -1359,16 +1373,12 @@ async def backtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=update.effective_chat.id,
                 text=f"❌ خطای داخلی در بک‌تست: {str(e)}"
             )
+
 # ============================================================
 # BTC TREND CHANGE ALERTS
 # ============================================================
 
 async def check_btc_trend_changes(context: ContextTypes.DEFAULT_TYPE):
-    """
-    Runs every 5 minutes.
-    Compares current BTC trend to trend at trade entry.
-    Sends alert if BTC flipped against an open trade.
-    """
     try:
         open_trades = await asyncio.to_thread(get_open_trades)
         if not open_trades:
@@ -1394,7 +1404,6 @@ async def check_btc_trend_changes(context: ContextTypes.DEFAULT_TYPE):
             expected = "BULLISH" if direction == "LONG" else "BEARISH"
             entry_trend = str(trade.get("btc_trend_at_entry", "UNKNOWN"))
             
-            # Trend flip detection
             h1_flipped = (
                 current_h1 in ("BULLISH", "BEARISH")
                 and current_h1 != expected
@@ -1409,7 +1418,6 @@ async def check_btc_trend_changes(context: ContextTypes.DEFAULT_TYPE):
             if not (h1_flipped or changed_from_entry):
                 continue
             
-            # Build alert message
             symbol = trade.get("symbol", "UNKNOWN")
             entry_price = trade.get("entry")
             current_sl = trade.get("sl")
@@ -1455,7 +1463,6 @@ async def check_btc_trend_changes(context: ContextTypes.DEFAULT_TYPE):
                 f"• یا اگر SL در سود است، به Breakeven منتقل کنید"
             )
             
-            # Send to all registered chats
             for chat_id in list(chat_ids):
                 try:
                     await context.bot.send_message(
@@ -1466,7 +1473,6 @@ async def check_btc_trend_changes(context: ContextTypes.DEFAULT_TYPE):
                 except Exception:
                     logger.exception("BTC alert send error for chat %s", chat_id)
             
-            # Mark as alerted to avoid spam
             await asyncio.to_thread(mark_trend_alert, trade.get("id"))
             
             logger.warning(
@@ -1476,6 +1482,285 @@ async def check_btc_trend_changes(context: ContextTypes.DEFAULT_TYPE):
     
     except Exception:
         logger.exception("BTC trend change check error")
+
+# ============================================================
+# SIGNAL TIMEOUT CHECKER
+# ============================================================
+
+def _trade_age_hours(trade):
+    if not isinstance(trade, dict):
+        return None
+    created = trade.get("created_at")
+    if not created:
+        return None
+    try:
+        s = str(created).strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - dt).total_seconds() / 3600
+    except (ValueError, TypeError):
+        return None
+
+
+def _trade_tp1_hit(trade):
+    if not isinstance(trade, dict):
+        return False
+    for key in ("tp1_hit", "hit_tp1", "tp1_reached", "tp1_done", "tp_hit"):
+        if trade.get(key):
+            return True
+    status = str(trade.get("status") or "").upper()
+    if status in ("TP1", "TP1_HIT", "TP1_PROTECTED", "PARTIAL",
+                  "TP2", "TP2_HIT", "TP3", "TP3_HIT", "BREAKEVEN", "BE"):
+        return True
+    realized = safe_number(trade.get("realized_pnl"))
+    if realized is not None and realized != 0:
+        return True
+    return False
+
+
+async def check_signal_timeouts(context: ContextTypes.DEFAULT_TYPE):
+    if not TIMEOUT_ENABLED:
+        return
+
+    try:
+        open_trades = await asyncio.to_thread(get_open_trades)
+    except Exception:
+        logger.exception("TIMEOUT | failed to get open trades")
+        return
+
+    if not open_trades:
+        return
+
+    chat_ids = context.application.bot_data.get("chat_ids", set())
+    if not chat_ids:
+        return
+
+    closed_count = 0
+
+    for trade in open_trades:
+        try:
+            trade_id = trade.get("id")
+            if trade_id is None:
+                continue
+
+            symbol = trade.get("symbol", "UNKNOWN")
+            direction = str(trade.get("direction", "")).upper()
+            if direction not in ("LONG", "SHORT"):
+                continue
+
+            if _trade_tp1_hit(trade) and not TIMEOUT_CLOSE_IF_TP1_HIT:
+                continue
+
+            age_hours = _trade_age_hours(trade)
+            if age_hours is None or age_hours < SIGNAL_TIMEOUT_HOURS:
+                continue
+
+            current_price = await asyncio.to_thread(get_price, symbol)
+            if current_price is None:
+                logger.warning("TIMEOUT | %s | price unavailable", symbol)
+                continue
+
+            entry_price = safe_number(trade.get("entry"))
+            if TIMEOUT_CLOSE_AT == "ENTRY" and entry_price is not None:
+                close_price = entry_price
+            else:
+                close_price = current_price
+
+            try:
+                closed = await asyncio.to_thread(
+                    force_close_trade, trade_id, close_price, "TIMEOUT"
+                )
+            except Exception:
+                logger.exception("TIMEOUT | force_close_trade failed for %s", trade_id)
+                continue
+
+            if not closed:
+                logger.warning("TIMEOUT | %s | tracker refused to close", symbol)
+                continue
+
+            closed_count += 1
+            logger.warning(
+                "TIMEOUT_CLOSE | %s | %s | age=%.1fh | entry=%s | close=%s",
+                symbol, direction, age_hours, entry_price, close_price,
+            )
+
+            margin = safe_number(trade.get("margin"), DEFAULT_MARGIN_USDT)
+            leverage = safe_number(trade.get("leverage"), DEFAULT_LEVERAGE)
+            strategy = trade.get("strategy", "UNKNOWN")
+            score = trade.get("score", "—")
+
+            pnl_text = "N/A"
+            roi_text = "N/A"
+            if entry_price and close_price and margin and leverage:
+                if direction == "LONG":
+                    price_pct = (close_price - entry_price) / entry_price
+                else:
+                    price_pct = (entry_price - close_price) / entry_price
+                roi_pct = price_pct * leverage * 100
+                pnl = margin * price_pct * leverage
+                pnl_text = f"{pnl:+.4f} USDT"
+                roi_text = f"{roi_pct:+.2f}%"
+
+            message = (
+                f"⌛ <b>بستن خودکار سیگنال (تایم‌اوت)</b>\n\n"
+                f"🪙 <b>{safe_text(symbol)}</b>\n"
+                f"📈 Direction: <b>{safe_text(direction)}</b>\n"
+                f"🧠 Strategy: <b>{safe_text(strategy)}</b>\n"
+                f"⭐ Score: {safe_text(score)}\n\n"
+                f"⏱ مدت باز بودن: <b>{age_hours:.1f} ساعت</b>\n"
+                f"📌 Entry: {display_number(entry_price)}\n"
+                f"💰 قیمت بستن: <b>{display_number(close_price)}</b>\n\n"
+                f"💵 PnL: <b>{pnl_text}</b>\n"
+                f"📊 ROI: <b>{roi_text}</b>\n\n"
+                f"📝 دلیل: به TP1 نرسید و از تایم‌اوت "
+                f"<b>{SIGNAL_TIMEOUT_HOURS:.0f} ساعته</b> گذشت."
+            )
+
+            for chat_id in list(chat_ids):
+                try:
+                    await context.bot.send_message(
+                        chat_id=chat_id, text=message, parse_mode="HTML"
+                    )
+                except Exception:
+                    logger.exception("TIMEOUT | send error for chat %s", chat_id)
+
+        except Exception:
+            logger.exception("TIMEOUT | error processing trade %s", trade.get("id"))
+
+    if closed_count > 0:
+        logger.info("TIMEOUT | closed %d trade(s) due to timeout", closed_count)
+
+# ============================================================
+# /OPEN — list open trades
+# ============================================================
+
+async def open_trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    trades = await asyncio.to_thread(get_open_trades)
+    if not trades:
+        await update.effective_message.reply_text("هیچ معامله باز وجود ندارد ✅")
+        return
+
+    lines = [f"📋 <b>معاملات باز ({len(trades)})</b>\n"]
+    for t in trades:
+        try:
+            tid      = t.get("id", "?")
+            sym      = t.get("symbol", "?")
+            dirn     = t.get("direction", "?")
+            entry    = display_number(t.get("entry"))
+            sl       = display_number(t.get("sl"))
+            tp1      = display_number(t.get("tp1"))
+            tp1_flag = "✅" if t.get("tp1_hit") else "⏳"
+            age      = _trade_age_hours(t)
+            age_txt  = f"{age:.1f}h" if age is not None else "?"
+            lines.append(
+                f"#{tid} <b>{safe_text(sym)}</b> {safe_text(dirn)} | {age_txt}\n"
+                f"   Entry: {entry} | SL: {sl} | TP1: {tp1} {tp1_flag}\n"
+            )
+        except Exception:
+            continue
+
+    text = "\n".join(lines)
+    if len(text) > 4000:
+        text = text[:3900] + "\n\n..."
+    await update.effective_message.reply_text(text, parse_mode="HTML")
+
+# ============================================================
+# /CLOSE <id> — manual close
+# ============================================================
+
+async def close_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args or not context.args[0].isdigit():
+        await update.effective_message.reply_text(
+            "فرمت: /close <id>\n"
+            "مثال: /close 12\n\n"
+            "برای دیدن id معاملات باز از /open استفاده کن."
+        )
+        return
+
+    trade_id = int(context.args[0])
+
+    open_trades = await asyncio.to_thread(get_open_trades)
+    target = None
+    for t in open_trades:
+        try:
+            if int(t.get("id")) == trade_id:
+                target = t
+                break
+        except (TypeError, ValueError):
+            continue
+
+    if target is None:
+        await update.effective_message.reply_text(
+            f"❌ معامله باز با id={trade_id} پیدا نشد.\n/open رو بزن."
+        )
+        return
+
+    symbol    = target.get("symbol", "UNKNOWN")
+    direction = str(target.get("direction", "?")).upper()
+
+    price = await asyncio.to_thread(get_price, symbol)
+    if price is None:
+        await update.effective_message.reply_text(
+            f"❌ قیمت لحظه‌ای {symbol} در دسترس نیست."
+        )
+        return
+
+    try:
+        closed = await asyncio.to_thread(
+            force_close_trade, trade_id, price, "MANUAL"
+        )
+    except Exception:
+        logger.exception("MANUAL_CLOSE | failed")
+        await update.effective_message.reply_text("❌ خطا در بستن معامله.")
+        return
+
+    if not closed:
+        await update.effective_message.reply_text(
+            "❌ بستن ناموفق بود (شاید قبلاً بسته شده)."
+        )
+        return
+
+    entry    = safe_number(target.get("entry"))
+    margin   = safe_number(target.get("margin"), DEFAULT_MARGIN_USDT)
+    leverage = safe_number(target.get("leverage"), DEFAULT_LEVERAGE)
+
+    pnl_text = roi_text = "N/A"
+    if entry and margin and leverage:
+        pct = (
+            (price - entry) / entry if direction == "LONG"
+            else (entry - price) / entry
+        )
+        pnl = margin * pct * leverage
+        roi = pct * leverage * 100
+        pnl_text = f"{pnl:+.4f} USDT"
+        roi_text = f"{roi:+.2f}%"
+
+    message = (
+        f"🔒 <b>بستن دستی معامله</b>\n\n"
+        f"🪙 <b>{safe_text(symbol)}</b>\n"
+        f"📈 Direction: <b>{safe_text(direction)}</b>\n"
+        f"🆔 ID: {trade_id}\n\n"
+        f"📌 Entry: {display_number(entry)}\n"
+        f"💰 قیمت بستن: <b>{display_number(price)}</b>\n\n"
+        f"💵 PnL: <b>{pnl_text}</b>\n"
+        f"📊 ROI: <b>{roi_text}</b>"
+    )
+    await update.effective_message.reply_text(message, parse_mode="HTML")
+
+    chat_ids = context.application.bot_data.get("chat_ids", set())
+    for chat_id in list(chat_ids):
+        if chat_id == update.effective_chat.id:
+            continue
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id, text=message, parse_mode="HTML"
+            )
+        except Exception:
+            pass
+
 # ============================================================
 # MAIN
 # ============================================================
@@ -1493,6 +1778,14 @@ def main():
     logger.info("Estimated PnL settings: margin %.2f USDT, leverage %sx", DEFAULT_MARGIN_USDT, DEFAULT_LEVERAGE)
     logger.info("=" * 60)
 
+    if TIMEOUT_ENABLED:
+        logger.info(
+            "Timeout checker: ENABLED | timeout=%sh | interval=%ss | close_at=%s",
+            SIGNAL_TIMEOUT_HOURS, TIMEOUT_CHECK_INTERVAL, TIMEOUT_CLOSE_AT,
+        )
+    else:
+        logger.info("Timeout checker: DISABLED by env (TIMEOUT_ENABLED=0)")
+
     application = Application.builder().token(TOKEN).build()
 
     # ---- Commands ----
@@ -1505,6 +1798,8 @@ def main():
     application.add_handler(CommandHandler("news_test", news_test_command))
     application.add_handler(CommandHandler("backtest", backtest_command))
     application.add_handler(CommandHandler("report", report_now))
+    application.add_handler(CommandHandler("open", open_trades_command))
+    application.add_handler(CommandHandler("close", close_command))
 
     # ---- Repeating jobs ----
     application.job_queue.run_repeating(
@@ -1523,7 +1818,6 @@ def main():
     )
     logger.info("Automatic signal scanner scheduled every %s seconds", AUTO_INTERVAL)
 
-    # ---- NEW: BTC trend change alert — every 5 minutes ----
     application.job_queue.run_repeating(
         check_btc_trend_changes,
         interval=300,
@@ -1532,7 +1826,18 @@ def main():
     )
     logger.info("BTC trend change alert scheduled every 300 seconds")
 
-    # ---- Daily report at 20:30 UTC (00:00 Tehran) ----
+    if TIMEOUT_ENABLED:
+        application.job_queue.run_repeating(
+            check_signal_timeouts,
+            interval=TIMEOUT_CHECK_INTERVAL,
+            first=240,
+            job_kwargs={"max_instances": 1, "coalesce": True},
+        )
+        logger.info(
+            "Signal timeout checker scheduled every %s seconds (timeout=%sh)",
+            TIMEOUT_CHECK_INTERVAL, SIGNAL_TIMEOUT_HOURS,
+        )
+
     application.job_queue.run_daily(
         daily_strategy_report,
         time=dt_time(hour=20, minute=30, tzinfo=timezone.utc),
