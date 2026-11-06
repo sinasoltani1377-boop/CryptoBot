@@ -1420,111 +1420,207 @@ async def check_signal_timeouts(context: ContextTypes.DEFAULT_TYPE):
     try:
         open_trades = await asyncio.to_thread(get_open_trades)
     except Exception:
-        logger.exception("TIMEOUT | failed to get open trades")
-        return
+        logger.e
+# ============================================================
+# BTC TREND CHANGE ALERTS
+# ============================================================
 
-    if not open_trades:
-        return
-
-    chat_ids = context.application.bot_data.get("chat_ids", set())
-    if not chat_ids:
-        return
-
-    closed_count = 0
-
-    for trade in open_trades:
-        try:
-            trade_id = trade.get("id")
-            if trade_id is None:
+async def check_btc_trend_changes(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        open_trades = await asyncio.to_thread(get_open_trades)
+        if not open_trades:
+            return
+        
+        btc_context = await asyncio.to_thread(fetch_btc_context, get_klines)
+        current_h4 = btc_context.get("h4") or "RANGE"
+        current_h1 = btc_context.get("h1") or "RANGE"
+        current_adx_h1 = float(btc_context.get("adx_h1") or 0.0)
+        
+        chat_ids = context.application.bot_data.get("chat_ids", set())
+        if not chat_ids:
+            return
+        
+        for trade in open_trades:
+            if trade.get("trend_change_alerted"):
                 continue
-
-            symbol = trade.get("symbol", "UNKNOWN")
+            
             direction = str(trade.get("direction", "")).upper()
             if direction not in ("LONG", "SHORT"):
                 continue
-
-            if _trade_tp1_hit(trade) and not TIMEOUT_CLOSE_IF_TP1_HIT:
-                continue
-
-            age_hours = _trade_age_hours(trade)
-            if age_hours is None or age_hours < SIGNAL_TIMEOUT_HOURS:
-                continue
-
-            current_price = await asyncio.to_thread(get_price, symbol)
-            if current_price is None:
-                logger.warning("TIMEOUT | %s | price unavailable", symbol)
-                continue
-
-            entry_price = safe_number(trade.get("entry"))
-            if TIMEOUT_CLOSE_AT == "ENTRY" and entry_price is not None:
-                close_price = entry_price
-            else:
-                close_price = current_price
-
-            try:
-                closed = await asyncio.to_thread(
-                    force_close_trade, trade_id, close_price, "TIMEOUT"
-                )
-            except Exception:
-                logger.exception("TIMEOUT | force_close_trade failed for %s", trade_id)
-                continue
-
-            if not closed:
-                logger.warning("TIMEOUT | %s | tracker refused to close", symbol)
-                continue
-
-            closed_count += 1
-            logger.warning(
-                "TIMEOUT_CLOSE | %s | %s | age=%.1fh | entry=%s | close=%s",
-                symbol, direction, age_hours, entry_price, close_price,
+            
+            expected = "BULLISH" if direction == "LONG" else "BEARISH"
+            entry_trend = str(trade.get("btc_trend_at_entry", "UNKNOWN"))
+            
+            h1_flipped = (
+                current_h1 in ("BULLISH", "BEARISH")
+                and current_h1 != expected
+                and current_adx_h1 >= 22
             )
-
-            margin = safe_number(trade.get("margin"), DEFAULT_MARGIN_USDT)
-            leverage = safe_number(trade.get("leverage"), DEFAULT_LEVERAGE)
-            strategy = trade.get("strategy", "UNKNOWN")
-            score = trade.get("score", "—")
-
-            pnl_text = "N/A"
-            roi_text = "N/A"
-            if entry_price and close_price and margin and leverage:
-                if direction == "LONG":
-                    price_pct = (close_price - entry_price) / entry_price
-                else:
-                    price_pct = (entry_price - close_price) / entry_price
-                roi_pct = price_pct * leverage * 100
-                pnl = margin * price_pct * leverage
-                pnl_text = f"{pnl:+.4f} USDT"
-                roi_text = f"{roi_pct:+.2f}%"
-
+            changed_from_entry = (
+                entry_trend in ("BULLISH", "BEARISH")
+                and current_h1 in ("BULLISH", "BEARISH")
+                and entry_trend != current_h1
+            )
+            
+            if not (h1_flipped or changed_from_entry):
+                continue
+            
+            symbol = trade.get("symbol", "UNKNOWN")
+            entry_price = trade.get("entry")
+            current_sl = trade.get("sl")
+            score = trade.get("score", 0)
+            strategy_name = trade.get("strategy", "UNKNOWN")
+            entry_time = str(trade.get("created_at", ""))[:16].replace("T", " ")
+            
+            warning_level = "🔴 بالا" if h1_flipped else "🟡 متوسط"
+            
             message = (
-                f"⌛ <b>بستن خودکار سیگنال (تایم‌اوت)</b>\n\n"
-                f"🪙 <b>{safe_text(symbol)}</b>\n"
-                f"📈 Direction: <b>{safe_text(direction)}</b>\n"
-                f"🧠 Strategy: <b>{safe_text(strategy)}</b>\n"
-                f"⭐ Score: {safe_text(score)}\n\n"
-                f"⏱ مدت باز بودن: <b>{age_hours:.1f} ساعت</b>\n"
+                f"🚨 <b>هشدار تغییر روند بیت‌کوین</b>\n\n"
+                f"🪙 <b>{safe_text(symbol)}</b> ({safe_text(direction)})\n"
+                f"🧠 استراتژی: {safe_text(strategy_name)}\n"
+                f"⭐ امتیاز: {score}\n"
+                f"🕐 زمان ورود: {entry_time}\n\n"
                 f"📌 Entry: {display_number(entry_price)}\n"
-                f"💰 قیمت بستن: <b>{display_number(close_price)}</b>\n\n"
-                f"💵 PnL: <b>{pnl_text}</b>\n"
-                f"📊 ROI: <b>{roi_text}</b>\n\n"
-                f"📝 دلیل: به TP1 نرسید و از تایم‌اوت "
-                f"<b>{SIGNAL_TIMEOUT_HOURS:.0f} ساعته</b> گذشت."
+                f"🛑 SL فعلی: {display_number(current_sl)}\n\n"
+                f"₿ <b>وضعیت بیت‌کوین:</b>\n"
+                f"   • هنگام ورود: <b>{safe_text(entry_trend)}</b>\n"
+                f"   • روند 4H فعلی: <b>{safe_text(current_h4)}</b>\n"
+                f"   • روند 1H فعلی: <b>{safe_text(current_h1)}</b>\n"
+                f"   • ADX 1H: {current_adx_h1:.2f}\n\n"
+                f"⚠️ سطح هشدار: <b>{warning_level}</b>\n\n"
             )
-
+            
+            if direction == "SHORT":
+                message += (
+                    f"📉 ربات یک شورت (فروش) گرفته بود، اما بیت‌کوین الان "
+                    f"<b>{safe_text(current_h1)}</b> شده است.\n"
+                    f"یعنی حرکت بازار در جهت مخالف معامله شماست.\n\n"
+                )
+            else:
+                message += (
+                    f"📈 ربات یک لانگ (خرید) گرفته بود، اما بیت‌کوین الان "
+                    f"<b>{safe_text(current_h1)}</b> شده است.\n"
+                    f"یعنی حرکت بازار در جهت مخالف معامله شماست.\n\n"
+                )
+            
+            message += (
+                f"💡 <b>توصیه:</b>\n"
+                f"• سود را بخشی ذخیره کنید (Partial Close)\n"
+                f"• SL را نزدیک‌تر کنید\n"
+                f"• یا اگر SL در سود است، به Breakeven منتقل کنید"
+            )
+            
             for chat_id in list(chat_ids):
                 try:
                     await context.bot.send_message(
-                        chat_id=chat_id, text=message, parse_mode="HTML"
+                        chat_id=chat_id,
+                        text=message,
+                        parse_mode="HTML",
                     )
                 except Exception:
-                    logger.exception("TIMEOUT | send error for chat %s", chat_id)
+                    logger.exception("BTC alert send error for chat %s", chat_id)
+            
+            await asyncio.to_thread(mark_trend_alert, trade.get("id"))
+            
+            logger.warning(
+                "BTC_TREND_ALERT | %s | %s | Entry=%s | Current=%s | ADX=%.1f",
+                symbol, direction, entry_trend, current_h1, current_adx_h1,
+            )
+    
+    except Exception:
+        logger.exception("BTC trend change check error")
 
-        except Exception:
-            logger.exception("TIMEOUT | error processing trade %s", trade.get("id"))
 
-    if closed_count > 0:
-        logger.info("TIMEOUT | closed %d trade(s) due to timeout", closed_count)
+# ============================================================
+# BTC SUPPORT/RESISTANCE ALERTS (v28 NEW)
+# ============================================================
 
+async def check_btc_sr_alerts(context: ContextTypes.DEFAULT_TYPE):
+    """Alert when BTC price approaches 4H or Daily support/resistance levels."""
+    try:
+        chat_ids = context.application.bot_data.get("chat_ids", set())
+        if not chat_ids:
+            return
+
+        btc_4h = await asyncio.to_thread(get_klines, "BTC-SWAP-USDT", "4h", 200)
+        btc_1d = await asyncio.to_thread(get_klines, "BTC-SWAP-USDT", "1d", 200)
+        if not btc_4h or not btc_1d:
+            logger.warning("BTC_SR_ALERT | candles unavailable")
+            return
+
+        current_price = await asyncio.to_thread(get_price, "BTC-SWAP-USDT")
+        if current_price is None:
+            return
+
+        levels_4h = get_sr_levels(btc_4h, lookback=150, num_levels=6)
+        levels_1d = get_sr_levels(btc_1d, lookback=150, num_levels=6)
+
+        atr_4h = atr(btc_4h, 14)
+        if atr_4h <= 0:
+            return
+        tolerance = atr_4h * 0.4
+
+        alerted = context.application.bot_data.setdefault("btc_sr_alerted", {})
+        now_ts = time.time()
+        alerted = {k: v for k, v in alerted.items() if now_ts - v < 4 * 3600}
+        context.application.bot_data["btc_sr_alerted"] = alerted
+
+        for timeframe, levels in [("4H", levels_4h), ("DAILY", levels_1d)]:
+            for lvl in levels:
+                level_price = lvl["price"]
+                level_type = lvl["type"]
+                strength = lvl["strength"]
+
+                if abs(current_price - level_price) > tolerance:
+                    continue
+
+                level_key = f"{timeframe}_{round(level_price, 0)}_{level_type}"
+                if level_key in alerted:
+                    continue
+                alerted[level_key] = now_ts
+
+                if level_type == "SUPPORT":
+                    emoji = "🟢"
+                    potential = "احتمال برگشت صعودی (LONG)"
+                elif level_type == "RESISTANCE":
+                    emoji = "🔴"
+                    potential = "احتمال برگشت نزولی (SHORT)"
+                else:
+                    emoji = "⚪"
+                    potential = "سطح مختلط"
+
+                distance = abs(current_price - level_price)
+                distance_pct = (distance / current_price) * 100 if current_price else 0
+
+                message = (
+                    f"⚠️ <b>هشدار رسیدن بیت‌کوین به حمایت/مقاومت</b>\n\n"
+                    f"₿ <b>BTC/USDT</b>\n"
+                    f"📊 تایم‌فریم: <b>{timeframe}</b>\n"
+                    f"{emoji} نوع سطح: <b>{level_type}</b>\n"
+                    f"💪 قدرت سطح: <b>{strength} برخورد</b>\n\n"
+                    f"💰 قیمت فعلی: <b>{current_price:,.2f}</b>\n"
+                    f"🎯 سطح: <b>{level_price:,.2f}</b>\n"
+                    f"📏 فاصله: {distance:,.2f} ({distance_pct:.2f}%)\n\n"
+                    f"{emoji} {potential}\n\n"
+                    f"💡 مراقب رفتار قیمت در این سطح باشید.\n"
+                    f"اگر سطح شکسته شد یا برگشت کرد، سیگنال ممکن است صادر شود."
+                )
+
+                for chat_id in list(chat_ids):
+                    try:
+                        await context.bot.send_message(
+                            chat_id=chat_id, text=message, parse_mode="HTML"
+                        )
+                    except Exception:
+                        logger.exception("BTC SR alert send error for chat %s", chat_id)
+
+                logger.warning(
+                    "BTC_SR_ALERT | %s | Level=%s | Type=%s | Strength=%s | Price=%s",
+                    timeframe, level_price, level_type, strength, current_price,
+                )
+
+    except Exception:
+        logger.exception("BTC SR alert check error")
 # ============================================================
 # /OPEN — list open trades
 # ============================================================
