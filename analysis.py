@@ -1,20 +1,10 @@
 # ============================================================
-# CryptoBot - Analysis Engine v27
+# CryptoBot - Analysis Engine v28
 #
 # v25: PROVEN WINNERS ONLY
-#   - TREND_FOLLOWING: 23.5% win rate → REMOVED
-#   - PULLBACK: 0% win rate → REMOVED
-#   - BREAKOUT: 85.3% win rate, +1.56R → PRIMARY STRATEGY
-#   - BB_REVERSION: 44.4% win rate, +0.33R → KEPT FOR RANGING
-#
-# v26: (BTC 1H filter, 15M breakout confirmation, smart SL/TP)
-#
-# v27:
-#   - NEW STRATEGY: FAST_TREND — catch sharp momentum impulses
-#   - Uses ONLY BTC 15M for filter (not 4H/1H/Daily)
-#   - Tight TPs (1R/1.8R/2.5R) for quick exit
-#   - Active in BOTH regimes (RANGING + TRENDING)
-#   - Priority: BREAKOUT > BB_REVERSION > FAST_TREND > RANGE_TRADING > REVERSAL
+# v26: BTC 1H filter, 15M breakout confirmation
+# v27: FAST_TREND strategy
+# v28: SR_BREAKOUT + SR_REJECTION (Support/Resistance)  ← NEW
 # ============================================================
 
 from __future__ import annotations
@@ -280,13 +270,11 @@ def bollinger_bands(candles: List[Any], period: int = 20, std_dev: float = 2.0) 
     cls = closes(candles)
     if len(cls) < period:
         return 0.0, 0.0, 0.0
-    recent_closes = cls[-period:]
-    sma = sum(recent_closes) / period
-    variance = sum((x - sma) ** 2 for x in recent_closes) / period
+    recent = cls[-period:]
+    sma = sum(recent) / period
+    variance = sum((x - sma) ** 2 for x in recent) / period
     std = math.sqrt(variance)
-    upper = sma + (std * std_dev)
-    lower = sma - (std * std_dev)
-    return upper, sma, lower
+    return sma + std * std_dev, sma, sma - std * std_dev
 
 
 # ============================================================
@@ -328,16 +316,12 @@ def market_structure(candles: List[Any], lookback: int = 40) -> str:
     recent_atr = atr(arr, 14)
     if recent_atr <= 0:
         return "RANGE"
-    bull = (
-        late_high > early_high and late_low > early_low
-        and cls[-1] > cls[mid]
-        and (cls[-1] - cls[mid]) >= recent_atr * 0.25
-    )
-    bear = (
-        late_high < early_high and late_low < early_low
-        and cls[-1] < cls[mid]
-        and (cls[mid] - cls[-1]) >= recent_atr * 0.25
-    )
+    bull = (late_high > early_high and late_low > early_low
+            and cls[-1] > cls[mid]
+            and (cls[-1] - cls[mid]) >= recent_atr * 0.25)
+    bear = (late_high < early_high and late_low < early_low
+            and cls[-1] < cls[mid]
+            and (cls[mid] - cls[-1]) >= recent_atr * 0.25)
     full_closes = closes(candles)
     if len(full_closes) >= 200:
         e200 = ema(full_closes, 200)
@@ -366,19 +350,15 @@ def strong_confirmation_5m(m5: List[Any], direction: str) -> bool:
     _, ph, pl, _, _ = candle_values(prev)
     _, _, _, lc, _ = candle_values(last)
     if direction == "LONG":
-        return (
-            (bullish(prev) and bullish(last)
-             and body_ratio(last) >= 0.35 and lc > ph)
-            or (bullish(last) and body_ratio(last) >= 0.45
-                and lc > max(highs(recent)))
-        )
+        return ((bullish(prev) and bullish(last)
+                 and body_ratio(last) >= 0.35 and lc > ph)
+                or (bullish(last) and body_ratio(last) >= 0.45
+                    and lc > max(highs(recent))))
     if direction == "SHORT":
-        return (
-            (bearish(prev) and bearish(last)
-             and body_ratio(last) >= 0.35 and lc < pl)
-            or (bearish(last) and body_ratio(last) >= 0.45
-                and lc < min(lows(recent)))
-        )
+        return ((bearish(prev) and bearish(last)
+                 and body_ratio(last) >= 0.35 and lc < pl)
+                or (bearish(last) and body_ratio(last) >= 0.45
+                    and lc < min(lows(recent))))
     return False
 
 
@@ -403,8 +383,8 @@ def htf_breakout_confirm(h1: List[Any], direction: str,
         return False
     hs, ls, cls = highs(h1), lows(h1), closes(h1)
     n = len(h1)
-    lh = max(hs[n - lookback - recent_window : n - recent_window])
-    ll = min(ls[n - lookback - recent_window : n - recent_window])
+    lh = max(hs[n - lookback - recent_window: n - recent_window])
+    ll = min(ls[n - lookback - recent_window: n - recent_window])
     rc = cls[n - recent_window:]
     if direction == "LONG":
         return any(c > lh for c in rc)
@@ -425,13 +405,13 @@ def not_far_from_breakout(h1: List[Any], direction: str,
     if atr_1h <= 0:
         return True
     if direction == "LONG":
-        level = max(hs[n - lookback - recent_window : n - recent_window])
-        distance = price - level
-        return 0 <= distance <= max_atr * atr_1h
+        level = max(hs[n - lookback - recent_window: n - recent_window])
+        dist = price - level
+        return 0 <= dist <= max_atr * atr_1h
     if direction == "SHORT":
-        level = min(ls[n - lookback - recent_window : n - recent_window])
-        distance = level - price
-        return 0 <= distance <= max_atr * atr_1h
+        level = min(ls[n - lookback - recent_window: n - recent_window])
+        dist = level - price
+        return 0 <= dist <= max_atr * atr_1h
     return True
 
 
@@ -460,39 +440,39 @@ def bear_engulfing(prev: Any, curr: Any) -> bool:
             and (co - cc) > (pc - po))
 
 
-def is_morning_star(c1: Any, c2: Any, c3: Any) -> bool:
+def is_morning_star(c1, c2, c3) -> bool:
     if not bearish(c1) or not bullish(c3):
         return False
     if not is_doji(c2, 0.30):
         return False
     o1, _, _, c1c, _ = candle_values(c1)
     o3, _, _, c3c, _ = candle_values(c3)
-    midpoint = (o1 + c1c) / 2
-    return c3c > midpoint and c3c > o3
+    mid = (o1 + c1c) / 2
+    return c3c > mid and c3c > o3
 
 
-def is_evening_star(c1: Any, c2: Any, c3: Any) -> bool:
+def is_evening_star(c1, c2, c3) -> bool:
     if not bullish(c1) or not bearish(c3):
         return False
     if not is_doji(c2, 0.30):
         return False
     o1, _, _, c1c, _ = candle_values(c1)
     o3, _, _, c3c, _ = candle_values(c3)
-    midpoint = (o1 + c1c) / 2
-    return c3c < midpoint and c3c < o3
+    mid = (o1 + c1c) / 2
+    return c3c < mid and c3c < o3
 
 
-def is_inside_bar(prev: Any, curr: Any) -> bool:
+def is_inside_bar(prev, curr) -> bool:
     _, ph, pl, _, _ = candle_values(prev)
     _, ch, cl, _, _ = candle_values(curr)
     return ch <= ph and cl >= pl
 
 
-def bullish_reversal_pattern(candles_ctx: List[Any]) -> bool:
-    if len(candles_ctx) < 2:
+def bullish_reversal_pattern(ctx: List[Any]) -> bool:
+    if len(ctx) < 2:
         return False
-    last = candles_ctx[-1]
-    prev = candles_ctx[-2]
+    last = ctx[-1]
+    prev = ctx[-2]
     r = candle_range(last)
     if r > 0 and lower_wick(last) / r >= 0.40 and lower_wick(last) >= body(last) * 0.8:
         return True
@@ -500,22 +480,22 @@ def bullish_reversal_pattern(candles_ctx: List[Any]) -> bool:
         return True
     if is_doji(last, 0.20) and (lower_wick(last) / r >= 0.45 if r > 0 else False):
         return True
-    if len(candles_ctx) >= 3:
-        if is_morning_star(candles_ctx[-3], candles_ctx[-2], candles_ctx[-1]):
+    if len(ctx) >= 3:
+        if is_morning_star(ctx[-3], ctx[-2], ctx[-1]):
             return True
-        if is_inside_bar(candles_ctx[-3], candles_ctx[-2]):
-            _, _, _, last_close, _ = candle_values(last)
-            _, _, _, inner_close, _ = candle_values(candles_ctx[-2])
-            if last_close > inner_close and bullish(last):
+        if is_inside_bar(ctx[-3], ctx[-2]):
+            _, _, _, lc, _ = candle_values(last)
+            _, _, _, ic, _ = candle_values(ctx[-2])
+            if lc > ic and bullish(last):
                 return True
     return False
 
 
-def bearish_reversal_pattern(candles_ctx: List[Any]) -> bool:
-    if len(candles_ctx) < 2:
+def bearish_reversal_pattern(ctx: List[Any]) -> bool:
+    if len(ctx) < 2:
         return False
-    last = candles_ctx[-1]
-    prev = candles_ctx[-2]
+    last = ctx[-1]
+    prev = ctx[-2]
     r = candle_range(last)
     if r > 0 and upper_wick(last) / r >= 0.40 and upper_wick(last) >= body(last) * 0.8:
         return True
@@ -523,13 +503,13 @@ def bearish_reversal_pattern(candles_ctx: List[Any]) -> bool:
         return True
     if is_doji(last, 0.20) and (upper_wick(last) / r >= 0.45 if r > 0 else False):
         return True
-    if len(candles_ctx) >= 3:
-        if is_evening_star(candles_ctx[-3], candles_ctx[-2], candles_ctx[-1]):
+    if len(ctx) >= 3:
+        if is_evening_star(ctx[-3], ctx[-2], ctx[-1]):
             return True
-        if is_inside_bar(candles_ctx[-3], candles_ctx[-2]):
-            _, _, _, last_close, _ = candle_values(last)
-            _, _, _, inner_close, _ = candle_values(candles_ctx[-2])
-            if last_close < inner_close and bearish(last):
+        if is_inside_bar(ctx[-3], ctx[-2]):
+            _, _, _, lc, _ = candle_values(last)
+            _, _, _, ic, _ = candle_values(ctx[-2])
+            if lc < ic and bearish(last):
                 return True
     return False
 
@@ -559,16 +539,15 @@ def rejection(candle: Any, direction: str, prev_candle: Optional[Any] = None) ->
     return False
 
 
-def recent_rejection(candles: List[Any], direction: str, lookback: int = 6) -> bool:
+def recent_rejection(candles, direction, lookback=6):
     return any(rejection(c, direction) for c in candles[-lookback:])
 
 
 # ============================================================
-# FIBONACCI + IMPULSE LEG
+# FIBONACCI
 # ============================================================
 
-def find_last_impulse(h1: List[Any], direction: str,
-                      lookback: int = 50) -> Tuple[Optional[float], Optional[float]]:
+def find_last_impulse(h1, direction, lookback=50):
     arr = h1[-lookback:] if len(h1) > lookback else h1
     if len(arr) < 15:
         return None, None
@@ -577,46 +556,39 @@ def find_last_impulse(h1: List[Any], direction: str,
         peak_idx = hs.index(max(hs))
         if peak_idx < 3:
             return None, None
-        before_peak = ls[:peak_idx]
-        trough_idx = before_peak.index(min(before_peak))
-        return before_peak[trough_idx], hs[peak_idx]
+        bp = ls[:peak_idx]
+        trough_idx = bp.index(min(bp))
+        return bp[trough_idx], hs[peak_idx]
     else:
         trough_idx = ls.index(min(ls))
         if trough_idx < 3:
             return None, None
-        before_trough = hs[:trough_idx]
-        peak_idx = before_trough.index(max(before_trough))
-        return before_trough[peak_idx], ls[trough_idx]
+        bt = hs[:trough_idx]
+        peak_idx = bt.index(max(bt))
+        return bt[peak_idx], ls[trough_idx]
 
 
-def fib_pullback_zone(h1: List[Any], direction: str,
-                      low_pct: float = 0.35, high_pct: float = 0.72) -> bool:
-    impulse_low, impulse_high = find_last_impulse(h1, direction)
-    if impulse_low is None or impulse_high is None:
+def fib_pullback_zone(h1, direction, low_pct=0.35, high_pct=0.72):
+    il, ih = find_last_impulse(h1, direction)
+    if il is None or ih is None:
         return False
-    rng = impulse_high - impulse_low
+    rng = ih - il
     if rng <= 0:
         return False
     price = closes(h1)[-1]
-    if direction == "LONG":
-        retr = (impulse_high - price) / rng
-    else:
-        retr = (price - impulse_low) / rng
+    retr = (ih - price) / rng if direction == "LONG" else (price - il) / rng
     return low_pct <= retr <= high_pct
 
 
-def fib_golden_zone(h1: List[Any], direction: str) -> bool:
-    impulse_low, impulse_high = find_last_impulse(h1, direction)
-    if impulse_low is None or impulse_high is None:
+def fib_golden_zone(h1, direction):
+    il, ih = find_last_impulse(h1, direction)
+    if il is None or ih is None:
         return False
-    rng = impulse_high - impulse_low
+    rng = ih - il
     if rng <= 0:
         return False
     price = closes(h1)[-1]
-    if direction == "LONG":
-        retr = (impulse_high - price) / rng
-    else:
-        retr = (price - impulse_low) / rng
+    retr = (ih - price) / rng if direction == "LONG" else (price - il) / rng
     return 0.382 <= retr <= 0.618
 
 
@@ -624,8 +596,7 @@ def fib_golden_zone(h1: List[Any], direction: str) -> bool:
 # SWING LOW ZONE
 # ============================================================
 
-def near_swing_low_zone(h1: List[Any], direction: str,
-                        lookback: int = 20, atr_buffer: float = 0.6) -> bool:
+def near_swing_low_zone(h1, direction, lookback=20, atr_buffer=0.6):
     arr = h1[-lookback:] if len(h1) > lookback else h1
     if len(arr) < 6:
         return False
@@ -638,18 +609,17 @@ def near_swing_low_zone(h1: List[Any], direction: str,
         if sl is None:
             return False
         return abs(price - sl) <= atr_buffer * atr1 and price >= sl * 0.995
-    else:
-        sh = swing_high(arr, 2)
-        if sh is None:
-            return False
-        return abs(price - sh) <= atr_buffer * atr1 and price <= sh * 1.005
+    sh = swing_high(arr, 2)
+    if sh is None:
+        return False
+    return abs(price - sh) <= atr_buffer * atr1 and price <= sh * 1.005
 
 
 # ============================================================
-# PULLBACK DETECTION (kept for reference, not used)
+# PULLBACK DETECTION
 # ============================================================
 
-def near_ema_zone(h1: List[Any], direction: str) -> bool:
+def near_ema_zone(h1, direction):
     cls = closes(h1)
     e20 = ema(cls, 20)
     e50 = ema(cls, 50)
@@ -658,17 +628,15 @@ def near_ema_zone(h1: List[Any], direction: str) -> bool:
         return False
     price = cls[-1]
     zone = max(atr1 * 0.50, price * 0.003)
-    distance = min(abs(price - e20), abs(price - e50))
-    if distance > zone:
+    dist = min(abs(price - e20), abs(price - e50))
+    if dist > zone:
         return False
     if direction == "LONG":
         return price >= e50 * 0.995 and price <= e20 * 1.03
-    if direction == "SHORT":
-        return price <= e50 * 1.005 and price >= e20 * 0.97
-    return False
+    return price <= e50 * 1.005 and price >= e20 * 0.97
 
 
-def pullback_detected(h1: List[Any], direction: str) -> bool:
+def pullback_detected(h1, direction):
     if len(h1) < 25:
         return False
     cls = closes(h1)
@@ -682,30 +650,25 @@ def pullback_detected(h1: List[Any], direction: str) -> bool:
     if direction == "LONG":
         touched = any(candle_values(c)[2] <= max(e20, e50) + zone for c in recent)
         return touched and cls[-1] > e20
-    if direction == "SHORT":
-        touched = any(candle_values(c)[1] >= min(e20, e50) - zone for c in recent)
-        return touched and cls[-1] < e20
-    return False
+    touched = any(candle_values(c)[1] >= min(e20, e50) - zone for c in recent)
+    return touched and cls[-1] < e20
 
 
-def pullback_duration_ok(h1: List[Any], direction: str,
-                         min_bars: int = 3, max_bars: int = 10) -> bool:
+def pullback_duration_ok(h1, direction, min_bars=3, max_bars=10):
     lookback = max_bars * 3
     arr = h1[-lookback:] if len(h1) > lookback else h1
     if len(arr) < min_bars + 2:
         return False
     if direction == "LONG":
         peak_idx = highs(arr).index(max(highs(arr)))
-        bars_since_peak = len(arr) - peak_idx - 1
+        bars_since = len(arr) - peak_idx - 1
     else:
         trough_idx = lows(arr).index(min(lows(arr)))
-        bars_since_peak = len(arr) - trough_idx - 1
-    return min_bars <= bars_since_peak <= max_bars
+        bars_since = len(arr) - trough_idx - 1
+    return min_bars <= bars_since <= max_bars
 
 
-def pullback_depth_ok(h1: List[Any], direction: str,
-                      lookback: int = 30, min_pct: float = 0.35,
-                      max_pct: float = 0.78) -> bool:
+def pullback_depth_ok(h1, direction, lookback=30, min_pct=0.35, max_pct=0.78):
     arr = h1[-lookback:] if len(h1) > lookback else h1
     if len(arr) < 10:
         return True
@@ -720,45 +683,35 @@ def pullback_depth_ok(h1: List[Any], direction: str,
             return False
         depth = (sh - price) / rng
         return min_pct <= depth <= max_pct
-    if direction == "SHORT":
-        if price <= sl * 1.001 or price >= sh:
-            return False
-        depth = (price - sl) / rng
-        return min_pct <= depth <= max_pct
-    return True
+    if price <= sl * 1.001 or price >= sh:
+        return False
+    depth = (price - sl) / rng
+    return min_pct <= depth <= max_pct
 
 
-def rsi_in_pullback_zone(h1: List[Any], direction: str,
-                         min_r: float = 40.0, max_r: float = 55.0) -> bool:
+def rsi_in_pullback_zone(h1, direction, min_r=40.0, max_r=55.0):
     r = rsi(h1, 14)
     if direction == "LONG":
         return min_r <= r <= max_r
-    if direction == "SHORT":
-        return (100.0 - max_r) <= r <= (100.0 - min_r)
-    return False
+    return (100.0 - max_r) <= r <= (100.0 - min_r)
 
 
-# ============================================================
-# REJECTION AT ZONE
-# ============================================================
-
-def rejection_at_zone(h1: List[Any], direction: str, lookback: int = 3) -> bool:
+def rejection_at_zone(h1, direction, lookback=3):
     e20 = ema(closes(h1), 20)
     e50 = ema(closes(h1), 50)
     atr1 = atr(h1)
     if e20 is None or e50 is None or atr1 <= 0:
         return False
-    zone_buffer = atr1 * 0.60
-    ema_high = max(e20, e50)
-    ema_low = min(e20, e50)
+    zb = atr1 * 0.60
+    eh, el = max(e20, e50), min(e20, e50)
     start = max(2, len(h1) - lookback)
     for i in range(start, len(h1)):
         c = h1[i]
         _, h, l, _, _ = candle_values(c)
         if direction == "LONG":
-            at_zone = (l <= ema_high + zone_buffer and l >= ema_low - zone_buffer * 2.0)
+            at_zone = l <= eh + zb and l >= el - zb * 2.0
         else:
-            at_zone = (h >= ema_low - zone_buffer and h <= ema_high + zone_buffer * 2.0)
+            at_zone = h >= el - zb and h <= eh + zb * 2.0
         if not at_zone:
             continue
         window = h1[max(0, i - 2):i + 1]
@@ -769,26 +722,18 @@ def rejection_at_zone(h1: List[Any], direction: str, lookback: int = 3) -> bool:
     return False
 
 
-# ============================================================
-# VOLUME DECREASING
-# ============================================================
-
-def volume_decreasing_in_pullback(h1: List[Any], direction: str, lookback: int = 4) -> bool:
+def volume_decreasing_in_pullback(h1, direction, lookback=4):
     vs = volumes(h1)
     if len(vs) < 21:
         return False
-    baseline = sum(vs[-20:-lookback]) / max(1, 20 - lookback)
+    base = sum(vs[-20:-lookback]) / max(1, 20 - lookback)
     recent = sum(vs[-lookback:]) / lookback
-    if baseline <= 0:
+    if base <= 0:
         return False
-    return recent <= baseline * 1.10
+    return recent <= base * 1.10
 
 
-# ============================================================
-# 15M PULLBACK CONFIRMATION
-# ============================================================
-
-def mtf_pullback_confirmation(m15: List[Any], direction: str) -> bool:
+def mtf_pullback_confirmation(m15, direction):
     if len(m15) < 30:
         return False
     cls = closes(m15)
@@ -810,16 +755,10 @@ def mtf_pullback_confirmation(m15: List[Any], direction: str) -> bool:
     window = m15[-3:]
     if direction == "LONG":
         return bullish_reversal_pattern(window)
-    else:
-        return bearish_reversal_pattern(window)
+    return bearish_reversal_pattern(window)
 
 
-# ============================================================
-# PULLBACK COUNT
-# ============================================================
-
-def count_recent_pullbacks(h1: List[Any], direction: str,
-                           lookback: int = 60, zone_atr: float = 0.6) -> int:
+def count_recent_pullbacks(h1, direction, lookback=60, zone_atr=0.6):
     arr = h1[-lookback:] if len(h1) > lookback else h1
     if len(arr) < 25:
         return 1
@@ -850,11 +789,7 @@ def count_recent_pullbacks(h1: List[Any], direction: str,
     return max(1, count)
 
 
-# ============================================================
-# ORDERLY PULLBACK
-# ============================================================
-
-def is_orderly_pullback(h1: List[Any], direction: str, lookback: int = 5) -> bool:
+def is_orderly_pullback(h1, direction, lookback=5):
     if len(h1) < lookback + 5:
         return False
     recent = h1[-lookback:]
@@ -873,26 +808,20 @@ def is_orderly_pullback(h1: List[Any], direction: str, lookback: int = 5) -> boo
 
 
 # ============================================================
-# RANGE DETECTION HELPERS
+# RANGE DETECTION
 # ============================================================
 
-def detect_range_condition(h1: List[Any], lookback: int = 40,
-                           min_touches: int = 2) -> Dict[str, Any]:
-    default = {
-        "is_range": False, "high": 0.0, "low": 0.0, "mid": 0.0,
-        "width_pct": 0.0, "touches_high": 0, "touches_low": 0,
-    }
+def detect_range_condition(h1, lookback=40, min_touches=2):
+    default = {"is_range": False, "high": 0.0, "low": 0.0, "mid": 0.0,
+               "width_pct": 0.0, "touches_high": 0, "touches_low": 0}
     if len(h1) < lookback + 5:
         return default
     adx1 = adx(h1, 14)
     if adx1 >= 22:
         return default
     arr = h1[-lookback:]
-    hs = highs(arr)
-    ls = lows(arr)
-    cls = closes(arr)
-    r_high = max(hs)
-    r_low = min(ls)
+    hs, ls, cls = highs(arr), lows(arr), closes(arr)
+    r_high, r_low = max(hs), min(ls)
     rng = r_high - r_low
     if rng <= 0 or r_low <= 0:
         return default
@@ -903,25 +832,19 @@ def detect_range_condition(h1: List[Any], lookback: int = 40,
     if atr1 <= 0:
         return default
     tol = atr1 * 0.5
-    touches_high = sum(1 for h in hs if h >= r_high - tol)
-    touches_low = sum(1 for l in ls if l <= r_low + tol)
-    if touches_high < min_touches or touches_low < min_touches:
+    th = sum(1 for h in hs if h >= r_high - tol)
+    tl = sum(1 for l in ls if l <= r_low + tol)
+    if th < min_touches or tl < min_touches:
         return default
-    last_close = cls[-1]
-    if last_close > r_high * 1.01 or last_close < r_low * 0.99:
+    lc = cls[-1]
+    if lc > r_high * 1.01 or lc < r_low * 0.99:
         return default
-    return {
-        "is_range": True,
-        "high": r_high, "low": r_low,
-        "mid": (r_high + r_low) / 2,
-        "width_pct": round(width_pct, 2),
-        "touches_high": touches_high, "touches_low": touches_low,
-    }
+    return {"is_range": True, "high": r_high, "low": r_low,
+            "mid": (r_high + r_low) / 2, "width_pct": round(width_pct, 2),
+            "touches_high": th, "touches_low": tl}
 
 
-def price_near_range_boundary(h1: List[Any], direction: str,
-                              range_high: float, range_low: float,
-                              atr_mult: float = 0.8) -> bool:
+def price_near_range_boundary(h1, direction, range_high, range_low, atr_mult=0.8):
     if range_high <= 0 or range_low <= 0:
         return False
     atr1 = atr(h1, 14)
@@ -931,22 +854,19 @@ def price_near_range_boundary(h1: List[Any], direction: str,
     tol = atr1 * atr_mult
     if direction == "LONG":
         return abs(price - range_low) <= tol
-    if direction == "SHORT":
-        return abs(price - range_high) <= tol
-    return False
+    return abs(price - range_high) <= tol
 
 
 # ============================================================
 # BREAKOUT HELPERS
 # ============================================================
 
-def local_breakout(m15: List[Any], direction: str, lookback: int = 20) -> Tuple[bool, float]:
+def local_breakout(m15, direction, lookback=20):
     if len(m15) < lookback + 2:
         return False, 0.0
-    previous = m15[-lookback - 1:-1]
+    prev = m15[-lookback - 1:-1]
     last = m15[-1]
-    lh = max(highs(previous))
-    ll = min(lows(previous))
+    lh, ll = max(highs(prev)), min(lows(prev))
     close = candle_values(last)[3]
     if direction == "LONG":
         return close > lh, lh
@@ -955,59 +875,53 @@ def local_breakout(m15: List[Any], direction: str, lookback: int = 20) -> Tuple[
     return False, 0.0
 
 
-def breakout_hold(m15: List[Any], direction: str, level: float) -> bool:
+def breakout_hold(m15, direction, level):
     if level <= 0 or len(m15) < 2:
         return False
     last = m15[-1]
     _, h, l, c, _ = candle_values(last)
     if direction == "LONG":
         return bullish(last) and c > level and h >= c
-    if direction == "SHORT":
-        return bearish(last) and c < level and l <= c
-    return False
+    return bearish(last) and c < level and l <= c
 
 
-def is_squeeze(m15: List[Any], lookback: int = 20) -> bool:
+def is_squeeze(m15, lookback=20):
     if len(m15) < lookback + 15:
         return False
     current_atr = atr(m15[-15:], 14)
-    historical_atrs = []
+    hist = []
     for i in range(15, lookback + 15):
-        historical_atrs.append(atr(m15[-i-15:-i], 14))
-    avg_atr = sum(historical_atrs) / len(historical_atrs) if historical_atrs else 0
-    if avg_atr <= 0:
+        hist.append(atr(m15[-i-15:-i], 14))
+    avg = sum(hist) / len(hist) if hist else 0
+    if avg <= 0:
         return False
-    return current_atr < avg_atr * 0.9
+    return current_atr < avg * 0.9
 
 
-def not_overextended(m15: List[Any], direction: str, level: float,
-                     max_atr_mult: float = 1.5) -> bool:
+def not_overextended(m15, direction, level, max_atr_mult=1.5):
     if len(m15) < 20 or level <= 0:
         return False
-    current_price = candle_values(m15[-1])[3]
+    price = candle_values(m15[-1])[3]
     m15_atr = atr(m15, 14)
     if m15_atr <= 0:
         return False
-    distance = abs(current_price - level)
+    dist = abs(price - level)
     if direction == "LONG":
-        return (current_price > level) and (distance <= max_atr_mult * m15_atr)
-    if direction == "SHORT":
-        return (current_price < level) and (distance <= max_atr_mult * m15_atr)
-    return False
+        return price > level and dist <= max_atr_mult * m15_atr
+    return price < level and dist <= max_atr_mult * m15_atr
 
 
 # ============================================================
 # REVERSAL HELPERS
 # ============================================================
 
-def sweep_reclaim_recent(m15: List[Any], direction: str, lookback: int = 12) -> bool:
+def sweep_reclaim_recent(m15, direction, lookback=12):
     if len(m15) < lookback + 3:
         return False
-    previous = m15[-lookback - 3:-3]
-    if not previous:
+    prev = m15[-lookback - 3:-3]
+    if not prev:
         return False
-    ph = max(highs(previous))
-    pl = min(lows(previous))
+    ph, pl = max(highs(prev)), min(lows(prev))
     for c in m15[-3:]:
         _, h, l, cl, _ = candle_values(c)
         if direction == "LONG" and l < pl and cl > pl and bullish(c):
@@ -1017,7 +931,7 @@ def sweep_reclaim_recent(m15: List[Any], direction: str, lookback: int = 12) -> 
     return False
 
 
-def structure_shift_5m(m5: List[Any], direction: str) -> bool:
+def structure_shift_5m(m5, direction):
     if len(m5) < 12:
         return False
     prev = m5[-8:-1]
@@ -1025,12 +939,10 @@ def structure_shift_5m(m5: List[Any], direction: str) -> bool:
     cl = candle_values(last)[3]
     if direction == "LONG":
         return bullish(last) and body_ratio(last) >= 0.30 and cl > max(highs(prev))
-    if direction == "SHORT":
-        return bearish(last) and body_ratio(last) >= 0.30 and cl < min(lows(prev))
-    return False
+    return bearish(last) and body_ratio(last) >= 0.30 and cl < min(lows(prev))
 
 
-def _mtf_basic(m15: List[Any], direction: str) -> bool:
+def _mtf_basic(m15, direction):
     if len(m15) < 25:
         return False
     cls = closes(m15)
@@ -1042,10 +954,197 @@ def _mtf_basic(m15: List[Any], direction: str) -> bool:
     if direction == "LONG":
         cnt = sum(1 for c in recent if bullish(c))
         return cnt >= 2 and cls[-1] >= e20 * 0.999 and cls[-1] >= e50 * 0.995
-    if direction == "SHORT":
-        cnt = sum(1 for c in recent if bearish(c))
-        return cnt >= 2 and cls[-1] <= e20 * 1.001 and cls[-1] <= e50 * 1.005
+    cnt = sum(1 for c in recent if bearish(c))
+    return cnt >= 2 and cls[-1] <= e20 * 1.001 and cls[-1] <= e50 * 1.005
+
+
+# ============================================================
+# ⭐ v28 NEW: SUPPORT / RESISTANCE DETECTION
+# ============================================================
+
+def find_swing_points(candles: List[Any], strength: int = 2):
+    """Find swing highs/lows in given candles."""
+    if len(candles) < strength * 2 + 1:
+        return []
+    hs = highs(candles)
+    ls = lows(candles)
+    points = []
+    for i in range(strength, len(candles) - strength):
+        h = hs[i]
+        l = ls[i]
+        is_high = all(h >= hs[i-j] for j in range(1, strength+1)) and \
+                  all(h >= hs[i+j] for j in range(1, strength+1))
+        is_low = all(l <= ls[i-j] for j in range(1, strength+1)) and \
+                 all(l <= ls[i+j] for j in range(1, strength+1))
+        if is_high:
+            points.append((h, "HIGH"))
+        if is_low:
+            points.append((l, "LOW"))
+    return points
+
+
+def cluster_sr_points(points, tolerance_pct: float = 0.6):
+    """Cluster nearby swing points into unified S/R levels."""
+    if not points:
+        return []
+    points = sorted(points, key=lambda x: x[0])
+    clusters = [[points[0]]]
+    for p in points[1:]:
+        last_price = clusters[-1][-1][0]
+        if last_price > 0 and abs(p[0] - last_price) / last_price * 100 <= tolerance_pct:
+            clusters[-1].append(p)
+        else:
+            clusters.append([p])
+    result = []
+    for cl in clusters:
+        prices = [c[0] for c in cl]
+        types = [c[1] for c in cl]
+        avg = sum(prices) / len(prices)
+        hc = types.count("HIGH")
+        lc = types.count("LOW")
+        level_type = ("RESISTANCE" if hc > lc else
+                      "SUPPORT" if lc > hc else "MIXED")
+        result.append({"price": avg, "strength": len(cl),
+                       "type": level_type, "touches": len(cl)})
+    result.sort(key=lambda x: x["strength"], reverse=True)
+    return result
+
+
+def get_sr_levels(candles: List[Any], lookback: int = 150,
+                  num_levels: int = 6, tolerance_pct: float = 0.6):
+    """Detect top S/R levels from candles."""
+    arr = candles[-lookback:] if len(candles) > lookback else candles
+    if len(arr) < 20:
+        return []
+    points = find_swing_points(arr, strength=2)
+    if len(points) < 3:
+        return []
+    clusters = cluster_sr_points(points, tolerance_pct=tolerance_pct)
+    return [c for c in clusters if c["strength"] >= 2][:num_levels]
+
+
+def detect_real_breakout(candles, sr_levels, direction):
+    """Detect a REAL breakout (not a fake liquidity grab)."""
+    if len(candles) < 5 or not sr_levels:
+        return None
+    atr_val = atr(candles, 14)
+    if atr_val <= 0:
+        return None
+    last = candles[-1]
+    prev = candles[-2]
+    _, lh, ll, lc, lv = candle_values(last)
+    _, ph, pl, pc, _ = candle_values(prev)
+    body_last = abs(lc - candle_values(last)[0])
+    vol_list = volumes(candles[-21:]) if len(candles) >= 21 else volumes(candles[:-1])
+    avg_vol = sum(vol_list) / len(vol_list) if vol_list else 0
+
+    for lvl in sr_levels:
+        price = lvl["price"]
+        if direction == "LONG":
+            if lvl["type"] not in ("RESISTANCE", "MIXED"):
+                continue
+            if lc <= price:
+                continue
+            if (lc - price) < atr_val * 0.3:
+                continue
+            if lh > lc and (lh - max(lc, price)) > body_last * 1.5:
+                continue
+            if avg_vol > 0 and lv < avg_vol * 1.2:
+                continue
+            if not (bullish(prev) or (lc > pc and bullish(last))):
+                continue
+            return {"level": price, "type": lvl["type"],
+                    "strength": lvl["strength"], "atr": atr_val}
+        else:
+            if lvl["type"] not in ("SUPPORT", "MIXED"):
+                continue
+            if lc >= price:
+                continue
+            if (price - lc) < atr_val * 0.3:
+                continue
+            if ll < lc and (min(lc, price) - ll) > body_last * 1.5:
+                continue
+            if avg_vol > 0 and lv < avg_vol * 1.2:
+                continue
+            if not (bearish(prev) or (lc < pc and bearish(last))):
+                continue
+            return {"level": price, "type": lvl["type"],
+                    "strength": lvl["strength"], "atr": atr_val}
+    return None
+
+
+def detect_fake_breakout(candles, sr_levels, direction):
+    """Detect fake breakout / liquidity grab on recent candles."""
+    if len(candles) < 3 or not sr_levels:
+        return False
+    last = candles[-1]
+    _, lh, ll, lc, _ = candle_values(last)
+    for lvl in sr_levels:
+        price = lvl["price"]
+        if direction == "LONG":
+            if lh > price and lc < price:
+                wick = lh - price
+                rng = lh - ll
+                if rng > 0 and wick / rng > 0.5:
+                    return True
+        else:
+            if ll < price and lc > price:
+                wick = price - ll
+                rng = lh - ll
+                if rng > 0 and wick / rng > 0.5:
+                    return True
     return False
+
+
+def find_rejection_at_sr(candles, sr_levels, direction):
+    """Find a rejection/bounce off S/R level."""
+    if len(candles) < 5 or not sr_levels:
+        return None
+    atr_val = atr(candles, 14)
+    if atr_val <= 0:
+        return None
+    tol = atr_val * 0.5
+    last = candles[-1]
+    prev = candles[-2]
+    _, lh, ll, lc, _ = candle_values(last)
+    _, ph, pl, pc, _ = candle_values(prev)
+    for lvl in sr_levels:
+        price = lvl["price"]
+        if direction == "LONG":
+            if lvl["type"] not in ("SUPPORT", "MIXED"):
+                continue
+            touched = (ll <= price + tol) or (pl <= price + tol)
+            if not touched:
+                continue
+            if lc <= price:
+                continue
+            if lc > price + atr_val * 2.5:
+                continue
+            if not bullish_reversal_pattern(candles[-3:]):
+                continue
+            rng = lh - ll
+            if rng > 0 and (lower_wick(last) / rng) < 0.20 and not bullish(last):
+                continue
+            return {"level": price, "type": lvl["type"],
+                    "strength": lvl["strength"], "atr": atr_val}
+        else:
+            if lvl["type"] not in ("RESISTANCE", "MIXED"):
+                continue
+            touched = (lh >= price - tol) or (ph >= price - tol)
+            if not touched:
+                continue
+            if lc >= price:
+                continue
+            if lc < price - atr_val * 2.5:
+                continue
+            if not bearish_reversal_pattern(candles[-3:]):
+                continue
+            rng = lh - ll
+            if rng > 0 and (upper_wick(last) / rng) < 0.20 and not bearish(last):
+                continue
+            return {"level": price, "type": lvl["type"],
+                    "strength": lvl["strength"], "atr": atr_val}
+    return None
 
 
 # ============================================================
@@ -1053,7 +1152,6 @@ def _mtf_basic(m15: List[Any], direction: str) -> bool:
 # ============================================================
 
 def detect_trend_following(h1, m15, m5, direction):
-    """v25: Kept for reference but not called in v25 regime switch."""
     expected = "BULLISH" if direction == "LONG" else "BEARISH"
     structure = market_structure(h1)
     ema_dir = ema_direction(h1)
@@ -1062,10 +1160,9 @@ def detect_trend_following(h1, m15, m5, direction):
         return {"valid": False, "reason": "H1_TREND_MISSING"}
     if adx1 < 22:
         return {"valid": False, "reason": "ADX_LOW"}
-    if not htf_breakout_confirm(h1, direction, lookback=20, recent_window=5):
+    if not htf_breakout_confirm(h1, direction, 20, 5):
         return {"valid": False, "reason": "NO_H1_BREAKOUT"}
-    if not not_far_from_breakout(h1, direction, lookback=20,
-                                  recent_window=5, max_atr=0.7):
+    if not not_far_from_breakout(h1, direction, 20, 5, 0.7):
         return {"valid": False, "reason": "TOO_FAR_FROM_BREAKOUT"}
     r_15 = rsi(m15, 14)
     if direction == "LONG" and r_15 > 72:
@@ -1077,21 +1174,15 @@ def detect_trend_following(h1, m15, m5, direction):
     mtf = mtf_pullback_confirmation(m15, direction) or _mtf_basic(m15, direction)
     vol = volume_spike(h1, 1.10, 20)
     score = 4
-    if structure == expected:
-        score += 2
-    if ema_dir == expected:
-        score += 2
-    if adx1 >= 25:
-        score += 1
-    if mtf:
-        score += 1
-    if vol:
-        score += 1
+    if structure == expected: score += 2
+    if ema_dir == expected: score += 2
+    if adx1 >= 25: score += 1
+    if mtf: score += 1
+    if vol: score += 1
     return {"valid": True, "reason": "VALID", "score": score, "mtf": mtf}
 
 
 def detect_pullback(h1, m15, m5, direction):
-    """v25: Kept for reference but not called in v25 regime switch."""
     expected = "BULLISH" if direction == "LONG" else "BEARISH"
     structure = market_structure(h1)
     ema_dir = ema_direction(h1)
@@ -1100,23 +1191,23 @@ def detect_pullback(h1, m15, m5, direction):
     adx1 = adx(h1)
     if adx1 < 22:
         return {"valid": False, "reason": "ADX_LOW"}
-    pullback_count = count_recent_pullbacks(h1, direction)
-    if pullback_count >= 4:
+    pc = count_recent_pullbacks(h1, direction)
+    if pc >= 4:
         return {"valid": False, "reason": "LATE_TREND_FATIGUE"}
     if not pullback_detected(h1, direction):
         return {"valid": False, "reason": "NO_PULLBACK_ZONE"}
-    if not pullback_duration_ok(h1, direction, min_bars=3, max_bars=10):
+    if not pullback_duration_ok(h1, direction, 3, 10):
         return {"valid": False, "reason": "PULLBACK_DURATION_INVALID"}
-    if not pullback_depth_ok(h1, direction, min_pct=0.35, max_pct=0.78):
+    if not pullback_depth_ok(h1, direction, 30, 0.35, 0.78):
         return {"valid": False, "reason": "PULLBACK_DEPTH_INVALID"}
     at_ema = near_ema_zone(h1, direction)
     at_fib = fib_pullback_zone(h1, direction)
     at_swing = near_swing_low_zone(h1, direction)
     if not (at_ema or at_fib or at_swing):
         return {"valid": False, "reason": "NOT_AT_ANY_ZONE"}
-    if not rejection_at_zone(h1, direction, lookback=3):
+    if not rejection_at_zone(h1, direction, 3):
         return {"valid": False, "reason": "NO_REJECTION_AT_ZONE"}
-    if not rsi_in_pullback_zone(h1, direction, min_r=40, max_r=55):
+    if not rsi_in_pullback_zone(h1, direction, 40, 55):
         return {"valid": False, "reason": "RSI_OUT_OF_PULLBACK_ZONE"}
     if not is_orderly_pullback(h1, direction):
         return {"valid": False, "reason": "DISORDERLY_PULLBACK"}
@@ -1127,72 +1218,39 @@ def detect_pullback(h1, m15, m5, direction):
     if not entry_trigger_5m(m5, direction):
         return {"valid": False, "reason": "5M_TRIGGER"}
     score = 7
-    if at_ema:
-        score += 1
-    if at_fib:
-        score += 1
-    if fib_golden_zone(h1, direction):
-        score += 1
-    if at_swing:
-        score += 1
-    if adx1 >= 25:
-        score += 1
-    if adx1 >= 30:
-        score += 1
-    if pullback_count <= 1:
-        score += 1
+    if at_ema: score += 1
+    if at_fib: score += 1
+    if fib_golden_zone(h1, direction): score += 1
+    if at_swing: score += 1
+    if adx1 >= 25: score += 1
+    if adx1 >= 30: score += 1
+    if pc <= 1: score += 1
     return {"valid": True, "reason": "VALID", "score": score, "mtf": True}
 
 
-# ⭐ v27 NEW: FAST_TREND strategy
 def detect_fast_trend(h1, m15, m5, direction):
-    """
-    FAST_TREND: Ride sharp momentum impulses.
-    Detects 2+ strong consecutive 1H candles with rising RSI on 15M.
-    Uses tight TPs (1R/1.8R/2.5R) for quick exit.
-    BTC filter uses ONLY 15M (handled in btc_filter).
-    """
     if len(h1) < 25 or len(m15) < 25 or len(m5) < 10:
         return {"valid": False, "reason": "INSUFFICIENT_DATA"}
-    
     atr_1h = atr(h1, 14)
     if atr_1h <= 0:
         return {"valid": False, "reason": "NO_ATR"}
-    
-    last1 = h1[-1]
-    last2 = h1[-2]
-    
+    last1, last2 = h1[-1], h1[-2]
     if direction == "LONG":
-        last2_strong = (
-            bullish(last1) and bullish(last2)
-            and body_ratio(last1) >= 0.40
-            and body_ratio(last2) >= 0.40
-        )
+        strong = (bullish(last1) and bullish(last2)
+                  and body_ratio(last1) >= 0.40 and body_ratio(last2) >= 0.40)
     else:
-        last2_strong = (
-            bearish(last1) and bearish(last2)
-            and body_ratio(last1) >= 0.40
-            and body_ratio(last2) >= 0.40
-        )
-    
-    if not last2_strong:
+        strong = (bearish(last1) and bearish(last2)
+                  and body_ratio(last1) >= 0.40 and body_ratio(last2) >= 0.40)
+    if not strong:
         return {"valid": False, "reason": "MOMENTUM_NOT_FRESH"}
-    
     total_body = sum(body(c) for c in h1[-3:])
     if total_body < atr_1h * 1.0:
         return {"valid": False, "reason": "MOVE_TOO_SMALL"}
-    
-    strong_count = 0
-    for c in h1[-3:]:
-        if direction == "LONG" and bullish(c) and body_ratio(c) >= 0.55:
-            strong_count += 1
-        elif direction == "SHORT" and bearish(c) and body_ratio(c) >= 0.55:
-            strong_count += 1
-    
+    strong_count = sum(1 for c in h1[-3:]
+                       if (direction == "LONG" and bullish(c) and body_ratio(c) >= 0.55)
+                       or (direction == "SHORT" and bearish(c) and body_ratio(c) >= 0.55))
     rsi_now = rsi(m15, 14)
-    m15_prev = m15[:-3]
-    rsi_prev = rsi(m15_prev, 14) if len(m15_prev) >= 15 else rsi_now
-    
+    rsi_prev = rsi(m15[:-3], 14) if len(m15) >= 18 else rsi_now
     if direction == "LONG":
         if rsi_now < 48 or rsi_now > 82:
             return {"valid": False, "reason": "RSI_OUT_OF_ZONE"}
@@ -1203,56 +1261,39 @@ def detect_fast_trend(h1, m15, m5, direction):
             return {"valid": False, "reason": "RSI_OUT_OF_ZONE"}
         if rsi_now >= rsi_prev:
             return {"valid": False, "reason": "RSI_NOT_FALLING"}
-    
     if not volume_spike(m15, 1.30, 20):
         return {"valid": False, "reason": "NO_VOLUME"}
-    
-    last_5m = m5[-1]
     if len(m5) >= 3:
-        prev_high = max(highs(m5[-3:-1]))
-        prev_low = min(lows(m5[-3:-1]))
-        last_close = candle_values(last_5m)[3]
-        
+        last_5m = m5[-1]
+        ph = max(highs(m5[-3:-1]))
+        pl = min(lows(m5[-3:-1]))
+        lc = candle_values(last_5m)[3]
         if direction == "LONG":
             if not bullish(last_5m) or body_ratio(last_5m) < 0.40:
                 return {"valid": False, "reason": "WEAK_5M_BODY"}
-            if last_close <= prev_high:
+            if lc <= ph:
                 return {"valid": False, "reason": "NO_5M_BREAK"}
         else:
             if not bearish(last_5m) or body_ratio(last_5m) < 0.40:
                 return {"valid": False, "reason": "WEAK_5M_BODY"}
-            if last_close >= prev_low:
+            if lc >= pl:
                 return {"valid": False, "reason": "NO_5M_BREAK"}
-    
     entry = closes(m5)[-1]
-    start_price = candle_values(h1[-3])[0]
-    distance = abs(entry - start_price)
-    if distance > atr_1h * 3.0:
+    start = candle_values(h1[-3])[0]
+    if abs(entry - start) > atr_1h * 3.0:
         return {"valid": False, "reason": "OVEREXTENDED"}
-    
     score = 10
-    if strong_count >= 3:
-        score += 1
-    if direction == "LONG" and rsi_now > 60:
-        score += 1
-    if direction == "SHORT" and rsi_now < 40:
-        score += 1
-    
-    return {
-        "valid": True,
-        "reason": "VALID",
-        "score": min(score, 12),
-        "mtf": True,
-    }
+    if strong_count >= 3: score += 1
+    if direction == "LONG" and rsi_now > 60: score += 1
+    if direction == "SHORT" and rsi_now < 40: score += 1
+    return {"valid": True, "reason": "VALID", "score": min(score, 12), "mtf": True}
 
 
 def detect_breakout(h1, m15, m5, direction):
-    """v26: Primary strategy with 15M confirmation."""
     ok, level = local_breakout(m15, direction, 20)
     if not ok:
         return {"valid": False, "reason": "NO_BREAKOUT"}
-    last = m15[-1]
-    if body_ratio(last) < 0.50:
+    if body_ratio(m15[-1]) < 0.50:
         return {"valid": False, "reason": "WEAK_BREAKOUT_CANDLE"}
     if not volume_spike(m15, 1.50, 20):
         return {"valid": False, "reason": "NO_VOLUME_SPIKE"}
@@ -1271,138 +1312,180 @@ def detect_breakout(h1, m15, m5, direction):
         return {"valid": False, "reason": "ADX_LOW"}
     mtf = _mtf_basic(m15, direction)
     score = 6
-    if mtf:
-        score += 2
-    if adx1 >= 30:
-        score += 1
-    if volume_spike(m15, 2.0, 20):
-        score += 1
-    return {"valid": True, "reason": "VALID", "score": score,
-            "mtf": mtf, "level": level}
+    if mtf: score += 2
+    if adx1 >= 30: score += 1
+    if volume_spike(m15, 2.0, 20): score += 1
+    return {"valid": True, "reason": "VALID", "score": score, "mtf": mtf, "level": level}
 
 
 def detect_reversal(h1, m15, m5, direction):
-    """v25: Kept as bonus strategy in both regimes."""
     if not sweep_reclaim_recent(m15, direction):
         return {"valid": False, "reason": "NO_SWEEP_RECLAIM"}
     if not structure_shift_5m(m5, direction):
         return {"valid": False, "reason": "NO_5M_STRUCTURE_SHIFT"}
-    last = m15[-1]
-    if body_ratio(last) < 0.30:
+    if body_ratio(m15[-1]) < 0.30:
         return {"valid": False, "reason": "WEAK_RECLAIM"}
     mtf = _mtf_basic(m15, direction)
     score = 7
-    if mtf:
-        score += 1
+    if mtf: score += 1
     return {"valid": True, "reason": "VALID", "score": score, "mtf": mtf}
 
 
 def detect_range_trading(h1, m15, m5, direction):
-    """v25: Kept for ranging markets (not fully tested yet)."""
-    range_info = detect_range_condition(h1, lookback=40, min_touches=2)
-    if not range_info["is_range"]:
+    ri = detect_range_condition(h1, 40, 2)
+    if not ri["is_range"]:
         return {"valid": False, "reason": "NOT_IN_RANGE"}
-    r_high = range_info["high"]
-    r_low = range_info["low"]
-    r_mid = range_info["mid"]
-    if not price_near_range_boundary(h1, direction, r_high, r_low, atr_mult=0.8):
+    r_high, r_low, r_mid = ri["high"], ri["low"], ri["mid"]
+    if not price_near_range_boundary(h1, direction, r_high, r_low, 0.8):
         return {"valid": False, "reason": "NOT_AT_BOUNDARY"}
     r = rsi(h1, 14)
-    if direction == "LONG":
-        if r > 40:
-            return {"valid": False, "reason": "RSI_NOT_OVERSOLD"}
-    elif direction == "SHORT":
-        if r < 60:
-            return {"valid": False, "reason": "RSI_NOT_OVERBOUGHT"}
-    else:
-        return {"valid": False, "reason": "INVALID_DIRECTION"}
-    if not rejection_at_zone(h1, direction, lookback=3):
-        if not recent_rejection(h1, direction, lookback=4):
+    if direction == "LONG" and r > 40:
+        return {"valid": False, "reason": "RSI_NOT_OVERSOLD"}
+    if direction == "SHORT" and r < 60:
+        return {"valid": False, "reason": "RSI_NOT_OVERBOUGHT"}
+    if not rejection_at_zone(h1, direction, 3):
+        if not recent_rejection(h1, direction, 4):
             return {"valid": False, "reason": "NO_REJECTION"}
     if not entry_trigger_5m(m5, direction):
         return {"valid": False, "reason": "5M_TRIGGER"}
     mtf = _mtf_basic(m15, direction)
     score = 7
-    if mtf:
-        score += 1
-    if direction == "LONG" and r <= 30:
-        score += 1
-    if direction == "SHORT" and r >= 70:
-        score += 1
-    if range_info["width_pct"] >= 3.0:
-        score += 1
-    if range_info["touches_high"] >= 3 and range_info["touches_low"] >= 3:
-        score += 1
-    return {
-        "valid": True, "reason": "VALID", "score": score, "mtf": mtf,
-        "range_high": r_high, "range_low": r_low, "range_mid": r_mid,
-        "range_width_pct": range_info["width_pct"],
-    }
+    if mtf: score += 1
+    if direction == "LONG" and r <= 30: score += 1
+    if direction == "SHORT" and r >= 70: score += 1
+    if ri["width_pct"] >= 3.0: score += 1
+    if ri["touches_high"] >= 3 and ri["touches_low"] >= 3: score += 1
+    return {"valid": True, "reason": "VALID", "score": score, "mtf": mtf,
+            "range_high": r_high, "range_low": r_low, "range_mid": r_mid,
+            "range_width_pct": ri["width_pct"]}
 
 
 def detect_bb_reversion(h1, m15, m5, direction):
-    """v25: 44.4% win rate with +0.33R — kept for ranging markets."""
     adx1 = adx(h1)
     if adx1 >= 25:
         return {"valid": False, "reason": "ADX_TOO_HIGH_FOR_REVERSION"}
     upper, mid, lower = bollinger_bands(h1, 20, 2.0)
     if upper == 0 or lower == 0:
         return {"valid": False, "reason": "BB_CALCULATION_FAILED"}
-    last_candle = h1[-1]
-    _, h, l, c, _ = candle_values(last_candle)
+    _, h, l, c, _ = candle_values(h1[-1])
     r = rsi(h1, 14)
     if direction == "LONG":
         if l > lower * 1.005:
             return {"valid": False, "reason": "PRICE_NOT_AT_LOWER_BAND"}
         if r > 32:
             return {"valid": False, "reason": "RSI_NOT_OVERSOLD"}
-        window = h1[-3:]
-        if not bullish_reversal_pattern(window):
+        if not bullish_reversal_pattern(h1[-3:]):
             return {"valid": False, "reason": "NO_BULLISH_REVERSAL_PATTERN"}
-    elif direction == "SHORT":
+    else:
         if h < upper * 0.995:
             return {"valid": False, "reason": "PRICE_NOT_AT_UPPER_BAND"}
         if r < 68:
             return {"valid": False, "reason": "RSI_NOT_OVERBOUGHT"}
-        window = h1[-3:]
-        if not bearish_reversal_pattern(window):
+        if not bearish_reversal_pattern(h1[-3:]):
             return {"valid": False, "reason": "NO_BEARISH_REVERSAL_PATTERN"}
-    else:
-        return {"valid": False, "reason": "INVALID_DIRECTION"}
     if not entry_trigger_5m(m5, direction):
         return {"valid": False, "reason": "5M_TRIGGER"}
     mtf = _mtf_basic(m15, direction)
     score = 8
-    if mtf:
-        score += 1
-    if adx1 < 20:
-        score += 1
-    return {
-        "valid": True, "reason": "VALID", "score": score, "mtf": mtf,
-        "bb_upper": upper, "bb_mid": mid, "bb_lower": lower,
-    }
+    if mtf: score += 1
+    if adx1 < 20: score += 1
+    return {"valid": True, "reason": "VALID", "score": score, "mtf": mtf,
+            "bb_upper": upper, "bb_mid": mid, "bb_lower": lower}
+
+
+# ⭐ v28 NEW: SR_BREAKOUT strategy
+def detect_sr_breakout(h1, m15, m5, direction):
+    """Real breakout through S/R level with volume + confirmation."""
+    sr_h1 = get_sr_levels(h1, 120, 6)
+    sr_m15 = get_sr_levels(m15, 120, 6)
+    if not sr_h1 and not sr_m15:
+        return {"valid": False, "reason": "NO_SR_LEVELS"}
+    if atr(h1, 14) <= 0:
+        return {"valid": False, "reason": "NO_ATR"}
+
+    # Filter fake breakouts FIRST
+    if detect_fake_breakout(m15, sr_m15, direction) or \
+       detect_fake_breakout(h1, sr_h1, direction):
+        return {"valid": False, "reason": "FAKE_BREAKOUT"}
+
+    brk_15 = detect_real_breakout(m15, sr_m15, direction)
+    brk_1h = detect_real_breakout(h1, sr_h1, direction)
+    if not brk_15 and not brk_1h:
+        return {"valid": False, "reason": "NO_REAL_BREAKOUT"}
+
+    if not entry_trigger_5m(m5, direction):
+        return {"valid": False, "reason": "5M_TRIGGER"}
+    if not _mtf_basic(m15, direction):
+        return {"valid": False, "reason": "NO_15M_CONFIRMATION"}
+
+    adx_1h = adx(h1)
+    if adx_1h < 20:
+        return {"valid": False, "reason": "ADX_TOO_LOW"}
+
+    score = 7
+    if brk_1h: score += 2
+    if brk_15: score += 1
+    if adx_1h >= 25: score += 1
+    if volume_spike(m15, 1.5, 20): score += 1
+
+    best = brk_1h or brk_15
+    return {"valid": True, "reason": "VALID", "score": score, "mtf": True,
+            "sr_level": best["level"], "sr_type": best["type"],
+            "sr_strength": best["strength"]}
+
+
+# ⭐ v28 NEW: SR_REJECTION strategy
+def detect_sr_rejection(h1, m15, m5, direction):
+    """Bounce off S/R level (no break)."""
+    sr_h1 = get_sr_levels(h1, 120, 6)
+    sr_m15 = get_sr_levels(m15, 120, 6)
+    if not sr_h1 and not sr_m15:
+        return {"valid": False, "reason": "NO_SR_LEVELS"}
+    if atr(h1, 14) <= 0:
+        return {"valid": False, "reason": "NO_ATR"}
+
+    # Reject fake breakouts
+    if detect_fake_breakout(m15, sr_m15, direction):
+        return {"valid": False, "reason": "FAKE_BREAKOUT"}
+
+    rej_15 = find_rejection_at_sr(m15, sr_m15, direction)
+    rej_1h = find_rejection_at_sr(h1, sr_h1, direction)
+    if not rej_15 and not rej_1h:
+        return {"valid": False, "reason": "NO_REJECTION"}
+
+    if not entry_trigger_5m(m5, direction):
+        return {"valid": False, "reason": "5M_TRIGGER"}
+    if not _mtf_basic(m15, direction):
+        return {"valid": False, "reason": "NO_15M_CONFIRMATION"}
+
+    score = 7
+    if rej_1h: score += 2
+    if rej_15: score += 1
+    if rej_1h and rej_1h.get("strength", 0) >= 3: score += 1
+
+    best = rej_1h or rej_15
+    return {"valid": True, "reason": "VALID", "score": score, "mtf": True,
+            "sr_level": best["level"], "sr_type": best["type"],
+            "sr_strength": best["strength"]}
 
 
 # ============================================================
 # HTF CONTEXT
 # ============================================================
 
-# ⭐ v27 CHANGED: handle FAST_TREND (skip HTF check — BTC 15M used instead)
-def context_allows(strategy: str, daily: str, h4: str,
-                   direction: str, h4_adx: float) -> bool:
+def context_allows(strategy, daily, h4, direction, h4_adx):
     if strategy == "FAST_TREND":
         return True
-    
     expected = "BULLISH" if direction == "LONG" else "BEARISH"
     daily_opp = daily in ("BULLISH", "BEARISH") and daily != expected
     h4_opp = h4 in ("BULLISH", "BEARISH") and h4 != expected
 
-    if strategy in ("RANGE_TRADING", "BB_REVERSION"):
+    if strategy in ("RANGE_TRADING", "BB_REVERSION", "SR_REJECTION"):
         if daily_opp and h4_opp and h4_adx >= 30:
             return False
         return True
 
-    if strategy in ("TREND_FOLLOWING", "PULLBACK", "BREAKOUT"):
+    if strategy in ("TREND_FOLLOWING", "PULLBACK", "BREAKOUT", "SR_BREAKOUT"):
         if daily_opp:
             return False
         if h4_opp and h4_adx >= 22:
@@ -1425,47 +1508,43 @@ def context_allows(strategy: str, daily: str, h4: str,
 # BTC FILTER
 # ============================================================
 
-# ⭐ v27 CHANGED: FAST_TREND uses BTC 15M only
-def btc_filter(direction: str, btc_context: Optional[Dict[str, Any]],
-               strategy: str = "") -> str:
+def btc_filter(direction, btc_context, strategy=""):
     if not btc_context:
         return "ALLOW"
-    
     expected = "BULLISH" if direction == "LONG" else "BEARISH"
-    
-    # FAST_TREND: only BTC 15M matters
+
     if strategy == "FAST_TREND":
         btc_m15 = btc_context.get("m15") or "RANGE"
         if btc_m15 in ("BULLISH", "BEARISH") and btc_m15 != expected:
             return "BLOCK"
         return "ALLOW"
-    
+
     btc_h4 = btc_context.get("h4") or "RANGE"
     btc_h1 = btc_context.get("h1") or "RANGE"
     btc_adx_h4 = float(btc_context.get("adx_h4") or 0.0)
     btc_adx_h1 = float(btc_context.get("adx_h1") or 0.0)
     daily_dir = btc_context.get("daily") or "RANGE"
     daily_adx = float(btc_context.get("adx_daily") or 0.0)
-    
-    btc_opposes_h4 = btc_h4 in ("BULLISH", "BEARISH") and btc_h4 != expected
-    btc_opposes_h1 = btc_h1 in ("BULLISH", "BEARISH") and btc_h1 != expected
-    daily_opposes = daily_dir in ("BULLISH", "BEARISH") and daily_dir != expected
 
-    if btc_opposes_h1 and btc_adx_h1 >= 22:
+    opp_h4 = btc_h4 in ("BULLISH", "BEARISH") and btc_h4 != expected
+    opp_h1 = btc_h1 in ("BULLISH", "BEARISH") and btc_h1 != expected
+    daily_opp = daily_dir in ("BULLISH", "BEARISH") and daily_dir != expected
+
+    if opp_h1 and btc_adx_h1 >= 22:
         return "BLOCK"
 
-    if strategy in ("RANGE_TRADING", "BB_REVERSION"):
-        if btc_opposes_h4 and btc_adx_h4 >= 35:
+    if strategy in ("RANGE_TRADING", "BB_REVERSION", "SR_REJECTION"):
+        if opp_h4 and btc_adx_h4 >= 35:
             return "BLOCK"
         return "ALLOW"
 
-    if btc_opposes_h4 and daily_opposes and max(btc_adx_h4, daily_adx) >= 30:
+    if opp_h4 and daily_opp and max(btc_adx_h4, daily_adx) >= 30:
         return "BLOCK"
-    if btc_opposes_h4 and btc_adx_h4 >= 30:
+    if opp_h4 and btc_adx_h4 >= 30:
         return "BLOCK"
-    if btc_opposes_h4 and btc_adx_h4 >= 22:
+    if opp_h4 and btc_adx_h4 >= 22:
         return "WARN"
-    if daily_opposes and daily_adx >= 30 and not btc_opposes_h4:
+    if daily_opp and daily_adx >= 30 and not opp_h4:
         return "WARN"
     return "ALLOW"
 
@@ -1474,8 +1553,7 @@ def btc_filter(direction: str, btc_context: Optional[Dict[str, Any]],
 # TRADE LEVELS
 # ============================================================
 
-# ⭐ v27 CHANGED: handle FAST_TREND
-def calculate_trade_levels(h1, m5, direction, strategy: str = "DEFAULT"):
+def calculate_trade_levels(h1, m5, direction, strategy="DEFAULT"):
     if direction not in ("LONG", "SHORT") or not h1 or not m5:
         return None
     entry = closes(m5)[-1]
@@ -1495,129 +1573,85 @@ def _calc_trend_levels(h1, m5, direction, entry):
     atr_5m = atr(m5, 14) if len(m5) >= 15 else 0.0
     if atr_1h <= 0:
         return None
-    
     n = len(h1)
     if n < 25:
         return None
-    
     sl_swing = None
-    
     if direction == "LONG":
         for i in range(n - 3, max(n - 25, 2), -1):
             try:
-                low_i = candle_values(h1[i])[2]
-                low_prev1 = candle_values(h1[i-1])[2]
-                low_prev2 = candle_values(h1[i-2])[2]
-                low_next1 = candle_values(h1[i+1])[2]
-                
-                if low_i < low_prev1 and low_i < low_prev2 and low_i < low_next1:
-                    if low_i < entry * 0.995:
-                        sl_swing = low_i
-                        break
+                li = candle_values(h1[i])[2]
+                lp1 = candle_values(h1[i-1])[2]
+                lp2 = candle_values(h1[i-2])[2]
+                ln1 = candle_values(h1[i+1])[2]
+                if li < lp1 and li < lp2 and li < ln1 and li < entry * 0.995:
+                    sl_swing = li
+                    break
             except Exception:
                 continue
-        
-        if sl_swing is not None:
-            sl_dist = (entry - sl_swing) + atr_1h * 0.35
-        else:
-            sl_dist = entry * 0.015
-        
+        sl_dist = (entry - sl_swing) + atr_1h * 0.35 if sl_swing else entry * 0.015
         min_sl = max(entry * 0.015, atr_5m * 3.0 if atr_5m > 0 else 0)
         max_sl = entry * 0.025
         sl_dist = max(min_sl, min(sl_dist, max_sl))
         sl = entry - sl_dist
-    
     else:
         for i in range(n - 3, max(n - 25, 2), -1):
             try:
-                high_i = candle_values(h1[i])[1]
-                high_prev1 = candle_values(h1[i-1])[1]
-                high_prev2 = candle_values(h1[i-2])[1]
-                high_next1 = candle_values(h1[i+1])[1]
-                
-                if high_i > high_prev1 and high_i > high_prev2 and high_i > high_next1:
-                    if high_i > entry * 1.005:
-                        sl_swing = high_i
-                        break
+                hi = candle_values(h1[i])[1]
+                hp1 = candle_values(h1[i-1])[1]
+                hp2 = candle_values(h1[i-2])[1]
+                hn1 = candle_values(h1[i+1])[1]
+                if hi > hp1 and hi > hp2 and hi > hn1 and hi > entry * 1.005:
+                    sl_swing = hi
+                    break
             except Exception:
                 continue
-        
-        if sl_swing is not None:
-            sl_dist = (sl_swing - entry) + atr_1h * 0.35
-        else:
-            sl_dist = entry * 0.015
-        
+        sl_dist = (sl_swing - entry) + atr_1h * 0.35 if sl_swing else entry * 0.015
         min_sl = max(entry * 0.015, atr_5m * 3.0 if atr_5m > 0 else 0)
         max_sl = entry * 0.025
         sl_dist = max(min_sl, min(sl_dist, max_sl))
         sl = entry + sl_dist
-    
-    pivots_above = []
-    pivots_below = []
-    
+
+    piv_above, piv_below = [], []
     for i in range(2, n - 2):
         try:
-            h_i = candle_values(h1[i])[1]
-            l_i = candle_values(h1[i])[2]
-            
-            if (h_i > candle_values(h1[i-1])[1] and h_i > candle_values(h1[i-2])[1] and
-                h_i > candle_values(h1[i+1])[1] and h_i > candle_values(h1[i+2])[1]):
-                if h_i > entry:
-                    pivots_above.append(h_i)
-            
-            if (l_i < candle_values(h1[i-1])[2] and l_i < candle_values(h1[i-2])[2] and
-                l_i < candle_values(h1[i+1])[2] and l_i < candle_values(h1[i+2])[2]):
-                if l_i < entry:
-                    pivots_below.append(l_i)
+            hi = candle_values(h1[i])[1]
+            li = candle_values(h1[i])[2]
+            if (hi > candle_values(h1[i-1])[1] and hi > candle_values(h1[i-2])[1]
+                and hi > candle_values(h1[i+1])[1] and hi > candle_values(h1[i+2])[1]):
+                if hi > entry: piv_above.append(hi)
+            if (li < candle_values(h1[i-1])[2] and li < candle_values(h1[i-2])[2]
+                and li < candle_values(h1[i+1])[2] and li < candle_values(h1[i+2])[2]):
+                if li < entry: piv_below.append(li)
         except Exception:
             continue
-    
+
     if direction == "LONG":
-        pivots_above.sort()
-        candidates = [p for p in pivots_above if (p - entry) >= sl_dist * 1.0][:3]
-        
-        base_tp1 = entry + sl_dist * 1.5
-        base_tp2 = entry + sl_dist * 2.5
-        base_tp3 = entry + sl_dist * 3.5
-        
-        tp1 = candidates[0] if len(candidates) > 0 else base_tp1
-        tp2 = candidates[1] if len(candidates) > 1 else max(base_tp2, tp1 + sl_dist * 0.8)
-        tp3 = candidates[2] if len(candidates) > 2 else max(base_tp3, tp2 + sl_dist * 0.8)
-        
-        if tp1 < entry + sl_dist * 1.2:
-            tp1 = entry + sl_dist * 1.2
-        if tp2 < tp1 + sl_dist * 0.5:
-            tp2 = tp1 + sl_dist * 1.0
-        if tp3 < tp2 + sl_dist * 0.5:
-            tp3 = tp2 + sl_dist * 1.0
+        piv_above.sort()
+        cands = [p for p in piv_above if (p - entry) >= sl_dist * 1.0][:3]
+        tp1 = cands[0] if len(cands) > 0 else entry + sl_dist * 1.5
+        tp2 = cands[1] if len(cands) > 1 else max(entry + sl_dist * 2.5, tp1 + sl_dist * 0.8)
+        tp3 = cands[2] if len(cands) > 2 else max(entry + sl_dist * 3.5, tp2 + sl_dist * 0.8)
+        if tp1 < entry + sl_dist * 1.2: tp1 = entry + sl_dist * 1.2
+        if tp2 < tp1 + sl_dist * 0.5: tp2 = tp1 + sl_dist * 1.0
+        if tp3 < tp2 + sl_dist * 0.5: tp3 = tp2 + sl_dist * 1.0
+        if not (sl < entry < tp1 < tp2 < tp3):
+            return None
     else:
-        pivots_below.sort(reverse=True)
-        candidates = [p for p in pivots_below if (entry - p) >= sl_dist * 1.0][:3]
-        
-        base_tp1 = entry - sl_dist * 1.5
-        base_tp2 = entry - sl_dist * 2.5
-        base_tp3 = entry - sl_dist * 3.5
-        
-        tp1 = candidates[0] if len(candidates) > 0 else base_tp1
-        tp2 = candidates[1] if len(candidates) > 1 else min(base_tp2, tp1 - sl_dist * 0.8)
-        tp3 = candidates[2] if len(candidates) > 2 else min(base_tp3, tp2 - sl_dist * 0.8)
-        
-        if tp1 > entry - sl_dist * 1.2:
-            tp1 = entry - sl_dist * 1.2
-        if tp2 > tp1 - sl_dist * 0.5:
-            tp2 = tp1 - sl_dist * 1.0
-        if tp3 > tp2 - sl_dist * 0.5:
-            tp3 = tp2 - sl_dist * 1.0
-    
-    if direction == "LONG" and not (sl < entry < tp1 < tp2 < tp3):
-        return None
-    if direction == "SHORT" and not (sl > entry > tp1 > tp2 > tp3):
-        return None
-    
+        piv_below.sort(reverse=True)
+        cands = [p for p in piv_below if (entry - p) >= sl_dist * 1.0][:3]
+        tp1 = cands[0] if len(cands) > 0 else entry - sl_dist * 1.5
+        tp2 = cands[1] if len(cands) > 1 else min(entry - sl_dist * 2.5, tp1 - sl_dist * 0.8)
+        tp3 = cands[2] if len(cands) > 2 else min(entry - sl_dist * 3.5, tp2 - sl_dist * 0.8)
+        if tp1 > entry - sl_dist * 1.2: tp1 = entry - sl_dist * 1.2
+        if tp2 > tp1 - sl_dist * 0.5: tp2 = tp1 - sl_dist * 1.0
+        if tp3 > tp2 - sl_dist * 0.5: tp3 = tp2 - sl_dist * 1.0
+        if not (sl > entry > tp1 > tp2 > tp3):
+            return None
+
     rr1 = abs(tp1 - entry) / abs(entry - sl)
     rr2 = abs(tp2 - entry) / abs(entry - sl)
     rr3 = abs(tp3 - entry) / abs(entry - sl)
-    
     return {
         "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "tp3": tp3,
         "risk": abs(entry - sl),
@@ -1625,54 +1659,39 @@ def _calc_trend_levels(h1, m5, direction, entry):
         "trail_mode": "BREAKEVEN_AT_TP1_THEN_ATR",
         "trail_atr_mult": 2.0, "trail_bar_count": 10,
         "breakeven_at_tp1": True,
-        "sl_source": "swing" if sl_swing is not None else "atr",
-        "tp_source": "pivot" if candidates else "r_multiple",
+        "sl_source": "swing" if sl_swing else "atr",
+        "tp_source": "pivot" if cands else "r_multiple",
     }
 
 
 def _calc_range_levels(h1, m5, direction, entry):
-    range_info = detect_range_condition(h1, lookback=40, min_touches=2)
-    if not range_info["is_range"]:
+    ri = detect_range_condition(h1, 40, 2)
+    if not ri["is_range"]:
         return None
-    r_high = range_info["high"]
-    r_low = range_info["low"]
-    r_mid = range_info["mid"]
+    r_high, r_low, r_mid = ri["high"], ri["low"], ri["mid"]
     rng = r_high - r_low
     atr1 = atr(h1, 14)
     if atr1 <= 0 or rng <= 0:
         return None
-    buffer = atr1 * 0.3
+    buf = atr1 * 0.3
     if direction == "LONG":
-        sl = r_low - buffer
+        sl = r_low - buf
         risk = entry - sl
-        if risk <= 0:
-            return None
-        tp1 = r_mid
-        tp2 = r_low + rng * 0.75
-        tp3 = r_high - buffer
-        if not (sl < entry < tp1 < tp2 < tp3):
-            return None
-        if risk / entry > 0.05:
-            return None
+        if risk <= 0: return None
+        tp1, tp2, tp3 = r_mid, r_low + rng * 0.75, r_high - buf
+        if not (sl < entry < tp1 < tp2 < tp3): return None
+        if risk / entry > 0.05: return None
     else:
-        sl = r_high + buffer
+        sl = r_high + buf
         risk = sl - entry
-        if risk <= 0:
-            return None
-        tp1 = r_mid
-        tp2 = r_high - rng * 0.75
-        tp3 = r_low + buffer
-        if not (sl > entry > tp1 > tp2 > tp3):
-            return None
-        if risk / entry > 0.05:
-            return None
-    return {
-        "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "tp3": tp3,
-        "risk": risk, "rr": "1:2",
-        "trail_mode": "BREAKEVEN_AT_TP1",
-        "breakeven_at_tp1": True,
-        "range_high": r_high, "range_low": r_low, "range_mid": r_mid,
-    }
+        if risk <= 0: return None
+        tp1, tp2, tp3 = r_mid, r_high - rng * 0.75, r_low + buf
+        if not (sl > entry > tp1 > tp2 > tp3): return None
+        if risk / entry > 0.05: return None
+    return {"entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "tp3": tp3,
+            "risk": risk, "rr": "1:2",
+            "trail_mode": "BREAKEVEN_AT_TP1", "breakeven_at_tp1": True,
+            "range_high": r_high, "range_low": r_low, "range_mid": r_mid}
 
 
 def _calc_bb_reversion_levels(h1, m5, direction, entry):
@@ -1680,74 +1699,45 @@ def _calc_bb_reversion_levels(h1, m5, direction, entry):
     atr1 = atr(h1, 14)
     if upper <= 0 or lower <= 0 or atr1 <= 0:
         return None
-    buffer = atr1 * 0.5
+    buf = atr1 * 0.5
     if direction == "LONG":
-        sl = lower - buffer
+        sl = lower - buf
         risk = entry - sl
-        if risk <= 0:
-            return None
-        tp1 = mid
-        tp2 = upper
-        tp3 = upper + buffer
-        if not (sl < entry < tp1 < tp2 < tp3):
-            return None
-        if risk / entry > 0.05:
-            return None
+        if risk <= 0: return None
+        tp1, tp2, tp3 = mid, upper, upper + buf
+        if not (sl < entry < tp1 < tp2 < tp3): return None
+        if risk / entry > 0.05: return None
     else:
-        sl = upper + buffer
+        sl = upper + buf
         risk = sl - entry
-        if risk <= 0:
-            return None
-        tp1 = mid
-        tp2 = lower
-        tp3 = lower - buffer
-        if not (sl > entry > tp1 > tp2 > tp3):
-            return None
-        if risk / entry > 0.05:
-            return None
-    return {
-        "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "tp3": tp3,
-        "risk": risk, "rr": "BB_BASED",
-        "trail_mode": "BREAKEVEN_AT_TP1",
-        "breakeven_at_tp1": True,
-        "bb_upper": upper, "bb_mid": mid, "bb_lower": lower,
-    }
+        if risk <= 0: return None
+        tp1, tp2, tp3 = mid, lower, lower - buf
+        if not (sl > entry > tp1 > tp2 > tp3): return None
+        if risk / entry > 0.05: return None
+    return {"entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "tp3": tp3,
+            "risk": risk, "rr": "BB_BASED",
+            "trail_mode": "BREAKEVEN_AT_TP1", "breakeven_at_tp1": True,
+            "bb_upper": upper, "bb_mid": mid, "bb_lower": lower}
 
 
-# ⭐ v27 NEW: FAST_TREND levels (tight TPs)
 def _calc_fast_trend_levels(h1, m5, direction, entry):
-    """
-    FAST_TREND levels: tight TPs for quick exit before momentum dies.
-    SL: same as _calc_trend_levels (structural)
-    TP: 1R / 1.8R / 2.5R (tight)
-    """
     base = _calc_trend_levels(h1, m5, direction, entry)
     if not base:
         return None
-    
     risk = base["risk"]
     sl = base["sl"]
-    
     if direction == "LONG":
         tp1 = entry + risk * 1.0
         tp2 = entry + risk * 1.8
         tp3 = entry + risk * 2.5
-        if not (sl < entry < tp1 < tp2 < tp3):
-            return None
+        if not (sl < entry < tp1 < tp2 < tp3): return None
     else:
         tp1 = entry - risk * 1.0
         tp2 = entry - risk * 1.8
         tp3 = entry - risk * 2.5
-        if not (sl > entry > tp1 > tp2 > tp3):
-            return None
-    
-    return {
-        **base,
-        "tp1": tp1,
-        "tp2": tp2,
-        "tp3": tp3,
-        "rr": "1:1.0/1:1.8/1:2.5",
-    }
+        if not (sl > entry > tp1 > tp2 > tp3): return None
+    return {**base, "tp1": tp1, "tp2": tp2, "tp3": tp3,
+            "rr": "1:1.0/1:1.8/1:2.5"}
 
 
 def target_reachable(levels, h1, direction):
@@ -1760,14 +1750,14 @@ def target_reachable(levels, h1, direction):
         return True
     hs, ls = highs(recent), lows(recent)
     pivots = []
-    strength = 2
-    end = len(recent) - strength
-    for i in range(strength, end):
-        if all(hs[i] > hs[i - j] for j in range(1, strength + 1)) and \
-           all(hs[i] >= hs[i + j] for j in range(1, strength + 1)):
+    s = 2
+    end = len(recent) - s
+    for i in range(s, end):
+        if all(hs[i] > hs[i - j] for j in range(1, s + 1)) and \
+           all(hs[i] >= hs[i + j] for j in range(1, s + 1)):
             pivots.append(("HIGH", hs[i]))
-        if all(ls[i] < ls[i - j] for j in range(1, strength + 1)) and \
-           all(ls[i] <= ls[i + j] for j in range(1, strength + 1)):
+        if all(ls[i] < ls[i - j] for j in range(1, s + 1)) and \
+           all(ls[i] <= ls[i + j] for j in range(1, s + 1)):
             pivots.append(("LOW", ls[i]))
     if direction == "LONG":
         return not [p for k, p in pivots if k == "HIGH" and entry < p < tp1]
@@ -1783,10 +1773,8 @@ def no_trade(reason, daily="RANGE", h4="RANGE", h1="RANGE",
     result = {
         "signal": "NO_TRADE", "direction": direction, "score": 0,
         "quality": "LOW", "reason": reason,
-        "strategies": [
-            name for name, status in (diagnostics or {}).items()
-            if status == "VALID" or status.startswith("HIGH_FAIL:")
-        ],
+        "strategies": [n for n, s in (diagnostics or {}).items()
+                       if s == "VALID" or s.startswith("HIGH_FAIL:")],
         "strategy": None,
         "strategy_diagnostics": diagnostics or {},
         "daily": daily, "4h": h4, "1h": h1,
@@ -1799,11 +1787,9 @@ def no_trade(reason, daily="RANGE", h4="RANGE", h1="RANGE",
         if direction in ("LONG", "SHORT"):
             expected = "BULLISH" if direction == "LONG" else "BEARISH"
             btc_h4 = btc.get("h4", "RANGE")
-            result["btc_relation"] = (
-                "ALIGNED" if btc_h4 == expected
-                else "OPPOSED" if btc_h4 in ("BULLISH", "BEARISH")
-                else "NEUTRAL"
-            )
+            result["btc_relation"] = ("ALIGNED" if btc_h4 == expected
+                                       else "OPPOSED" if btc_h4 in ("BULLISH", "BEARISH")
+                                       else "NEUTRAL")
         else:
             result["btc_relation"] = "NEUTRAL"
     return result
@@ -1820,27 +1806,21 @@ def direction_from_tf(candles):
         return "RANGE"
 
 
-# ⭐ v27 CHANGED: add FAST_TREND dispatch
 def run_strategy(name, h1, m15, m5, direction):
-    if name == "TREND_FOLLOWING":
-        return detect_trend_following(h1, m15, m5, direction)
-    if name == "PULLBACK":
-        return detect_pullback(h1, m15, m5, direction)
-    if name == "BREAKOUT":
-        return detect_breakout(h1, m15, m5, direction)
-    if name == "REVERSAL":
-        return detect_reversal(h1, m15, m5, direction)
-    if name == "RANGE_TRADING":
-        return detect_range_trading(h1, m15, m5, direction)
-    if name == "BB_REVERSION":
-        return detect_bb_reversion(h1, m15, m5, direction)
-    if name == "FAST_TREND":
-        return detect_fast_trend(h1, m15, m5, direction)
+    if name == "TREND_FOLLOWING": return detect_trend_following(h1, m15, m5, direction)
+    if name == "PULLBACK": return detect_pullback(h1, m15, m5, direction)
+    if name == "BREAKOUT": return detect_breakout(h1, m15, m5, direction)
+    if name == "REVERSAL": return detect_reversal(h1, m15, m5, direction)
+    if name == "RANGE_TRADING": return detect_range_trading(h1, m15, m5, direction)
+    if name == "BB_REVERSION": return detect_bb_reversion(h1, m15, m5, direction)
+    if name == "FAST_TREND": return detect_fast_trend(h1, m15, m5, direction)
+    if name == "SR_BREAKOUT": return detect_sr_breakout(h1, m15, m5, direction)
+    if name == "SR_REJECTION": return detect_sr_rejection(h1, m15, m5, direction)
     return {"valid": False, "reason": "UNKNOWN_STRATEGY"}
 
 
 # ============================================================
-# MAIN ENGINE (v27 - adds FAST_TREND)
+# MAIN ENGINE (v28 - adds SR_BREAKOUT + SR_REJECTION)
 # ============================================================
 
 def generate_signal(daily, h4, h1, m15, m5,
@@ -1851,10 +1831,8 @@ def generate_signal(daily, h4, h1, m15, m5,
     m15c = closed(m15)
     m5c = closed(m5)
     if btc_context is None:
-        btc_context = {
-            "daily": "RANGE", "h4": "RANGE", "h1": "RANGE", "m15": "RANGE",
-            "adx_h1": 0.0, "adx_h4": 0.0, "adx_daily": 0.0, "adx_m15": 0.0,
-        }
+        btc_context = {"daily": "RANGE", "h4": "RANGE", "h1": "RANGE", "m15": "RANGE",
+                       "adx_h1": 0.0, "adx_h4": 0.0, "adx_daily": 0.0, "adx_m15": 0.0}
     if min(len(d), len(h4c), len(h1c), len(m15c), len(m5c)) < 50:
         return no_trade("INSUFFICIENT_DATA", btc=btc_context)
 
@@ -1868,56 +1846,50 @@ def generate_signal(daily, h4, h1, m15, m5,
     h4_adx = adx(h4c)
     vol = volume_spike(m15c, 1.50, 20)
 
-    # ⭐ v27 CHANGED: add FAST_TREND to both regimes
+    # ⭐ v28: add SR strategies to both regimes
     if adx1 < 22:
-        strategy_names = ["BB_REVERSION", "RANGE_TRADING", "REVERSAL", "FAST_TREND"]
+        strategy_names = ["BB_REVERSION", "RANGE_TRADING", "REVERSAL",
+                          "FAST_TREND", "SR_REJECTION", "SR_BREAKOUT"]
         logger.info("REGIME_SWITCH | MARKET | RANGING (ADX=%.1f)", adx1)
     else:
-        strategy_names = ["BREAKOUT", "REVERSAL", "FAST_TREND"]
+        strategy_names = ["BREAKOUT", "REVERSAL", "FAST_TREND",
+                          "SR_BREAKOUT", "SR_REJECTION"]
         logger.info("REGIME_SWITCH | MARKET | TRENDING (ADX=%.1f)", adx1)
 
     diagnostics = {}
-    metrics = {
-        "15m_rsi": rsi15, "adx_1h": adx1, "adx_15m": adx15,
-        "mtf_confirmation": False, "volume_spike": bool(vol),
-        "confirmation": False,
-    }
+    metrics = {"15m_rsi": rsi15, "adx_1h": adx1, "adx_15m": adx15,
+               "mtf_confirmation": False, "volume_spike": bool(vol),
+               "confirmation": False}
     strategy_results = []
 
-    for strategy_name in strategy_names:
-        best_result = None
-        best_direction = None
-        direction_results = {}
+    for sn in strategy_names:
+        best = None
+        best_dir = None
+        dir_results = {}
         for direction in ("LONG", "SHORT"):
             try:
-                result = run_strategy(strategy_name, h1c, m15c, m5c, direction)
+                r = run_strategy(sn, h1c, m15c, m5c, direction)
             except Exception as exc:
-                logger.exception("Strategy %s error", strategy_name)
-                result = {"valid": False, "reason": f"ERROR_{type(exc).__name__}"}
-            
-            if result.get("valid") and not context_allows(
-                strategy_name, daily_dir, h4_dir, direction, h4_adx
-            ):
-                result["_htf_blocked"] = True
-            
-            direction_results[direction] = result
-
-            if result.get("valid") and not result.get("_htf_blocked"):
-                if best_result is None or result.get("score", 0) > best_result.get("score", 0):
-                    best_result = result
-                    best_direction = direction
-                    
-        if best_result is not None:
-            diagnostics[strategy_name] = "VALID"
-            strategy_results.append((strategy_name, best_direction, best_result))
+                logger.exception("Strategy %s error", sn)
+                r = {"valid": False, "reason": f"ERROR_{type(exc).__name__}"}
+            if r.get("valid") and not context_allows(sn, daily_dir, h4_dir, direction, h4_adx):
+                r["_htf_blocked"] = True
+            dir_results[direction] = r
+            if r.get("valid") and not r.get("_htf_blocked"):
+                if best is None or r.get("score", 0) > best.get("score", 0):
+                    best = r
+                    best_dir = direction
+        if best is not None:
+            diagnostics[sn] = "VALID"
+            strategy_results.append((sn, best_dir, best))
         else:
             reasons = []
-            for direction, res in direction_results.items():
-                r = res.get("reason", "UNKNOWN")
+            for dirn, res in dir_results.items():
+                rr = res.get("reason", "UNKNOWN")
                 if res.get("_htf_blocked"):
-                    r = f"{r}|HTF_CONTEXT"
-                reasons.append(f"{direction}:{r}")
-            diagnostics[strategy_name] = "FAIL:" + "|".join(reasons)
+                    rr = f"{rr}|HTF_CONTEXT"
+                reasons.append(f"{dirn}:{rr}")
+            diagnostics[sn] = "FAIL:" + "|".join(reasons)
 
     diag_dir = None
     if strategy_results:
@@ -1929,109 +1901,92 @@ def generate_signal(daily, h4, h1, m15, m5,
     if diag_dir:
         metrics["mtf_confirmation"] = bool(_mtf_basic(m15c, diag_dir))
         metrics["confirmation"] = bool(entry_trigger_5m(m5c, diag_dir))
-        
-    if not strategy_results:
-        return no_trade("NO_VALID_STRATEGY", daily_dir, h4_dir,
-                        h1_dir, None, diagnostics, metrics, btc=btc_context)
 
-    # ⭐ v27 CHANGED: add FAST_TREND priority
-    priority = {
-        "BREAKOUT": 6,
-        "BB_REVERSION": 5,
-        "FAST_TREND": 4,
-        "RANGE_TRADING": 3,
-        "REVERSAL": 2,
-    }
+    if not strategy_results:
+        return no_trade("NO_VALID_STRATEGY", daily_dir, h4_dir, h1_dir,
+                        None, diagnostics, metrics, btc=btc_context)
+
+    # ⭐ v28 priority: SR_BREAKOUT highest
+    priority = {"SR_BREAKOUT": 7, "BREAKOUT": 6, "SR_REJECTION": 5,
+                "BB_REVERSION": 5, "FAST_TREND": 4, "RANGE_TRADING": 3, "REVERSAL": 2}
     high_candidates = []
     rejection_reasons = []
 
-    for strategy, direction, candidate in strategy_results:
+    for sn, direction, candidate in strategy_results:
         score = int(candidate.get("score", 0))
         expected = "BULLISH" if direction == "LONG" else "BEARISH"
-        same_dir = sum(
-            1 for name, od, _ in strategy_results
-            if od == direction and name != strategy
-        )
-        if same_dir >= 1:
-            score += 2
-        if daily_dir == expected:
-            score += 2
-        if h4_dir == expected:
-            score += 1
-        elif h4_dir == "RANGE":
-            score += 1
-        cand_metrics = dict(metrics)
-        cand_metrics["mtf_confirmation"] = bool(_mtf_basic(m15c, direction))
-        cand_metrics["confirmation"] = bool(entry_trigger_5m(m5c, direction))
+        same_dir = sum(1 for n, od, _ in strategy_results if od == direction and n != sn)
+        if same_dir >= 1: score += 2
+        if daily_dir == expected: score += 2
+        if h4_dir == expected: score += 1
+        elif h4_dir == "RANGE": score += 1
+        cm = dict(metrics)
+        cm["mtf_confirmation"] = bool(_mtf_basic(m15c, direction))
+        cm["confirmation"] = bool(entry_trigger_5m(m5c, direction))
 
-        if strategy == "BREAKOUT":
+        if sn == "BREAKOUT":
             if direction == "LONG" and rsi15 >= 72:
-                diagnostics[strategy] = "HIGH_FAIL:RSI_TOO_EXTENDED"
+                diagnostics[sn] = "HIGH_FAIL:RSI_TOO_EXTENDED"
                 rejection_reasons.append("RSI_TOO_EXTENDED")
                 continue
             if direction == "SHORT" and rsi15 <= 28:
-                diagnostics[strategy] = "HIGH_FAIL:RSI_TOO_EXTENDED"
+                diagnostics[sn] = "HIGH_FAIL:RSI_TOO_EXTENDED"
                 rejection_reasons.append("RSI_TOO_EXTENDED")
                 continue
 
-        if strategy == "BREAKOUT":
-            high = (score >= 9 and cand_metrics["confirmation"]
-                    and vol and adx1 >= 22)
-        elif strategy == "REVERSAL":
-            high = (score >= 9 and cand_metrics["confirmation"]
-                    and structure_shift_5m(m5c, direction))
-        elif strategy == "RANGE_TRADING":
-            high = score >= 8 and cand_metrics["confirmation"]
-        elif strategy == "BB_REVERSION":
-            high = score >= 8 and cand_metrics["confirmation"]
-        # ⭐ v27 NEW: FAST_TREND HIGH check
-        elif strategy == "FAST_TREND":
+        if sn == "BREAKOUT":
+            high = score >= 9 and cm["confirmation"] and vol and adx1 >= 22
+        elif sn == "REVERSAL":
+            high = score >= 9 and cm["confirmation"] and structure_shift_5m(m5c, direction)
+        elif sn == "RANGE_TRADING":
+            high = score >= 8 and cm["confirmation"]
+        elif sn == "BB_REVERSION":
+            high = score >= 8 and cm["confirmation"]
+        elif sn == "FAST_TREND":
             high = score >= 10 and _mtf_basic(m15c, direction)
+        # ⭐ v28: SR strategies HIGH check
+        elif sn == "SR_BREAKOUT":
+            high = score >= 9 and cm["confirmation"] and _mtf_basic(m15c, direction)
+        elif sn == "SR_REJECTION":
+            high = score >= 9 and cm["confirmation"]
         else:
             high = False
 
         if not high:
             failed = []
-            min_score = {
-                "BREAKOUT": 9, "REVERSAL": 9,
-                "RANGE_TRADING": 8, "BB_REVERSION": 8,
-                "FAST_TREND": 10,
-            }.get(strategy, 999)
-            if score < min_score:
-                failed.append(f"SCORE={score}<{min_score}")
-            if not cand_metrics["confirmation"]:
-                failed.append("NO_5M_CONFIRMATION")
-            if strategy == "BREAKOUT":
-                if not vol:
-                    failed.append("NO_VOLUME_SPIKE")
-                if adx1 < 22:
-                    failed.append(f"ADX1_LOW={adx1}")
-            elif strategy == "REVERSAL":
+            min_score = {"BREAKOUT": 9, "REVERSAL": 9, "RANGE_TRADING": 8,
+                         "BB_REVERSION": 8, "FAST_TREND": 10,
+                         "SR_BREAKOUT": 9, "SR_REJECTION": 9}.get(sn, 999)
+            if score < min_score: failed.append(f"SCORE={score}<{min_score}")
+            if not cm["confirmation"]: failed.append("NO_5M_CONFIRMATION")
+            if sn == "BREAKOUT":
+                if not vol: failed.append("NO_VOLUME_SPIKE")
+                if adx1 < 22: failed.append(f"ADX1_LOW={adx1}")
+            elif sn == "REVERSAL":
                 if not structure_shift_5m(m5c, direction):
                     failed.append("NO_5M_STRUCTURE_SHIFT")
-            # ⭐ v27 NEW: FAST_TREND failed checks
-            elif strategy == "FAST_TREND":
+            elif sn == "FAST_TREND":
                 if not _mtf_basic(m15c, direction):
                     failed.append("NO_15M_CONFIRMATION")
-            diagnostics[strategy] = (
-                "HIGH_FAIL:" + "|".join(failed) if failed else "HIGH_FAIL:UNKNOWN"
-            )
+            elif sn == "SR_BREAKOUT":
+                if not _mtf_basic(m15c, direction):
+                    failed.append("NO_15M_CONFIRMATION")
+            diagnostics[sn] = "HIGH_FAIL:" + "|".join(failed) if failed else "HIGH_FAIL:UNKNOWN"
             rejection_reasons.append("SIGNAL_QUALITY_TOO_LOW")
             continue
 
-        levels = calculate_trade_levels(h1c, m5c, direction, strategy)
+        levels = calculate_trade_levels(h1c, m5c, direction, sn)
         if not levels:
-            diagnostics[strategy] = "HIGH_FAIL:INVALID_TRADE_LEVELS"
+            diagnostics[sn] = "HIGH_FAIL:INVALID_TRADE_LEVELS"
             rejection_reasons.append("INVALID_TRADE_LEVELS")
             continue
         if not target_reachable(levels, h1c, direction):
-            diagnostics[strategy] = "HIGH_FAIL:TP1_BLOCKED"
+            diagnostics[sn] = "HIGH_FAIL:TP1_BLOCKED"
             rejection_reasons.append("TP1_BLOCKED")
             continue
         high_candidates.append({
-            "strategy": strategy, "direction": direction, "score": score,
-            "levels": levels, "metrics": cand_metrics,
-            "priority": priority.get(strategy, 0),
+            "strategy": sn, "direction": direction, "score": score,
+            "levels": levels, "metrics": cm, "priority": priority.get(sn, 0),
         })
 
     if not high_candidates:
@@ -2046,42 +2001,30 @@ def generate_signal(daily, h4, h1, m15, m5,
         return no_trade(final_reason, daily_dir, h4_dir, h1_dir,
                         None, diagnostics, metrics, btc=btc_context)
 
-    high_candidates.sort(
-        key=lambda item: (item["score"], item["priority"]),
-        reverse=True,
-    )
+    high_candidates.sort(key=lambda x: (x["score"], x["priority"]), reverse=True)
     selected = high_candidates[0]
 
     btc_status = btc_filter(selected["direction"], btc_context, selected["strategy"])
-
     if btc_status == "BLOCK":
-        for s_name in list(diagnostics.keys()):
-            if diagnostics[s_name] == "VALID":
-                diagnostics[s_name] = "HIGH_FAIL:BTC_OPPOSES"
-        return no_trade(
-            "BTC_OPPOSES",
-            daily_dir, h4_dir, h1_dir,
-            selected["direction"], diagnostics, metrics,
-            btc=btc_context,
-        )
+        for s in list(diagnostics.keys()):
+            if diagnostics[s] == "VALID":
+                diagnostics[s] = "HIGH_FAIL:BTC_OPPOSES"
+        return no_trade("BTC_OPPOSES", daily_dir, h4_dir, h1_dir,
+                        selected["direction"], diagnostics, metrics, btc=btc_context)
+
     expected_dir = "BULLISH" if selected["direction"] == "LONG" else "BEARISH"
     btc_h4 = btc_context.get("h4", "RANGE")
-    btc_relation = (
-        "ALIGNED" if btc_h4 == expected_dir
-        else "OPPOSED" if btc_h4 in ("BULLISH", "BEARISH")
-        else "NEUTRAL"
-    )
+    btc_relation = ("ALIGNED" if btc_h4 == expected_dir
+                    else "OPPOSED" if btc_h4 in ("BULLISH", "BEARISH")
+                    else "NEUTRAL")
     return {
         "signal": selected["direction"],
         "direction": selected["direction"],
-        # ⭐ v27 CHANGED: cap score at 12
         "score": min(selected["score"], 12),
         "quality": "HIGH",
         "reason": f"VALID_{selected['strategy']}",
-        "strategies": [
-            item["strategy"] for item in high_candidates
-            if item["direction"] == selected["direction"]
-        ],
+        "strategies": [i["strategy"] for i in high_candidates
+                       if i["direction"] == selected["direction"]],
         "strategy": selected["strategy"],
         "strategy_diagnostics": diagnostics,
         "daily": daily_dir, "4h": h4_dir, "1h": h1_dir,
@@ -2096,10 +2039,6 @@ def generate_signal(daily, h4, h1, m15, m5,
         **selected["levels"],
     }
 
-
-# ============================================================
-# COMPATIBILITY
-# ============================================================
 
 analyze = generate_signal
 get_signal = generate_signal
