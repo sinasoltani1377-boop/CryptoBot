@@ -1910,12 +1910,12 @@ def main():
     logger.info("Automatic signal scanner scheduled every %s seconds", AUTO_INTERVAL)
 
     application.job_queue.run_repeating(
-        check_btc_trend_changes,
-        interval=300,
-        first=120,
+        check_btc_sr_alerts,
+        interval=180,  # هر 3 دقیقه
+        first=180,
         job_kwargs={"max_instances": 1, "coalesce": True},
     )
-    logger.info("BTC trend change alert scheduled every 300 seconds")
+    logger.info("BTC S/R proximity alert scheduled every 180 seconds")
 
     if TIMEOUT_ENABLED:
         application.job_queue.run_repeating(
