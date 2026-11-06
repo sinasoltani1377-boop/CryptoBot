@@ -561,7 +561,7 @@ def log_strategy_details(symbol, result):
     if isinstance(diagnostics, dict):
         parts = []
         for strategy in ("TREND_FOLLOWING", "PULLBACK", "BREAKOUT", 
-                         "REVERSAL", "RANGE_TRADING", "BB_REVERSION", "FAST_TREND"):
+                         "REVERSAL", "RANGE_TRADING", "BB_REVERSION", "FAST_TREND", "SR_BREAKOUT", "SR_REJECTION"):
             value = diagnostics.get(strategy)
             if value is None:
                 parts.append(f"{strategy}=NO_DATA")
@@ -1373,8 +1373,7 @@ async def backtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=update.effective_chat.id,
                 text=f"❌ خطای داخلی در بک‌تست: {str(e)}"
             )
-except Exception:
-    logger.exception("BTC trend change check error")
+
 # ============================================================
 # SIGNAL TIMEOUT CHECKER
 # ============================================================
@@ -1420,7 +1419,111 @@ async def check_signal_timeouts(context: ContextTypes.DEFAULT_TYPE):
     try:
         open_trades = await asyncio.to_thread(get_open_trades)
     except Exception:
-        logger.e
+        logger.exception("TIMEOUT | failed to get open trades")
+        return
+
+    if not open_trades:
+        return
+
+    chat_ids = context.application.bot_data.get("chat_ids", set())
+    if not chat_ids:
+        return
+
+    closed_count = 0
+
+    for trade in open_trades:
+        try:
+            trade_id = trade.get("id")
+            if trade_id is None:
+                continue
+
+            symbol = trade.get("symbol", "UNKNOWN")
+            direction = str(trade.get("direction", "")).upper()
+            if direction not in ("LONG", "SHORT"):
+                continue
+
+            if _trade_tp1_hit(trade) and not TIMEOUT_CLOSE_IF_TP1_HIT:
+                continue
+
+            age_hours = _trade_age_hours(trade)
+            if age_hours is None or age_hours < SIGNAL_TIMEOUT_HOURS:
+                continue
+
+            current_price = await asyncio.to_thread(get_price, symbol)
+            if current_price is None:
+                logger.warning("TIMEOUT | %s | price unavailable", symbol)
+                continue
+
+            entry_price = safe_number(trade.get("entry"))
+            if TIMEOUT_CLOSE_AT == "ENTRY" and entry_price is not None:
+                close_price = entry_price
+            else:
+                close_price = current_price
+
+            try:
+                closed = await asyncio.to_thread(
+                    force_close_trade, trade_id, close_price, "TIMEOUT"
+                )
+            except Exception:
+                logger.exception("TIMEOUT | force_close_trade failed for %s", trade_id)
+                continue
+
+            if not closed:
+                logger.warning("TIMEOUT | %s | tracker refused to close", symbol)
+                continue
+
+            closed_count += 1
+            logger.warning(
+                "TIMEOUT_CLOSE | %s | %s | age=%.1fh | entry=%s | close=%s",
+                symbol, direction, age_hours, entry_price, close_price,
+            )
+
+            margin = safe_number(trade.get("margin"), DEFAULT_MARGIN_USDT)
+            leverage = safe_number(trade.get("leverage"), DEFAULT_LEVERAGE)
+            strategy = trade.get("strategy", "UNKNOWN")
+            score = trade.get("score", "—")
+
+            pnl_text = "N/A"
+            roi_text = "N/A"
+            if entry_price and close_price and margin and leverage:
+                if direction == "LONG":
+                    price_pct = (close_price - entry_price) / entry_price
+                else:
+                    price_pct = (entry_price - close_price) / entry_price
+                roi_pct = price_pct * leverage * 100
+                pnl = margin * price_pct * leverage
+                pnl_text = f"{pnl:+.4f} USDT"
+                roi_text = f"{roi_pct:+.2f}%"
+
+            message = (
+                f"⌛ <b>بستن خودکار سیگنال (تایم‌اوت)</b>\n\n"
+                f"🪙 <b>{safe_text(symbol)}</b>\n"
+                f"📈 Direction: <b>{safe_text(direction)}</b>\n"
+                f"🧠 Strategy: <b>{safe_text(strategy)}</b>\n"
+                f"⭐ Score: {safe_text(score)}\n\n"
+                f"⏱ مدت باز بودن: <b>{age_hours:.1f} ساعت</b>\n"
+                f"📌 Entry: {display_number(entry_price)}\n"
+                f"💰 قیمت بستن: <b>{display_number(close_price)}</b>\n\n"
+                f"💵 PnL: <b>{pnl_text}</b>\n"
+                f"📊 ROI: <b>{roi_text}</b>\n\n"
+                f"📝 دلیل: به TP1 نرسید و از تایم‌اوت "
+                f"<b>{SIGNAL_TIMEOUT_HOURS:.0f} ساعته</b> گذشت."
+            )
+
+            for chat_id in list(chat_ids):
+                try:
+                    await context.bot.send_message(
+                        chat_id=chat_id, text=message, parse_mode="HTML"
+                    )
+                except Exception:
+                    logger.exception("TIMEOUT | send error for chat %s", chat_id)
+
+        except Exception:
+            logger.exception("TIMEOUT | error processing trade %s", trade.get("id"))
+
+    if closed_count > 0:
+        logger.info("TIMEOUT | closed %d trade(s) due to timeout", closed_count)
+
 # ============================================================
 # BTC TREND CHANGE ALERTS
 # ============================================================
@@ -1621,6 +1724,7 @@ async def check_btc_sr_alerts(context: ContextTypes.DEFAULT_TYPE):
 
     except Exception:
         logger.exception("BTC SR alert check error")
+
 # ============================================================
 # /OPEN — list open trades
 # ============================================================
@@ -1804,6 +1908,14 @@ def main():
         job_kwargs={"max_instances": 1, "coalesce": True},
     )
     logger.info("Automatic signal scanner scheduled every %s seconds", AUTO_INTERVAL)
+
+    application.job_queue.run_repeating(
+        check_btc_trend_changes,
+        interval=300,
+        first=120,
+        job_kwargs={"max_instances": 1, "coalesce": True},
+    )
+    logger.info("BTC trend change alert scheduled every 300 seconds")
 
     application.job_queue.run_repeating(
         check_btc_sr_alerts,
