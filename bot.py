@@ -16,21 +16,15 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 from analysis import generate_signal
 from btc_context import fetch_btc_context
 from watchlist import get_symbols
+from market import get_futures_symbols
 from tracker import (
     register_signal,
     check_all_trades,
     get_open_trades,
-    get_all_trades,
     get_stats,
     get_stats_by_strategy,
     mark_trend_alert,
     force_close_trade,
-    update_trade_meta,
-)
-from toobit_executor import (
-    open_position as toobit_open,
-    close_fraction as toobit_close,
-    is_enabled as toobit_enabled,
 )
 
 # ============================================================
@@ -41,15 +35,20 @@ TOKEN = os.getenv("BOT_TOKEN")
 
 TOOBIT_KLINES_URL = "https://api.toobit.com/quote/v1/klines"
 TOOBIT_TICKER_URL = "https://api.toobit.com/quote/v1/contract/ticker/price"
+TOOBIT_TICKER_24H_URL = "https://api.toobit.com/quote/v1/contract/ticker/24hr"
 
 AUTO_INTERVAL = 300
 TRACKER_INTERVAL = 30
+
 NEWS_BLOCK_MINUTES = 120
 NEWS_FETCH_LIMIT = 50
 
 DEFAULT_LEVERAGE = 20
-DEFAULT_MARGIN_USDT = 1.0   # 1 dollar
+DEFAULT_MARGIN_USDT = 10.0
 
+# ============================================================
+# TIMEOUT CONFIG
+# ============================================================
 SIGNAL_TIMEOUT_HOURS     = float(os.getenv("SIGNAL_TIMEOUT_HOURS", "48"))
 TIMEOUT_CHECK_INTERVAL   = int(os.getenv("TIMEOUT_CHECK_INTERVAL", "600"))
 TIMEOUT_ENABLED          = os.getenv("TIMEOUT_ENABLED", "1") == "1"
@@ -57,6 +56,10 @@ TIMEOUT_CLOSE_IF_TP1_HIT = os.getenv("TIMEOUT_CLOSE_IF_TP1_HIT", "0") == "1"
 TIMEOUT_CLOSE_AT         = os.getenv("TIMEOUT_CLOSE_AT", "MARKET").upper()
 
 _scan_lock = asyncio.Lock()
+
+# ============================================================
+# LOGGING
+# ============================================================
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -97,8 +100,19 @@ def safe_list(value):
         return []
     return [value]
 
+# ============================================================
+# SYMBOLS
+# ============================================================
+
 SYMBOLS = get_symbols()
-INTERVALS = {"1d": "1d", "4h": "4h", "1h": "1h", "15m": "15m", "5m": "5m"}
+
+INTERVALS = {
+    "1d": "1d",
+    "4h": "4h",
+    "1h": "1h",
+    "15m": "15m",
+    "5m": "5m",
+}
 
 # ============================================================
 # CANDLE NORMALIZATION
@@ -152,8 +166,7 @@ def normalize_candles(data):
         required = ("open", "high", "low", "close")
         if any(candle.get(key) is None for key in required):
             continue
-        if (candle["high"] < candle["low"] or candle["high"] <= 0
-                or candle["low"] <= 0 or candle["close"] <= 0):
+        if (candle["high"] < candle["low"] or candle["high"] <= 0 or candle["low"] <= 0 or candle["close"] <= 0):
             continue
         candles.append(candle)
     return candles
@@ -185,20 +198,28 @@ def get_market_data(symbol):
     h1 = get_klines(symbol, INTERVALS["1h"], 200)
     m15 = get_klines(symbol, INTERVALS["15m"], 200)
     m5 = get_klines(symbol, INTERVALS["5m"], 200)
+
     if not all((daily, h4, h1, m15, m5)):
         logger.warning("MARKET_DATA_INCOMPLETE | %s", symbol)
         return None
+
     return {"1d": daily, "4h": h4, "1h": h1, "15m": m15, "5m": m5}
+
+# ============================================================
+# PRICE
+# ============================================================
 
 def get_price(symbol):
     try:
         response = requests.get(TOOBIT_TICKER_URL, params={"symbol": symbol}, timeout=10)
         response.raise_for_status()
         data = response.json()
+
         if isinstance(data, dict):
             price_value = data.get("p") or data.get("price") or data.get("lastPrice") or data.get("last")
             if price_value is not None:
                 return float(price_value)
+
         if isinstance(data, list):
             for item in data:
                 if not isinstance(item, dict):
@@ -209,6 +230,7 @@ def get_price(symbol):
                 price_value = item.get("p") or item.get("price") or item.get("lastPrice") or item.get("last")
                 if price_value is not None:
                     return float(price_value)
+
         logger.warning("PRICE API | %s | Price not found", symbol)
         return None
     except Exception:
@@ -220,38 +242,50 @@ def get_price(symbol):
 # ============================================================
 
 def calculate_trade_roi(direction, entry, target, leverage=DEFAULT_LEVERAGE, margin=DEFAULT_MARGIN_USDT):
-    entry = safe_number(entry); target = safe_number(target)
-    leverage = safe_number(leverage); margin = safe_number(margin)
-    if (entry is None or target is None or leverage is None or margin is None
-            or entry <= 0 or target <= 0 or leverage <= 0 or margin <= 0):
+    entry = safe_number(entry)
+    target = safe_number(target)
+    leverage = safe_number(leverage)
+    margin = safe_number(margin)
+
+    if (entry is None or target is None or leverage is None or margin is None or entry <= 0 or target <= 0 or leverage <= 0 or margin <= 0):
         return None
+
     direction = str(direction).upper()
+
     if direction == "LONG":
         price_change_pct = ((target - entry) / entry) * 100
     elif direction == "SHORT":
         price_change_pct = ((entry - target) / entry) * 100
     else:
         return None
+
     roi_pct = price_change_pct * leverage
     pnl_usdt = margin * roi_pct / 100
+
     return {"price_change_pct": price_change_pct, "roi_pct": roi_pct, "pnl_usdt": pnl_usdt}
 
 def add_signal_context(result):
     if not isinstance(result, dict):
         return result
+
     result["leverage"] = DEFAULT_LEVERAGE
     result["margin_usdt"] = DEFAULT_MARGIN_USDT
-    entry = result.get("entry"); direction = result.get("direction")
+
+    entry = result.get("entry")
+    direction = result.get("direction")
     roi = {}
+
     for label in ("tp1", "tp2", "tp3", "sl"):
         roi[label] = calculate_trade_roi(direction, entry, result.get(label))
+
     result["leverage_roi"] = roi
     return result
 
 def roi_line(label, roi_data):
     if not isinstance(roi_data, dict):
         return f"{label}: N/A"
-    roi = safe_number(roi_data.get("roi_pct")); pnl = safe_number(roi_data.get("pnl_usdt"))
+    roi = safe_number(roi_data.get("roi_pct"))
+    pnl = safe_number(roi_data.get("pnl_usdt"))
     if roi is None or pnl is None:
         return f"{label}: N/A"
     return f"{label}: {roi:+.2f}% ({pnl:+.2f} USDT)"
@@ -269,27 +303,31 @@ BEARISH_NEWS_TERMS = (
     "inflation accelerates", "inflation hotter", "ppi jumps", "cpi jumps", "producer prices surge",
     "inflation surges",
 )
+
 BULLISH_NEWS_TERMS = (
     "market-wide rally", "crypto market surges", "bitcoin surges", "bitcoin rallies",
     "lower than expected inflation", "cooler than expected", "below expectations",
     "below forecast", "inflation cools", "inflation slows", "unexpected rate cut",
     "fed cuts rates", "spot bitcoin etf approved", "spot ethereum etf approved", "sec approves spot etf",
 )
-MACRO_TERMS = ("ppi", "cpi", "inflation", "producer price", "consumer price", "federal reserve",
-               "federal funds rate", "interest rate", "fed decision", "rate decision")
+
+MACRO_TERMS = ("ppi", "cpi", "inflation", "producer price", "consumer price", "federal reserve", "federal funds rate", "interest rate", "fed decision", "rate decision")
+
 MACRO_SURPRISE_TERMS = (
     "higher than expected", "hotter than expected", "above expectations", "above forecast",
     "unexpectedly high", "inflation accelerates", "inflation hotter", "ppi jumps", "cpi jumps",
     "producer prices surge", "lower than expected inflation", "cooler than expected",
     "below expectations", "below forecast", "inflation cools", "inflation slows", "unexpected rate cut",
 )
+
 CRITICAL_EVENT_TERMS = (
     "exchange hacked", "exchange hack", "major crypto hack", "security breach", "stablecoin depeg",
     "stablecoin collapse", "liquidation cascade", "flash crash", "market crash", "crypto crash",
     "bitcoin plunges", "bitcoin crashes", "bankruptcy", "insolvency",
 )
-BULLISH_CRITICAL_TERMS = ("spot bitcoin etf approved", "spot ethereum etf approved",
-                          "sec approves spot etf", "unexpected rate cut", "fed cuts rates")
+
+BULLISH_CRITICAL_TERMS = ("spot bitcoin etf approved", "spot ethereum etf approved", "sec approves spot etf", "unexpected rate cut", "fed cuts rates")
+
 BEARISH_CRITICAL_TERMS = (
     "etf rejected", "etf rejection", "sec rejects", "market crash", "crypto crash", "bitcoin plunges",
     "bitcoin crashes", "liquidation cascade", "flash crash", "stablecoin depeg", "stablecoin collapse",
@@ -339,7 +377,9 @@ def news_direction(text):
 def is_critical_news(text, importance):
     if contains_any(text, CRITICAL_EVENT_TERMS):
         return True
-    if contains_any(text, MACRO_TERMS) and contains_any(text, MACRO_SURPRISE_TERMS):
+    macro_news = contains_any(text, MACRO_TERMS)
+    macro_surprise = contains_any(text, MACRO_SURPRISE_TERMS)
+    if macro_news and macro_surprise:
         return True
     if contains_any(text, BULLISH_CRITICAL_TERMS):
         return True
@@ -366,7 +406,9 @@ async def check_critical_news(symbol, direction):
     try:
         articles = await get_latest_news(limit=NEWS_FETCH_LIMIT)
         if not articles:
+            logger.warning("NEWS_FILTER_UNAVAILABLE | %s | No articles", symbol)
             return False, "⚠️ اخبار در دسترس نیست؛ فیلتر خبری بررسی کامل انجام نداد."
+        
         now = datetime.now(timezone.utc)
         for article in articles:
             if not isinstance(article, dict):
@@ -377,21 +419,31 @@ async def check_critical_news(symbol, direction):
             age_minutes = (now - published_at).total_seconds() / 60
             if age_minutes < 0 or age_minutes > NEWS_BLOCK_MINUTES:
                 continue
+            
             text = article_text(article)
             importance = str(article.get("importance") or "NORMAL").upper()
+            
             if not is_critical_news(text, importance):
                 continue
             if not news_applies_to_symbol(article, symbol, text):
                 continue
+            
             direction_of_news = news_direction(text)
             if direction_of_news is None:
                 continue
-            conflict = ((direction == "LONG" and direction_of_news == "BEARISH")
-                        or (direction == "SHORT" and direction_of_news == "BULLISH"))
+            
+            conflict = (direction == "LONG" and direction_of_news == "BEARISH") or (direction == "SHORT" and direction_of_news == "BULLISH")
             if not conflict:
                 continue
+            
             title = str(article.get("title") or "Critical news")
-            return True, f"⛔ سیگنال به دلیل خبر بحرانی مسدود شد.\nجهت معامله: {direction}\nجهت خبر: {direction_of_news}\nخبر: {title}"
+            source = str(article.get("source") or "Unknown")
+            
+            logger.warning("SIGNAL_BLOCKED_BY_NEWS | %s | Direction=%s | NewsDirection=%s | Age=%.1f | Source=%s | Title=%s",
+                symbol, direction, direction_of_news, age_minutes, source, title)
+            return True, f"⛔ سیگنال به دلیل خبر بحرانی متناقض مسدود شد.\nجهت معامله: {direction}\nجهت خبر: {direction_of_news}\nخبر: {title}"
+        
+        logger.info("NEWS_FILTER_PASS | %s | Direction=%s", symbol, direction)
         return False, "✅ خبر بحرانی متناقض شناسایی نشد."
     except Exception:
         logger.exception("NEWS_FILTER_ERROR | %s", symbol)
@@ -400,19 +452,33 @@ async def check_critical_news(symbol, direction):
 # ============================================================
 # TRACKER HELPERS
 # ============================================================
-
 def already_tracking(symbol, direction):
     try:
         open_trades = get_open_trades()
+        
         if len(open_trades) >= 40:
+            logger.warning(
+                "MAX_OPEN_TRADES_REACHED | %s | Existing=%d",
+                symbol, len(open_trades),
+            )
             return True
-        same_dir_count = sum(1 for t in open_trades if str(t.get("direction", "")).upper() == direction)
+        
+        same_dir_count = sum(
+            1 for t in open_trades
+            if str(t.get("direction", "")).upper() == direction
+        )
         if same_dir_count >= 2:
+            logger.warning(
+                "MAX_SAME_DIRECTION | %s | %s count=%d",
+                symbol, direction, same_dir_count,
+            )
             return True
+        
         for trade in open_trades:
-            if (trade.get("symbol") == symbol
-                    and str(trade.get("direction", "")).upper() == direction):
+            if (trade.get("symbol") == symbol and 
+                str(trade.get("direction", "")).upper() == direction):
                 return True
+        
         return False
     except Exception:
         logger.exception("Tracker duplicate-check error")
@@ -423,22 +489,40 @@ def is_valid_high_signal(result):
         return False
     if str(result.get("quality", "")).upper() != "HIGH":
         return False
+
     direction = str(result.get("direction") or "").upper()
     signal_value = str(result.get("signal") or "").upper()
     score = safe_number(result.get("score"))
+
     if direction not in ("LONG", "SHORT") or signal_value != direction:
         return False
+
     if score is None or score < 10:
         return False
+
     for key in ("entry", "sl", "tp1", "tp2", "tp3"):
         value = safe_number(result.get(key))
         if value is None or value <= 0:
+            logger.info("SIGNAL_REJECTED | Missing/invalid %s=%s", key, result.get(key))
             return False
-    entry = float(result["entry"]); sl = float(result["sl"])
-    tp1 = float(result["tp1"]); tp2 = float(result["tp2"]); tp3 = float(result["tp3"])
+
+    entry = float(result["entry"])
+    sl = float(result["sl"])
+    tp1 = float(result["tp1"])
+    tp2 = float(result["tp2"])
+    tp3 = float(result["tp3"])
+
     if direction == "LONG":
-        return sl < entry < tp1 <= tp2 <= tp3
-    return sl > entry > tp1 >= tp2 >= tp3
+        levels_valid = (sl < entry < tp1 <= tp2 <= tp3)
+    else:
+        levels_valid = (sl > entry > tp1 >= tp2 >= tp3)
+
+    if not levels_valid:
+        logger.warning("SIGNAL_REJECTED | Invalid level ordering | Direction=%s Entry=%s SL=%s TP1=%s TP2=%s TP3=%s",
+            direction, entry, sl, tp1, tp2, tp3)
+        return False
+
+    return True
 
 def register_high_signal(symbol, result):
     if not is_valid_high_signal(result):
@@ -456,30 +540,70 @@ def register_high_signal(symbol, result):
     payload["margin"] = DEFAULT_MARGIN_USDT
     payload["margin_usdt"] = DEFAULT_MARGIN_USDT
 
-    extra = {}
-    if toobit_enabled():
-        ex = toobit_open(symbol, direction, result["entry"])
-        if not ex:
-            logger.warning("EXECUTOR | OPEN FAILED | %s | %s", symbol, direction)
-            return None
-        extra = {
-            "toobit_order_id": ex["order_id"],
-            "toobit_amount": ex["amount"],
-            "toobit_leverage": ex["leverage"],
-            "toobit_margin": ex["margin_usdt"],
-            "toobit_closed_fraction": 0.0,
-        }
-        logger.info("EXECUTOR | OPENED | %s | %s | amt=%s", symbol, direction, ex["amount"])
-
     try:
-        registered = register_signal(payload, extra=extra)
+        registered = register_signal(payload)
         if not registered:
-            logger.error("TRACKER REGISTRATION FAILED AFTER OPEN | %s | %s", symbol, direction)
+            logger.warning("TRACKER | REGISTRATION FAILED | %s | %s", symbol, direction)
             return None
+        logger.info("TRACKER | REGISTERED | %s | %s | Score=%s | Entry=%s | SL=%s | TP1=%s | TP2=%s | TP3=%s",
+            symbol, direction, result.get("score"), result.get("entry"), result.get("sl"), result.get("tp1"), result.get("tp2"), result.get("tp3"))
         return payload
     except Exception:
         logger.exception("TRACKER_REGISTER_ERROR | %s", symbol)
         return None
+
+# ============================================================
+# STRATEGY DIAGNOSTICS
+# ============================================================
+
+def log_strategy_details(symbol, result):
+    diagnostics = result.get("strategy_diagnostics")
+    if isinstance(diagnostics, dict):
+        parts = []
+        for strategy in ("TREND_FOLLOWING", "PULLBACK", "BREAKOUT", 
+                         "REVERSAL", "RANGE_TRADING", "BB_REVERSION", "FAST_TREND"):
+            value = diagnostics.get(strategy)
+            if value is None:
+                parts.append(f"{strategy}=NO_DATA")
+                continue
+            if isinstance(value, dict):
+                matched = value.get("matched")
+                reason = value.get("reason") or value.get("blocked_reason") or ""
+                status = "PASS" if matched is True else "FAIL"
+                if reason:
+                    status = f"{status}:{reason}"
+                parts.append(f"{strategy}={status}")
+            else:
+                parts.append(f"{strategy}={value}")
+        logger.info("STRATEGY_CHECK | %s | %s", symbol, " | ".join(parts))
+        return
+
+def log_signal_diagnostic(symbol, result):
+    if not isinstance(result, dict):
+        return
+    daily = result.get("daily", "UNKNOWN")
+    h4 = result.get("4h", "UNKNOWN")
+    h1 = result.get("1h", "UNKNOWN")
+    direction = result.get("direction", "UNKNOWN")
+    signal_value = result.get("signal", "UNKNOWN")
+    score = result.get("score", "UNKNOWN")
+    quality = result.get("quality", "UNKNOWN")
+    reason = result.get("reason") or result.get("blocked_reason") or "UNKNOWN"
+    strategies = result.get("strategy_matches") or result.get("strategies") or []
+    
+    if isinstance(strategies, (list, tuple, set)):
+        strategies_text = ", ".join(str(item) for item in strategies) if strategies else "NONE"
+    else:
+        strategies_text = str(strategies)
+        
+    logger.info("DIAGNOSTIC | %s | Daily=%s | 4H=%s | 1H=%s | Direction=%s | Signal=%s | Score=%s | Quality=%s | Reason=%s | Strategies=%s",
+        symbol, daily, h4, h1, direction, signal_value, score, quality, reason, strategies_text)
+    
+    rsi_15m = result.get("15m_rsi", result.get("rsi_15m"))
+    logger.info("FILTERS | %s | 15M_RSI=%s | ADX_1H=%s | ADX_15M=%s | MTF_15M=%s | VolumeSpike=%s | Confirmation=%s",
+        symbol, rsi_15m, result.get("adx_1h"), result.get("adx_15m"), result.get("mtf_confirmation", result.get("mtf_confirmed")), result.get("volume_spike"), result.get("confirmation"))
+    
+    log_strategy_details(symbol, result)
 
 # ============================================================
 # SIGNAL MESSAGE
@@ -493,18 +617,20 @@ def signal_text(symbol, result):
     strategy_text = ", ".join(str(item) for item in strategies) if strategies else "NONE"
     roi = result.get("leverage_roi") or {}
     news_note = result.get("_news_note", "بررسی نشده")
+
     btc_dir = result.get("btc_dir", "UNKNOWN")
     btc_relation = result.get("btc_relation", "NEUTRAL")
     btc_warning = result.get("btc_warning", False)
     btc_adx = result.get("btc_adx", 0.0)
+
     if btc_relation == "ALIGNED":
         alignment_text = "✅ هم‌جهت با روند بیت‌کوین"
     elif btc_relation == "OPPOSED":
         alignment_text = f"⚠️ خلاف جهت روند بیت‌کوین (ADX: {btc_adx})"
         if btc_warning:
-            alignment_text = "🚨 " + alignment_text
+            alignment_text = "🚨 " + alignment_text + " - احتیاط!"
     else:
-        alignment_text = "➖ روند بیت‌کوین خنثی"
+        alignment_text = "➖ روند بیت‌کوین خنثی یا ترکیبی"
 
     return (
         f"{emoji} <b>{safe_text(symbol)}</b>\n\n"
@@ -513,89 +639,151 @@ def signal_text(symbol, result):
         f"📊 Score: <b>{safe_text(result.get('score'))}</b>\n\n"
         f"📅 Daily: {safe_text(result.get('daily'))}\n"
         f"⏱ 4H: {safe_text(result.get('4h'))}\n"
-        f"🕐 1H: {safe_text(result.get('1h'))}\n\n"
-        f"₿ BTC: <b>{safe_text(btc_dir)}</b>\n{alignment_text}\n\n"
+        f"🕐 1H: {safe_text(result.get('1h'))}\n"
+        f"⏱ 15M RSI: {safe_text(result.get('15m_rsi', result.get('rsi_15m')))}\n"
+        f"📊 ADX 1H: {safe_text(result.get('adx_1h'))}\n"
+        f"📊 ADX 15M: {safe_text(result.get('adx_15m'))}\n"
+        f"✅ MTF 15M: {safe_text(result.get('mtf_confirmation', result.get('mtf_confirmed')))}\n\n"
+        f"₿ BTC Trend: <b>{safe_text(btc_dir)}</b>\n"
+        f"{alignment_text}\n\n"
         f"💰 Entry: <b>{display_number(result.get('entry'))}</b>\n"
         f"🛑 SL: <b>{display_number(result.get('sl'))}</b>\n"
         f"🎯 TP1: <b>{display_number(result.get('tp1'))}</b>\n"
         f"🎯 TP2: <b>{display_number(result.get('tp2'))}</b>\n"
         f"🎯 TP3: <b>{display_number(result.get('tp3'))}</b>\n\n"
+        f"📏 Risk: {safe_text(result.get('risk'))}\n"
         f"⚖️ RR: {safe_text(result.get('rr'))}\n\n"
         f"💵 Margin: {DEFAULT_MARGIN_USDT:.2f} USDT\n"
         f"⚡ Leverage: {DEFAULT_LEVERAGE}x\n"
-        f"📈 تخمین PnL:\n"
+        f"📈 تخمین سود/زیان ناخالص:\n"
         f"  {roi_line('TP1', roi.get('tp1'))}\n"
         f"  {roi_line('TP2', roi.get('tp2'))}\n"
         f"  {roi_line('TP3', roi.get('tp3'))}\n"
         f"  {roi_line('SL', roi.get('sl'))}\n\n"
         f"🧠 Strategy:\n<b>{safe_text(strategy_text)}</b>\n\n"
-        f"📰 News:\n{safe_text(news_note)}"
+        f"📝 Reason:\n{safe_text(result.get('reason', 'N/A'))}\n\n"
+        f"📰 News Filter:\n{safe_text(news_note)}\n\n"
+        f"⚠️ تخمین قبل از کارمزد و فاندینگ؛ سود واقعی ممکن است متفاوت باشد."
     )
 
 # ============================================================
-# SIGNAL PREPARATION
+# RAW ANALYSIS (With BTC Context)
 # ============================================================
 
 def analyze_symbol_raw(symbol, btc_context):
     market_data = get_market_data(symbol)
     if market_data is None:
         return None
+
     result = generate_signal(
-        market_data["1d"], market_data["4h"], market_data["1h"],
-        market_data["15m"], market_data["5m"], btc_context=btc_context
+        market_data["1d"],
+        market_data["4h"],
+        market_data["1h"],
+        market_data["15m"],
+        market_data["5m"],
+        btc_context=btc_context
     )
+    
     if not isinstance(result, dict):
+        logger.warning("ANALYSIS_INVALID_RESULT | %s", symbol)
         return None
     return result
+
+# ============================================================
+# COMMON SIGNAL PREPARATION (With BTC Context)
+# ============================================================
 
 async def prepare_signal(symbol, btc_context):
     result = await asyncio.to_thread(analyze_symbol_raw, symbol, btc_context)
     if result is None:
         return None, False, "No analysis result"
+
+    log_signal_diagnostic(symbol, result)
+
     if not is_valid_high_signal(result):
-        return result, False, "Not valid HIGH"
+        return result, False, "Not a valid HIGH signal"
+
     blocked, news_note = await check_critical_news(symbol, result.get("direction"))
     if blocked:
         return result, True, news_note
+
     result["_news_note"] = news_note
     result = await asyncio.to_thread(add_signal_context, result)
+
     return result, False, news_note
 
 # ============================================================
-# COMMANDS
+# /START
 # ============================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_ids = context.application.bot_data.setdefault("chat_ids", set())
     chat_ids.add(update.effective_chat.id)
     timeout_status = (
-        f"⏱ تایم‌اوت: {SIGNAL_TIMEOUT_HOURS:.0f} ساعت"
-        if TIMEOUT_ENABLED else "⏱ تایم‌اوت: غیرفعال"
+        f"⏱ تایم‌اوت بستن خودکار: {SIGNAL_TIMEOUT_HOURS:.0f} ساعت"
+        if TIMEOUT_ENABLED
+        else "⏱ تایم‌اوت بستن خودکار: غیرفعال"
     )
-    toobit_status = "🔵 Toobit: فعال" if toobit_enabled() else "⚪ Toobit: غیرفعال"
     await update.effective_message.reply_text(
         f"🤖 CryptoBot فعال است.\n"
-        f"📊 ارزهای اسکن: {len(SYMBOLS)}\n"
-        f"{timeout_status}\n{toobit_status}\n\n"
+        f"📊 تعداد ارزهای در حال اسکن: {len(SYMBOLS)}\n"
+        f"{timeout_status}\n\n"
         "دستورات:\n"
-        "/price /signal /register /stats /open /close /news /report"
+        "/price - قیمت BTC و SOL\n"
+        "/signal - بررسی سیگنال‌های HIGH\n"
+        "/register - دریافت سیگنال خودکار\n"
+        "/stats - آمار تریدها\n"
+        "/open - لیست معاملات باز\n"
+        "/close <id> - بستن دستی معامله\n"
+        "/news - آخرین اخبار کریپتو\n"
+        "/news_test - آزمایش منابع خبری\n"
+        "/backtest - تست استراتژی روی دیتای تاریخی\n"
+        "/report - گزارش روزانه استراتژی‌ها (دستی)"
     )
+
+# ============================================================
+# /PRICE
+# ============================================================
 
 async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     btc = await asyncio.to_thread(get_price, "BTC-SWAP-USDT")
     sol = await asyncio.to_thread(get_price, "SOL-SWAP-USDT")
-    msg = "💰 <b>Prices</b>\n\n"
-    msg += f"₿ BTC: <b>{display_number(btc)}</b>\n" if btc else "₿ BTC: unavailable\n"
-    msg += f"◎ SOL: <b>{display_number(sol)}</b>\n" if sol else "◎ SOL: unavailable\n"
-    await update.effective_message.reply_text(msg, parse_mode="HTML")
+
+    message = "💰 <b>CryptoBot Prices</b>\n\n"
+    if btc is not None:
+        message += f"₿ BTC: <b>{display_number(btc)}</b>\n"
+    else:
+        message += "₿ BTC: unavailable\n"
+    if sol is not None:
+        message += f"◎ SOL: <b>{display_number(sol)}</b>\n"
+    else:
+        message += "◎ SOL: unavailable\n"
+
+    await update.effective_message.reply_text(message, parse_mode="HTML")
+
+# ============================================================
+# /SIGNAL
+# ============================================================
 
 async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.effective_message.reply_text(f"🔎 بررسی {len(SYMBOLS)} ارز...")
+    await update.effective_message.reply_text(
+        f"🔎 در حال بررسی {len(SYMBOLS)} ارز...\n"
+        "Daily → 4H → 1H → 15M → 5M\n\n"
+        "فقط سیگنال‌های HIGH با امتیاز بالا.\n"
+        "خبرهای بحرانی و روند بیت‌کوین بررسی می‌شوند.\n"
+        "این کار ممکن است چند دقیقه طول بکشد."
+    )
+
     btc_context = await asyncio.to_thread(fetch_btc_context, get_klines)
-    found = blocked_by_news = registration_failed = 0
+
+    found = 0
+    blocked_by_news = 0
+    registration_failed = 0
+
     for symbol in SYMBOLS:
         try:
             result, blocked, note = await prepare_signal(symbol, btc_context)
+
             if result is None:
                 continue
             if blocked:
@@ -603,241 +791,705 @@ async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 continue
             if not is_valid_high_signal(result):
                 continue
+
             trade = register_high_signal(symbol, result)
             if trade is None:
                 registration_failed += 1
                 continue
-            await update.effective_message.reply_text(signal_text(symbol, result), parse_mode="HTML")
+
+            await update.effective_message.reply_text(
+                signal_text(symbol, result),
+                parse_mode="HTML",
+            )
             found += 1
         except Exception:
             logger.exception("Signal error %s", symbol)
+
     if found == 0:
         await update.effective_message.reply_text(
-            f"⏳ سیگنال HIGH جدیدی نیست.\n"
-            f"⛔ مسدود خبر: {blocked_by_news}\n"
-            f"📌 ثبت ناموفق: {registration_failed}"
+            f"⏳ هیچ سیگنال HIGH جدیدی برای ارسال پیدا نشد.\n"
+            f"🔍 تعداد ارزهای بررسی‌شده: {len(SYMBOLS)}\n"
+            f"⛔ مسدودشده توسط خبر: {blocked_by_news}\n"
+            f"📌 ثبت ناموفق یا معامله تکراری: {registration_failed}\n\n"
+            "جزئیات تشخیص در لاگ Belmo ثبت شد."
         )
+
+# ============================================================
+# AUTOMATIC SIGNAL SCANNER
+# ============================================================
 
 async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
     if _scan_lock.locked():
+        logger.warning("Previous scan still running. Skipping.")
         return
+
     async with _scan_lock:
+        logger.info("Starting automatic market scan across %s symbols", len(SYMBOLS))
+
         btc_context = await asyncio.to_thread(fetch_btc_context, get_klines)
+
         found = 0
+        blocked_by_news = 0
+
         for symbol in SYMBOLS:
             try:
                 result, blocked, note = await prepare_signal(symbol, btc_context)
-                if result is None or blocked or not is_valid_high_signal(result):
+
+                if result is None:
                     continue
+                if blocked:
+                    blocked_by_news += 1
+                    logger.warning("AUTO_SIGNAL_BLOCKED_BY_NEWS | %s", symbol)
+                    continue
+                if not is_valid_high_signal(result):
+                    continue
+
                 trade = register_high_signal(symbol, result)
                 if trade is None:
                     continue
+
                 found += 1
+                logger.info("NEW HIGH SIGNAL | %s | %s | Score=%s | Strategy=%s",
+                    symbol, result.get("direction"), result.get("score"), result.get("strategy"))
+
                 chat_ids = context.application.bot_data.get("chat_ids", set())
                 for chat_id in list(chat_ids):
                     try:
                         await context.bot.send_message(
-                            chat_id=chat_id, text=signal_text(symbol, result), parse_mode="HTML"
+                            chat_id=chat_id,
+                            text=signal_text(symbol, result),
+                            parse_mode="HTML",
                         )
                     except Exception:
-                        logger.exception("Telegram send error")
+                        logger.exception("Telegram send error for chat %s", chat_id)
             except Exception:
                 logger.exception("Auto scan error %s", symbol)
+
+        logger.info("Automatic scan completed. New signals=%s | Blocked by news=%s", found, blocked_by_news)
+
+# ============================================================
+# TRACK OPEN TRADES
+# ============================================================
 
 async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
     try:
         open_trades = await asyncio.to_thread(get_open_trades)
         if not open_trades:
+            logger.info("TRACKER CHECK | No open trades")
             return
+
+        logger.info("TRACKER CHECK | Open trades=%s", len(open_trades))
+
         events = await asyncio.to_thread(check_all_trades, get_price)
         if not events:
             return
+
         chat_ids = context.application.bot_data.get("chat_ids", set())
+
         for event in events:
+            if not isinstance(event, dict):
+                continue
+
             event_name = str(event.get("event", "UNKNOWN")).upper()
             symbol = event.get("symbol", "UNKNOWN")
             direction = event.get("direction", "UNKNOWN")
-
-            # 🔵 بستن روی صرافی Toobit
-            if toobit_enabled():
-                trade_id = event.get("id")
-                if trade_id:
-                    all_trades = await asyncio.to_thread(get_all_trades)
-                    tr = next((t for t in all_trades if t.get("id") == trade_id), None)
-                    if tr:
-                        toobit_amt = float(tr.get("toobit_amount") or 0)
-                        realized = float(tr.get("realized_fraction") or 0)
-                        already = float(tr.get("toobit_closed_fraction") or 0)
-                        to_close = max(0.0, realized - already)
-                        if toobit_amt > 0 and to_close > 0:
-                            px = float(event.get("price") or event.get("entry") or 0)
-                            if px > 0:
-                                ok = await asyncio.to_thread(
-                                    toobit_close, symbol, direction, toobit_amt, to_close, px,
-                                )
-                                if ok:
-                                    await asyncio.to_thread(
-                                        update_trade_meta, trade_id,
-                                        {"toobit_closed_fraction": realized},
-                                    )
-                                    logger.info("EXECUTOR | CLOSED %.0f%% | %s | %s", to_close*100, symbol, event_name)
+            strategy_name = event.get("strategy", "UNKNOWN")
+            price_now = event.get("price")
+            entry = event.get("entry")
+            sl = event.get("sl")
+            tp1 = event.get("tp1")
+            tp2 = event.get("tp2")
+            tp3 = event.get("tp3")
+            pnl = safe_number(event.get("realized_pnl"), 0.0)
+            roi_pct = safe_number(event.get("roi_percent"), 0.0)
+            margin = safe_number(event.get("margin"), DEFAULT_MARGIN_USDT)
+            leverage = safe_number(event.get("leverage"), DEFAULT_LEVERAGE)
 
             title_map = {
-                "TP1": "🎯 TP1 لمس شد", "TP2": "🎯 TP2 لمس شد",
-                "TP3": "🏆 TP3 لمس شد", "SL": "🛑 SL لمس شد",
-                "BREAKEVEN": "⚖️ Breakeven", "TP1_PROTECTED": "✅ TP1 Protected",
+                "TP1": "🎯 تارگت اول لمس شد",
+                "TP2": "🎯 تارگت دوم لمس شد",
+                "TP3": "🏆 تارگت سوم لمس شد",
+                "SL": "🛑 حد ضرر لمس شد",
+                "BE": "⚖️ خروج در نقطه سربه‌سر",
+                "BREAKEVEN": "⚖️ خروج در نقطه سربه‌سر (بدون ضرر)",
+                "TP1_PROTECTED": "✅ حد ضرر در تارگت اول (سود قفل شد)",
+                "TP2_PROTECTED": "✅ حد ضرر در تارگت دوم (سود بیشتر قفل شد)",
             }
-            title = title_map.get(event_name, f"📊 {event_name}")
-            pnl = safe_number(event.get("realized_pnl"), 0.0)
-            roi = safe_number(event.get("roi_percent"), 0.0)
+            title = title_map.get(event_name, f"📊 رویداد Tracker: {event_name}")
+
             message = (
                 f"<b>{title}</b>\n\n"
                 f"🪙 {safe_text(symbol)}\n"
-                f"📈 {safe_text(direction)}\n\n"
-                f"💰 Price: {display_number(event.get('price'))}\n"
-                f"📌 Entry: {display_number(event.get('entry'))}\n"
-                f"💹 PnL: {pnl:+.4f} USDT\n"
-                f"📊 ROI: {roi:+.2f}%"
+                f"📈 Direction: <b>{safe_text(direction)}</b>\n"
+                f"🧠 Strategy: <b>{safe_text(strategy_name)}</b>\n\n"
+                f"💰 Current Price: <b>{display_number(price_now)}</b>\n"
+                f"📌 Entry: {display_number(entry)}\n"
+                f"🛑 SL فعلی: {display_number(sl)}\n"
+                f"🎯 TP1: {display_number(tp1)}\n"
+                f"🎯 TP2: {display_number(tp2)}\n"
+                f"🎯 TP3: {display_number(tp3)}\n\n"
+                f"💵 مارجین: {margin:.2f} USDT\n"
+                f"⚡ اهرم: {leverage:g}x\n"
+                f"💹 PnL تحقق‌یافته ثبت‌شده: {pnl:+.4f} USDT\n"
+                f"📊 ROI ثبت‌شده: {roi_pct:+.2f}%\n"
+                f"📍 وضعیت: <b>{safe_text(event_name)}</b>"
             )
+
             for chat_id in list(chat_ids):
                 try:
                     await context.bot.send_message(chat_id=chat_id, text=message, parse_mode="HTML")
                 except Exception:
-                    logger.exception("Tracker send error")
+                    logger.exception("Tracker Telegram error for chat %s", chat_id)
+
+            logger.info("TRACKER | %s | %s | Price=%s | PnL=%s | ROI=%s", symbol, event_name, price_now, pnl, roi_pct)
+
     except Exception:
         logger.exception("Tracker error")
+
+# ============================================================
+# /REGISTER
+# ============================================================
 
 async def register_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_ids = context.application.bot_data.setdefault("chat_ids", set())
     chat_ids.add(update.effective_chat.id)
-    await update.effective_message.reply_text("✅ ثبت شد.")
+    await update.effective_message.reply_text("✅ این چت برای دریافت سیگنال‌های خودکار ثبت شد.")
+
+# ============================================================
+# /STATS
+# ============================================================
 
 async def tracker_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         stats = await asyncio.to_thread(get_stats)
+        realized_pnl = safe_number(stats.get("realized_pnl"), 0.0)
+        realized_roi = safe_number(stats.get("realized_roi"), 0.0)
+        closed_pnl = safe_number(stats.get("closed_realized_pnl", stats.get("realized_pnl")), 0.0)
+        closed_roi = safe_number(stats.get("closed_roi", stats.get("realized_roi")), 0.0)
+
         message = (
-            "📊 <b>Stats</b>\n\n"
-            f"📌 Total: {stats.get('total', 0)}\n"
+            "📊 <b>Tracker Statistics</b>\n\n"
+            f"📌 Total Signals: {stats.get('total', 0)}\n"
             f"⏳ Open: {stats.get('open', 0)}\n"
             f"🔒 Closed: {stats.get('closed', 0)}\n\n"
-            f"🎯 TP1: {stats.get('tp1', 0)} | TP2: {stats.get('tp2', 0)} | TP3: {stats.get('tp3', 0)}\n"
-            f"🛑 SL: {stats.get('sl', 0)} | ⚖️ BE: {stats.get('breakeven', 0)}\n\n"
-            f"💵 PnL: {stats.get('realized_pnl', 0):+.4f} USDT\n"
-            f"📈 ROI: {stats.get('realized_roi', 0):+.2f}%"
+            f"🎯 TP1 Hit: {stats.get('tp1', 0)}\n"
+            f"🎯 TP2 Hit: {stats.get('tp2', 0)}\n"
+            f"🎯 TP3 Hit: {stats.get('tp3', 0)}\n"
+            f"🛑 SL Hit: {stats.get('sl', 0)}\n"
+            f"⚖️ Breakeven: {stats.get('breakeven', 0)}\n"
+            f"✅ TP1 Protected: {stats.get('tp1_protected', 0)}\n\n"
+            f"💵 Realized PnL: {realized_pnl:+.4f} USDT\n"
+            f"📈 Realized ROI: {realized_roi:+.2f}%\n"
+            f"🔒 Closed PnL: {closed_pnl:+.4f} USDT\n"
+            f"📊 Closed ROI: {closed_roi:+.2f}%"
         )
         await update.effective_message.reply_text(message, parse_mode="HTML")
     except Exception:
-        logger.exception("Stats error")
-        await update.effective_message.reply_text("❌ خطا در آمار.")
+        logger.exception("Tracker stats error")
+        await update.effective_message.reply_text("❌ خطا در دریافت آمار Tracker.")
+
+# ============================================================
+# /NEWS
+# ============================================================
 
 async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = await update.effective_message.reply_text("📰 دریافت اخبار...")
+    message = await update.effective_message.reply_text("📰 در حال دریافت اخبار کریپتو...")
     try:
         articles = await get_latest_news(limit=8)
         if not articles:
-            await message.edit_text("⚠️ خبری نیست.")
+            await message.edit_text("⚠️ در حال حاضر خبری دریافت نشد.\nممکن است منابع RSS در دسترس نباشند.")
             return
-        lines = ["📰 اخبار کریپتو\n"]
-        for i, a in enumerate(articles, 1):
-            imp = a.get("importance", "NORMAL")
-            emoji = {"CRITICAL": "🔴", "HIGH": "🟠"}.get(imp, "🟢")
-            lines.append(f"{i}. {emoji} {a.get('title', 'بدون عنوان')}\n")
-        await message.edit_text("\n".join(lines), disable_web_page_preview=True)
-    except Exception:
-        logger.exception("News error")
-        await message.edit_text("❌ خطا در اخبار.")
 
-async def report_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.effective_message.reply_text("⏳ ساخت گزارش...")
-    await daily_strategy_report(context)
+        lines = ["📰 آخرین اخبار کریپتو\n"]
+        for index, article in enumerate(articles, start=1):
+            importance = article.get("importance", "NORMAL")
+            emoji = {"CRITICAL": "🔴", "HIGH": "🟠", "NORMAL": "🟢"}.get(importance, "⚪")
+            title = str(article.get("title", "بدون عنوان"))
+            source = str(article.get("source", "Unknown"))
+            asset = str(article.get("asset", "UNKNOWN"))
+            link = str(article.get("link", ""))
+            
+            item = f"{index}. {emoji} {title}\n📡 منبع: {source}\n🪙 دارایی: {asset}\n"
+            if link.startswith(("https://", "http://")):
+                item += f"🔗 {link}\n"
+            lines.append(item)
+
+        output = "\n".join(lines)
+        if len(output) > 4000:
+            output = output[:3900] + "\n\nادامه اخبار در اجرای بعدی."
+        await message.edit_text(output, disable_web_page_preview=True)
+    except Exception:
+        logger.exception("NEWS_COMMAND_ERROR")
+        await message.edit_text("❌ خطا هنگام دریافت اخبار.\nلاگ Belmo را بررسی کن.")
+
+# ============================================================
+# /NEWS_TEST
+# ============================================================
+
+async def news_test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = await update.effective_message.reply_text("🔎 در حال آزمایش منابع خبری...")
+    try:
+        result = await news_diagnostics()
+        lines = [
+            "📊 گزارش آزمایش منابع خبری\n",
+            f"📰 مجموع اخبار: {result.get('total', 0)}",
+            f"🔴 اخبار CRITICAL: {result.get('critical_count', 0)}",
+            f"🟠 اخبار HIGH: {result.get('high_count', 0)}",
+            "",
+            "وضعیت منابع:",
+        ]
+        for source, status in result.get("sources", {}).items():
+            icon = "✅" if status.get("ok") else "❌"
+            count = status.get("count", 0)
+            lines.append(f"{icon} {source}: {count} خبر")
+        await message.edit_text("\n".join(lines))
+    except Exception:
+        logger.exception("NEWS_TEST_ERROR")
+        await message.edit_text("❌ آزمایش منابع خبری ناموفق بود.\nلاگ Belmo را بررسی کن.")
+
+# ============================================================
+# /DAILY_REPORT (auto + /report manual)
+# ============================================================
 
 async def daily_strategy_report(context: ContextTypes.DEFAULT_TYPE):
     try:
         strategy_stats = await asyncio.to_thread(get_stats_by_strategy)
         overall = await asyncio.to_thread(get_stats)
+
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
         if not strategy_stats:
-            message = f"📊 گزارش {today}\nهنوز معامله‌ای نیست."
+            message = (
+                f"📊 <b>گزارش روزانه استراتژی‌ها</b>\n"
+                f"📅 {today}\n\n"
+                "هنوز هیچ معامله‌ای ثبت نشده است."
+            )
         else:
-            lines = [f"📊 <b>گزارش استراتژی‌ها — {today}</b>", ""]
-            for name, s in sorted(strategy_stats.items(), key=lambda x: x[1]["total"], reverse=True):
-                emoji = "🏆" if s["realized_pnl"] > 0 else "❌" if s["realized_pnl"] < 0 else "⚖️"
+            sorted_strats = sorted(
+                strategy_stats.items(),
+                key=lambda x: x[1]["total"],
+                reverse=True,
+            )
+
+            lines = [
+                f"📊 <b>گزارش روزانه استراتژی‌ها</b>",
+                f"📅 {today}",
+                "=" * 30,
+                "",
+            ]
+
+            for name, s in sorted_strats:
+                if s["realized_pnl"] > 0:
+                    emoji = "🏆"
+                elif s["realized_pnl"] < 0:
+                    emoji = "❌"
+                else:
+                    emoji = "⚖️"
+
                 lines.append(f"{emoji} <b>{name}</b>")
-                lines.append(f"  کل: {s['total']} | باز: {s['open']} | بسته: {s['closed']}")
-                lines.append(f"  TP1:{s['tp1']} TP2:{s['tp2']} TP3:{s['tp3']} SL:{s['sl']}")
-                lines.append(f"  💰 PnL: <b>{s['realized_pnl']:+.4f} USDT</b>\n")
-            lines.append("=" * 25)
-            lines.append(f"💵 مجموع: {overall['realized_pnl']:+.4f} USDT")
-            lines.append(f"📈 ROI: {overall['realized_roi']:+.2f}%")
+                lines.append(f"   📌 کل سیگنال: <b>{s['total']}</b>")
+                lines.append(f"   ⏳ باز: {s['open']} | 🔒 بسته: {s['closed']}")
+                lines.append(
+                    f"   🎯 TP1: {s['tp1']} | TP2: {s['tp2']} | TP3: {s['tp3']}"
+                )
+                lines.append(
+                    f"   🛑 SL: {s['sl']} | ⚖️ BE: {s['breakeven']}"
+                )
+                if s["tp1_protected"] > 0:
+                    lines.append(f"   ✅ TP1 Protected: {s['tp1_protected']}")
+                lines.append(
+                    f"   💰 PnL: <b>{s['realized_pnl']:+.4f} USDT</b>"
+                )
+                lines.append("")
+
+            lines.append("=" * 30)
+            lines.append(f"💵 <b>مجموع PnL:</b> {overall['realized_pnl']:+.4f} USDT")
+            lines.append(f"📈 <b>ROI:</b> {overall['realized_roi']:+.2f}%")
+            lines.append(
+                f"🎯 <b>TP1:</b> {overall['tp1']} | "
+                f"<b>TP2:</b> {overall['tp2']} | "
+                f"<b>TP3:</b> {overall['tp3']}"
+            )
+            lines.append(
+                f"🛑 <b>SL:</b> {overall['sl']} | "
+                f"⚖️ <b>BE:</b> {overall['breakeven']} | "
+                f"✅ <b>TP1 Prot:</b> {overall.get('tp1_protected', 0)}"
+            )
+
             message = "\n".join(lines)
+
         chat_ids = context.application.bot_data.get("chat_ids", set())
+        if not chat_ids:
+            logger.warning("DAILY_REPORT | No chat_ids registered. Skipping send.")
+            return
+
         for chat_id in list(chat_ids):
             try:
-                await context.bot.send_message(chat_id=chat_id, text=message, parse_mode="HTML")
-            except Exception:
-                logger.exception("Daily report error")
-    except Exception:
-        logger.exception("Daily report error")
-
-async def open_trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    trades = await asyncio.to_thread(get_open_trades)
-    if not trades:
-        await update.effective_message.reply_text("هیچ معامله باز نیست ✅")
-        return
-    lines = [f"📋 <b>Open ({len(trades)})</b>\n"]
-    for t in trades:
-        lines.append(
-            f"#{t.get('id')}\n"
-            f"  {t.get('symbol')} {t.get('direction')}\n"
-            f"  Entry:{display_number(t.get('entry'))} SL:{display_number(t.get('sl'))}\n"
-        )
-    await update.effective_message.reply_text("\n".join(lines)[:4000], parse_mode="HTML")
-
-async def close_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.effective_message.reply_text("فرمت: /close <id>")
-        return
-    trade_id = str(context.args[0]).strip().lstrip("#")
-    open_trades = await asyncio.to_thread(get_open_trades)
-    target = next((t for t in open_trades if str(t.get("id")) == trade_id), None)
-    if target is None:
-        await update.effective_message.reply_text(f"❌ پیدا نشد: {trade_id}")
-        return
-    symbol = target.get("symbol"); direction = target.get("direction")
-    price_val = await asyncio.to_thread(get_price, symbol)
-    if price_val is None:
-        await update.effective_message.reply_text("❌ قیمت در دسترس نیست.")
-        return
-    closed = await asyncio.to_thread(force_close_trade, trade_id, price_val, "MANUAL_CLOSE")
-    if not closed:
-        await update.effective_message.reply_text("❌ بستن ناموفق.")
-        return
-
-    # 🔵 بستن روی صرافی
-    if toobit_enabled():
-        orig_amt = float(target.get("toobit_amount") or 0)
-        if orig_amt > 0:
-            already = float(target.get("toobit_closed_fraction") or 0)
-            frac = max(0.0, 1.0 - already)
-            if frac > 0:
-                ok = await asyncio.to_thread(
-                    toobit_close, symbol, direction, orig_amt, frac, price_val,
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=message,
+                    parse_mode="HTML",
                 )
-                if ok:
-                    await asyncio.to_thread(
-                        update_trade_meta, trade_id, {"toobit_closed_fraction": 1.0}
-                    )
+                logger.info("DAILY_REPORT_SENT | chat_id=%s", chat_id)
+            except Exception:
+                logger.exception("Daily report send error for chat %s", chat_id)
 
-    await update.effective_message.reply_text(
-        f"🔒 <b>بسته شد</b>\n{safe_text(symbol)} {safe_text(direction)}\nPrice: {display_number(price_val)}",
-        parse_mode="HTML",
-    )
+    except Exception:
+        logger.exception("Daily strategy report error")
+
+
+async def report_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.effective_message.reply_text("⏳ در حال ساخت گزارش...")
+    await daily_strategy_report(context)
 
 # ============================================================
-# TIMEOUT CHECKER
+# /BACKTEST (v24 - 5000 Candles, 4 Symbols, 7 Months)
+# ============================================================
+
+async def backtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = await update.effective_message.reply_text(
+        "⏳ بک‌تست تاییدیه شروع شد...\n\n"
+        "📊 ۴ ارز: BTC, ETH, SOL, BNB\n"
+        "📉 ۵۰۰۰ کندل ۱ ساعته برای هر ارز (~۷ ماه)\n"
+        "🔢 مجموع: ۲۰۰۰۰ کندل\n"
+        "⏱ زمان تخمینی: ۳ تا ۵ دقیقه\n\n"
+        "لطفاً صبر کنید...",
+    )
+    
+    def run_bt():
+        import requests, time, pandas as pd, numpy as np
+        
+        TOOBIT_URL = "https://api.toobit.com/quote/v1/klines"
+        symbols = ["BTC-SWAP-USDT", "ETH-SWAP-USDT", "SOL-SWAP-USDT", "BNB-SWAP-USDT"]
+        
+        results = {
+            name: {"wins": 0, "losses": 0, "r_sum": 0.0}
+            for name in ["TREND_FOLLOWING", "PULLBACK", "BREAKOUT",
+                         "BB_REVERSION", "RANGE_TRADING", "REVERSAL"]
+        }
+        
+        def calc_adx(df, period=14):
+            high, low, close = df['high'], df['low'], df['close']
+            plus_dm = high.diff()
+            minus_dm = -low.diff()
+            plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+            minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+            tr = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
+            atr = tr.ewm(alpha=1/period, adjust=False).mean()
+            plus_di = 100 * (plus_dm.ewm(alpha=1/period, adjust=False).mean() / atr.replace(0, np.nan))
+            minus_di = 100 * (minus_dm.ewm(alpha=1/period, adjust=False).mean() / atr.replace(0, np.nan))
+            dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+            return dx.ewm(alpha=1/period, adjust=False).mean()
+        
+        def calc_rsi(df, period=14):
+            delta = df['close'].diff()
+            gain = delta.where(delta > 0, 0).ewm(alpha=1/period, adjust=False).mean()
+            loss = -delta.where(delta < 0, 0).ewm(alpha=1/period, adjust=False).mean()
+            rs = gain / loss.replace(0, np.nan)
+            return 100 - (100 / (1 + rs))
+        
+        details = []
+        
+        for symbol in symbols:
+            all_c = []
+            end_ts = int(time.time() * 1000)
+            current_ts = end_ts - (5000 * 60 * 60 * 1000)
+            
+            attempts = 0
+            while len(all_c) < 5000 and attempts < 8:
+                try:
+                    res = requests.get(TOOBIT_URL, params={
+                        "symbol": symbol, "interval": "1h",
+                        "startTime": current_ts, "limit": 1000
+                    }, timeout=20)
+                    data = res.json()
+                    if not isinstance(data, list) or not data:
+                        break
+                    for row in data:
+                        all_c.append({
+                            "time": row[0], "open": float(row[1]),
+                            "high": float(row[2]), "low": float(row[3]),
+                            "close": float(row[4]), "volume": float(row[5])
+                        })
+                    if len(data) < 1000:
+                        break
+                    current_ts = data[-1][0] + 1
+                    time.sleep(0.05)
+                except Exception:
+                    break
+                attempts += 1
+            
+            if len(all_c) < 500:
+                details.append(f"⚠️ {symbol}: فقط {len(all_c)} کندل.")
+                continue
+            
+            df = pd.DataFrame(all_c)
+            df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
+            df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
+            df['sma20'] = df['close'].rolling(20).mean()
+            df['std'] = df['close'].rolling(20).std()
+            df['bb_upper'] = df['sma20'] + 2 * df['std']
+            df['bb_lower'] = df['sma20'] - 2 * df['std']
+            df['rsi'] = calc_rsi(df, 14)
+            df['adx'] = calc_adx(df, 14)
+            df['high20_prev'] = df['high'].rolling(20).max().shift(1)
+            df['low20_prev'] = df['low'].rolling(20).min().shift(1)
+            
+            position = None
+            entry_price = 0.0
+            sl_price = 0.0
+            tp_price = 0.0
+            active_strategy = None
+            
+            for i in range(60, len(df)):
+                c_close = df['close'].iloc[i]
+                c_high = df['high'].iloc[i]
+                c_low = df['low'].iloc[i]
+                
+                if position is not None:
+                    hit_sl = False
+                    hit_tp = False
+                    if position == "LONG":
+                        if c_low <= sl_price:
+                            hit_sl = True
+                        elif c_high >= tp_price:
+                            hit_tp = True
+                    elif position == "SHORT":
+                        if c_high >= sl_price:
+                            hit_sl = True
+                        elif c_low <= tp_price:
+                            hit_tp = True
+                    
+                    if hit_sl or hit_tp:
+                        if hit_tp:
+                            results[active_strategy]["wins"] += 1
+                            results[active_strategy]["r_sum"] += 2.0
+                        else:
+                            results[active_strategy]["losses"] += 1
+                            results[active_strategy]["r_sum"] -= 1.0
+                        position = None
+                        active_strategy = None
+                    continue
+                
+                adx_val = df['adx'].iloc[i]
+                rsi_val = df['rsi'].iloc[i]
+                
+                if pd.isna(adx_val) or pd.isna(rsi_val):
+                    continue
+                
+                if adx_val < 22:
+                    bb_lower = df['bb_lower'].iloc[i]
+                    bb_upper = df['bb_upper'].iloc[i]
+                    bb_mid = df['sma20'].iloc[i]
+                    
+                    if pd.isna(bb_lower) or pd.isna(bb_mid):
+                        continue
+                    
+                    if c_close <= bb_lower and rsi_val <= 32:
+                        position = "LONG"; active_strategy = "BB_REVERSION"
+                        entry_price = c_close; sl_price = entry_price * 0.98; tp_price = bb_mid
+                    elif c_close >= bb_upper and rsi_val >= 68:
+                        position = "SHORT"; active_strategy = "BB_REVERSION"
+                        entry_price = c_close; sl_price = entry_price * 1.02; tp_price = bb_mid
+                    elif rsi_val <= 28:
+                        position = "LONG"; active_strategy = "RANGE_TRADING"
+                        entry_price = c_close; sl_price = entry_price * 0.98; tp_price = entry_price * 1.02
+                    elif rsi_val >= 72:
+                        position = "SHORT"; active_strategy = "RANGE_TRADING"
+                        entry_price = c_close; sl_price = entry_price * 1.02; tp_price = entry_price * 0.98
+                else:
+                    ema20 = df['ema20'].iloc[i]
+                    ema50 = df['ema50'].iloc[i]
+                    high20_prev = df['high20_prev'].iloc[i]
+                    low20_prev = df['low20_prev'].iloc[i]
+                    
+                    if pd.isna(ema20) or pd.isna(ema50):
+                        continue
+                    
+                    if c_close > ema20 > ema50 and rsi_val < 70:
+                        position = "LONG"; active_strategy = "TREND_FOLLOWING"
+                        entry_price = c_close; sl_price = entry_price * 0.98; tp_price = entry_price * 1.04
+                    elif c_close < ema20 < ema50 and rsi_val > 30:
+                        position = "SHORT"; active_strategy = "TREND_FOLLOWING"
+                        entry_price = c_close; sl_price = entry_price * 1.02; tp_price = entry_price * 0.96
+                    elif c_close > ema50 and abs(c_close - ema20) / c_close < 0.01 and 40 <= rsi_val <= 60:
+                        position = "LONG"; active_strategy = "PULLBACK"
+                        entry_price = c_close; sl_price = entry_price * 0.98; tp_price = entry_price * 1.04
+                    elif not pd.isna(high20_prev) and c_close > high20_prev and rsi_val < 72:
+                        position = "LONG"; active_strategy = "BREAKOUT"
+                        entry_price = c_close; sl_price = entry_price * 0.985; tp_price = entry_price * 1.03
+                    elif not pd.isna(low20_prev) and c_close < low20_prev and rsi_val > 28:
+                        position = "SHORT"; active_strategy = "BREAKOUT"
+                        entry_price = c_close; sl_price = entry_price * 1.015; tp_price = entry_price * 0.97
+            
+            details.append(f"✅ {symbol}: {len(df)} کندل.")
+        
+        return (results, details), None
+    
+    try:
+        result, err = await asyncio.to_thread(run_bt)
+        
+        if err:
+            await message.edit_text(f"❌ خطا: {err}")
+            return
+        
+        results, details = result
+        
+        report = "📊 <b>نتیجه بک‌تست v24</b>\n\n"
+        report += "".join(f"{d}\n" for d in details)
+        report += f"\n📈 <b>آمار کلی</b>\n"
+        report += "=" * 25 + "\n\n"
+        
+        sorted_results = []
+        for name, data in results.items():
+            total = data["wins"] + data["losses"]
+            if total > 0:
+                wr = (data["wins"] / total) * 100
+                avg_r = data["r_sum"] / total
+                sorted_results.append((name, total, data["wins"], data["losses"], wr, avg_r))
+        
+        sorted_results.sort(key=lambda x: x[4], reverse=True)
+        
+        for name, total, wins, losses, wr, avg_r in sorted_results:
+            emoji = "🏆" if wr >= 55 else "✅" if wr >= 45 else "⚠️" if wr >= 35 else "❌"
+            report += (
+                f"{emoji} <b>{name}</b>\n"
+                f"   📊 معاملات: {total} (✅{wins} / ❌{losses})\n"
+                f"   🎯 وین‌ریت: <b>{wr:.1f}%</b>\n"
+                f"   💰 میانگین R: <b>{avg_r:+.2f}R</b>\n\n"
+            )
+        
+        report += "=" * 25 + "\n"
+        report += "📌 وین‌ریت > 50٪ و R مثبت = سودده"
+        
+        await message.edit_text(report)
+        
+    except Exception as e:
+        logger.exception("Backtest error")
+        try:
+            await message.edit_text(f"❌ خطای داخلی: {str(e)}")
+        except Exception:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"❌ خطای داخلی در بک‌تست: {str(e)}"
+            )
+
+# ============================================================
+# BTC TREND CHANGE ALERTS
+# ============================================================
+
+async def check_btc_trend_changes(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        open_trades = await asyncio.to_thread(get_open_trades)
+        if not open_trades:
+            return
+        
+        btc_context = await asyncio.to_thread(fetch_btc_context, get_klines)
+        current_h4 = btc_context.get("h4") or "RANGE"
+        current_h1 = btc_context.get("h1") or "RANGE"
+        current_adx_h1 = float(btc_context.get("adx_h1") or 0.0)
+        
+        chat_ids = context.application.bot_data.get("chat_ids", set())
+        if not chat_ids:
+            return
+        
+        for trade in open_trades:
+            if trade.get("trend_change_alerted"):
+                continue
+            
+            direction = str(trade.get("direction", "")).upper()
+            if direction not in ("LONG", "SHORT"):
+                continue
+            
+            expected = "BULLISH" if direction == "LONG" else "BEARISH"
+            entry_trend = str(trade.get("btc_trend_at_entry", "UNKNOWN"))
+            
+            h1_flipped = (
+                current_h1 in ("BULLISH", "BEARISH")
+                and current_h1 != expected
+                and current_adx_h1 >= 22
+            )
+            changed_from_entry = (
+                entry_trend in ("BULLISH", "BEARISH")
+                and current_h1 in ("BULLISH", "BEARISH")
+                and entry_trend != current_h1
+            )
+            
+            if not (h1_flipped or changed_from_entry):
+                continue
+            
+            symbol = trade.get("symbol", "UNKNOWN")
+            entry_price = trade.get("entry")
+            current_sl = trade.get("sl")
+            score = trade.get("score", 0)
+            strategy_name = trade.get("strategy", "UNKNOWN")
+            entry_time = str(trade.get("created_at", ""))[:16].replace("T", " ")
+            
+            warning_level = "🔴 بالا" if h1_flipped else "🟡 متوسط"
+            
+            message = (
+                f"🚨 <b>هشدار تغییر روند بیت‌کوین</b>\n\n"
+                f"🪙 <b>{safe_text(symbol)}</b> ({safe_text(direction)})\n"
+                f"🧠 استراتژی: {safe_text(strategy_name)}\n"
+                f"⭐ امتیاز: {score}\n"
+                f"🕐 زمان ورود: {entry_time}\n\n"
+                f"📌 Entry: {display_number(entry_price)}\n"
+                f"🛑 SL فعلی: {display_number(current_sl)}\n\n"
+                f"₿ <b>وضعیت بیت‌کوین:</b>\n"
+                f"   • هنگام ورود: <b>{safe_text(entry_trend)}</b>\n"
+                f"   • روند 4H فعلی: <b>{safe_text(current_h4)}</b>\n"
+                f"   • روند 1H فعلی: <b>{safe_text(current_h1)}</b>\n"
+                f"   • ADX 1H: {current_adx_h1:.2f}\n\n"
+                f"⚠️ سطح هشدار: <b>{warning_level}</b>\n\n"
+            )
+            
+            if direction == "SHORT":
+                message += (
+                    f"📉 ربات یک شورت (فروش) گرفته بود، اما بیت‌کوین الان "
+                    f"<b>{safe_text(current_h1)}</b> شده است.\n"
+                    f"یعنی حرکت بازار در جهت مخالف معامله شماست.\n\n"
+                )
+            else:
+                message += (
+                    f"📈 ربات یک لانگ (خرید) گرفته بود، اما بیت‌کوین الان "
+                    f"<b>{safe_text(current_h1)}</b> شده است.\n"
+                    f"یعنی حرکت بازار در جهت مخالف معامله شماست.\n\n"
+                )
+            
+            message += (
+                f"💡 <b>توصیه:</b>\n"
+                f"• سود را بخشی ذخیره کنید (Partial Close)\n"
+                f"• SL را نزدیک‌تر کنید\n"
+                f"• یا اگر SL در سود است، به Breakeven منتقل کنید"
+            )
+            
+            for chat_id in list(chat_ids):
+                try:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=message,
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    logger.exception("BTC alert send error for chat %s", chat_id)
+            
+            await asyncio.to_thread(mark_trend_alert, trade.get("id"))
+            
+            logger.warning(
+                "BTC_TREND_ALERT | %s | %s | Entry=%s | Current=%s | ADX=%.1f",
+                symbol, direction, entry_trend, current_h1, current_adx_h1,
+            )
+    
+    except Exception:
+        logger.exception("BTC trend change check error")
+
+# ============================================================
+# SIGNAL TIMEOUT CHECKER
 # ============================================================
 
 def _trade_age_hours(trade):
+    if not isinstance(trade, dict):
+        return None
     created = trade.get("created_at")
     if not created:
         return None
@@ -852,156 +1504,353 @@ def _trade_age_hours(trade):
     except (ValueError, TypeError):
         return None
 
+
 def _trade_tp1_hit(trade):
-    return bool(trade.get("tp1_hit")) or (float(trade.get("realized_pnl") or 0) != 0)
+    if not isinstance(trade, dict):
+        return False
+    for key in ("tp1_hit", "hit_tp1", "tp1_reached", "tp1_done", "tp_hit"):
+        if trade.get(key):
+            return True
+    status = str(trade.get("status") or "").upper()
+    if status in ("TP1", "TP1_HIT", "TP1_PROTECTED", "PARTIAL",
+                  "TP2", "TP2_HIT", "TP3", "TP3_HIT", "BREAKEVEN", "BE"):
+        return True
+    realized = safe_number(trade.get("realized_pnl"))
+    if realized is not None and realized != 0:
+        return True
+    return False
+
 
 async def check_signal_timeouts(context: ContextTypes.DEFAULT_TYPE):
     if not TIMEOUT_ENABLED:
         return
+
     try:
         open_trades = await asyncio.to_thread(get_open_trades)
     except Exception:
+        logger.exception("TIMEOUT | failed to get open trades")
         return
+
     if not open_trades:
         return
+
     chat_ids = context.application.bot_data.get("chat_ids", set())
+    if not chat_ids:
+        return
+
+    closed_count = 0
+
     for trade in open_trades:
         try:
             trade_id = trade.get("id")
+            if trade_id is None:
+                continue
+
             symbol = trade.get("symbol", "UNKNOWN")
             direction = str(trade.get("direction", "")).upper()
             if direction not in ("LONG", "SHORT"):
                 continue
+
             if _trade_tp1_hit(trade) and not TIMEOUT_CLOSE_IF_TP1_HIT:
                 continue
+
             age_hours = _trade_age_hours(trade)
             if age_hours is None or age_hours < SIGNAL_TIMEOUT_HOURS:
                 continue
+
             current_price = await asyncio.to_thread(get_price, symbol)
             if current_price is None:
-                continue
-            entry_price = safe_number(trade.get("entry"))
-            close_price = entry_price if TIMEOUT_CLOSE_AT == "ENTRY" and entry_price else current_price
-            closed = await asyncio.to_thread(force_close_trade, trade_id, close_price, "TIMEOUT")
-            if not closed:
+                logger.warning("TIMEOUT | %s | price unavailable", symbol)
                 continue
 
-            # 🔵 بستن روی صرافی
-            if toobit_enabled():
-                orig_amt = float(trade.get("toobit_amount") or 0)
-                if orig_amt > 0:
-                    already = float(trade.get("toobit_closed_fraction") or 0)
-                    frac = max(0.0, 1.0 - already)
-                    if frac > 0:
-                        await asyncio.to_thread(
-                            toobit_close, symbol, direction, orig_amt, frac, close_price,
-                        )
-                        await asyncio.to_thread(
-                            update_trade_meta, trade_id, {"toobit_closed_fraction": 1.0}
-                        )
+            entry_price = safe_number(trade.get("entry"))
+            if TIMEOUT_CLOSE_AT == "ENTRY" and entry_price is not None:
+                close_price = entry_price
+            else:
+                close_price = current_price
+
+            try:
+                closed = await asyncio.to_thread(
+                    force_close_trade, trade_id, close_price, "TIMEOUT"
+                )
+            except Exception:
+                logger.exception("TIMEOUT | force_close_trade failed for %s", trade_id)
+                continue
+
+            if not closed:
+                logger.warning("TIMEOUT | %s | tracker refused to close", symbol)
+                continue
+
+            closed_count += 1
+            logger.warning(
+                "TIMEOUT_CLOSE | %s | %s | age=%.1fh | entry=%s | close=%s",
+                symbol, direction, age_hours, entry_price, close_price,
+            )
+
+            margin = safe_number(trade.get("margin"), DEFAULT_MARGIN_USDT)
+            leverage = safe_number(trade.get("leverage"), DEFAULT_LEVERAGE)
+            strategy = trade.get("strategy", "UNKNOWN")
+            score = trade.get("score", "—")
+
+            pnl_text = "N/A"
+            roi_text = "N/A"
+            if entry_price and close_price and margin and leverage:
+                if direction == "LONG":
+                    price_pct = (close_price - entry_price) / entry_price
+                else:
+                    price_pct = (entry_price - close_price) / entry_price
+                roi_pct = price_pct * leverage * 100
+                pnl = margin * price_pct * leverage
+                pnl_text = f"{pnl:+.4f} USDT"
+                roi_text = f"{roi_pct:+.2f}%"
+
+            message = (
+                f"⌛ <b>بستن خودکار سیگنال (تایم‌اوت)</b>\n\n"
+                f"🪙 <b>{safe_text(symbol)}</b>\n"
+                f"📈 Direction: <b>{safe_text(direction)}</b>\n"
+                f"🧠 Strategy: <b>{safe_text(strategy)}</b>\n"
+                f"⭐ Score: {safe_text(score)}\n\n"
+                f"⏱ مدت باز بودن: <b>{age_hours:.1f} ساعت</b>\n"
+                f"📌 Entry: {display_number(entry_price)}\n"
+                f"💰 قیمت بستن: <b>{display_number(close_price)}</b>\n\n"
+                f"💵 PnL: <b>{pnl_text}</b>\n"
+                f"📊 ROI: <b>{roi_text}</b>\n\n"
+                f"📝 دلیل: به TP1 نرسید و از تایم‌اوت "
+                f"<b>{SIGNAL_TIMEOUT_HOURS:.0f} ساعته</b> گذشت."
+            )
 
             for chat_id in list(chat_ids):
                 try:
                     await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=f"⌛ <b>تایم‌اوت</b>\n{safe_text(symbol)} {safe_text(direction)}\n"
-                             f"⏱ {age_hours:.1f}h | Close: {display_number(close_price)}",
-                        parse_mode="HTML",
+                        chat_id=chat_id, text=message, parse_mode="HTML"
                     )
                 except Exception:
-                    logger.exception("Timeout send error")
+                    logger.exception("TIMEOUT | send error for chat %s", chat_id)
+
         except Exception:
-            logger.exception("Timeout trade error")
+            logger.exception("TIMEOUT | error processing trade %s", trade.get("id"))
+
+    if closed_count > 0:
+        logger.info("TIMEOUT | closed %d trade(s) due to timeout", closed_count)
 
 # ============================================================
-# BTC TREND ALERTS
+# /OPEN — list open trades
 # ============================================================
 
-async def check_btc_trend_changes(context: ContextTypes.DEFAULT_TYPE):
+async def open_trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    trades = await asyncio.to_thread(get_open_trades)
+    if not trades:
+        await update.effective_message.reply_text("هیچ معامله باز وجود ندارد ✅")
+        return
+
+    lines = [f"📋 <b>معاملات باز ({len(trades)})</b>\n"]
+    for t in trades:
+        try:
+            tid      = t.get("id", "?")
+            sym      = t.get("symbol", "?")
+            dirn     = t.get("direction", "?")
+            entry    = display_number(t.get("entry"))
+            sl       = display_number(t.get("sl"))
+            tp1      = display_number(t.get("tp1"))
+            tp1_flag = "✅" if t.get("tp1_hit") else "⏳"
+            age      = _trade_age_hours(t)
+            age_txt  = f"{age:.1f}h" if age is not None else "?"
+            lines.append(
+                f"#{tid} <b>{safe_text(sym)}</b> {safe_text(dirn)} | {age_txt}\n"
+                f"   Entry: {entry} | SL: {sl} | TP1: {tp1} {tp1_flag}\n"
+            )
+        except Exception:
+            continue
+
+    text = "\n".join(lines)
+    if len(text) > 4000:
+        text = text[:3900] + "\n\n..."
+    await update.effective_message.reply_text(text, parse_mode="HTML")
+
+# ============================================================
+# /CLOSE <id> — manual close
+# ============================================================
+async def close_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.effective_message.reply_text(
+            "فرمت: /close &lt;id&gt;\n"
+            "مثال: <code>/close BTC-SWAP-USDT_LONG_1730000000.123</code>\n\n"
+            "برای دیدن id دقیق از /open استفاده کن (روی id بزن تا کپی شه).",
+            parse_mode="HTML",
+        )
+        return
+
+    # ID is a string like "BTC-SWAP-USDT_LONG_1730000000.123"
+    trade_id = str(context.args[0]).strip().lstrip("#")
+
+    open_trades = await asyncio.to_thread(get_open_trades)
+    target = None
+    for t in open_trades:
+        if str(t.get("id")) == trade_id:
+            target = t
+            break
+
+    if target is None:
+        await update.effective_message.reply_text(
+            f"❌ معامله باز با id پیدا نشد:\n<code>{safe_text(trade_id)}</code>\n\n"
+            "دستور /open رو بزن و id دقیق رو کپی کن.",
+            parse_mode="HTML",
+        )
+        return
+
+    symbol    = target.get("symbol", "UNKNOWN")
+    direction = str(target.get("direction", "?")).upper()
+
+    price = await asyncio.to_thread(get_price, symbol)
+    if price is None:
+        await update.effective_message.reply_text(
+            f"❌ قیمت لحظه‌ای {safe_text(symbol)} در دسترس نیست."
+        )
+        return
+
     try:
-        open_trades = await asyncio.to_thread(get_open_trades)
-        if not open_trades:
-            return
-        btc_context = await asyncio.to_thread(fetch_btc_context, get_klines)
-        current_h1 = btc_context.get("h1") or "RANGE"
-        current_adx = float(btc_context.get("adx_h1") or 0.0)
-        chat_ids = context.application.bot_data.get("chat_ids", set())
-        for trade in open_trades:
-            if trade.get("trend_change_alerted"):
-                continue
-            direction = str(trade.get("direction", "")).upper()
-            if direction not in ("LONG", "SHORT"):
-                continue
-            expected = "BULLISH" if direction == "LONG" else "BEARISH"
-            if current_h1 in ("BULLISH", "BEARISH") and current_h1 != expected and current_adx >= 22:
-                symbol = trade.get("symbol", "UNKNOWN")
-                for chat_id in list(chat_ids):
-                    try:
-                        await context.bot.send_message(
-                            chat_id=chat_id,
-                            text=f"🚨 <b>تغییر روند BTC</b>\n{safe_text(symbol)} {safe_text(direction)}\n"
-                                 f"BTC 1H: {current_h1} (ADX: {current_adx:.1f})",
-                            parse_mode="HTML",
-                        )
-                    except Exception:
-                        pass
-                await asyncio.to_thread(mark_trend_alert, trade.get("id"))
+        closed = await asyncio.to_thread(
+            force_close_trade, trade_id, price, "MANUAL_CLOSE"
+        )
     except Exception:
-        logger.exception("BTC trend error")
+        logger.exception("MANUAL_CLOSE | failed")
+        await update.effective_message.reply_text("❌ خطا در بستن معامله.")
+        return
+
+    if not closed:
+        await update.effective_message.reply_text(
+            "❌ بستن ناموفق بود (شاید قبلاً بسته شده)."
+        )
+        return
+
+    entry    = safe_number(target.get("entry"))
+    margin   = safe_number(target.get("margin"), DEFAULT_MARGIN_USDT)
+    leverage = safe_number(target.get("leverage"), DEFAULT_LEVERAGE)
+
+    pnl_text = roi_text = "N/A"
+    if entry and margin and leverage:
+        pct = (
+            (price - entry) / entry if direction == "LONG"
+            else (entry - price) / entry
+        )
+        pnl = margin * pct * leverage
+        roi = pct * leverage * 100
+        pnl_text = f"{pnl:+.4f} USDT"
+        roi_text = f"{roi:+.2f}%"
+
+    message = (
+        f"🔒 <b>بستن دستی معامله</b>\n\n"
+        f"🪙 <b>{safe_text(symbol)}</b>\n"
+        f"📈 Direction: <b>{safe_text(direction)}</b>\n\n"
+        f"📌 Entry: {display_number(entry)}\n"
+        f"💰 قیمت بستن: <b>{display_number(price)}</b>\n\n"
+        f"💵 PnL: <b>{pnl_text}</b>\n"
+        f"📊 ROI: <b>{roi_text}</b>"
+    )
+    await update.effective_message.reply_text(message, parse_mode="HTML")
+
+    chat_ids = context.application.bot_data.get("chat_ids", set())
+    for chat_id in list(chat_ids):
+        if chat_id == update.effective_chat.id:
+            continue
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id, text=message, parse_mode="HTML"
+            )
+        except Exception:
+            pass
 
 # ============================================================
 # MAIN
 # ============================================================
-
 def main():
     if not TOKEN:
-        raise RuntimeError("BOT_TOKEN is missing.")
+        raise RuntimeError("BOT_TOKEN environment variable is missing.")
 
     logger.info("=" * 60)
     logger.info("CryptoBot starting...")
-    logger.info("Symbols: %s", len(SYMBOLS))
-    logger.info("Margin: %.2f USDT | Leverage: %sx", DEFAULT_MARGIN_USDT, DEFAULT_LEVERAGE)
-    logger.info("Toobit enabled: %s", toobit_enabled())
-    logger.info("Timeout: %s h", SIGNAL_TIMEOUT_HOURS if TIMEOUT_ENABLED else "disabled")
+    logger.info("Symbols to scan: %s", len(SYMBOLS))
+    logger.info("Automatic scan interval: %s seconds", AUTO_INTERVAL)
+    logger.info("Tracker interval: %s seconds", TRACKER_INTERVAL)
+    logger.info("Critical news window: %s minutes", NEWS_BLOCK_MINUTES)
+    logger.info("Signal policy: HIGH quality, score >= 10")
+    logger.info("Estimated PnL settings: margin %.2f USDT, leverage %sx", DEFAULT_MARGIN_USDT, DEFAULT_LEVERAGE)
     logger.info("=" * 60)
+
+    if TIMEOUT_ENABLED:
+        logger.info(
+            "Timeout checker: ENABLED | timeout=%sh | interval=%ss | close_at=%s",
+            SIGNAL_TIMEOUT_HOURS, TIMEOUT_CHECK_INTERVAL, TIMEOUT_CLOSE_AT,
+        )
+    else:
+        logger.info("Timeout checker: DISABLED by env (TIMEOUT_ENABLED=0)")
 
     application = Application.builder().token(TOKEN).build()
 
+    # ---- Commands ----
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("price", price))
     application.add_handler(CommandHandler("signal", signal))
     application.add_handler(CommandHandler("register", register_chat))
     application.add_handler(CommandHandler("stats", tracker_stats))
     application.add_handler(CommandHandler("news", news_command))
+    application.add_handler(CommandHandler("news_test", news_test_command))
+    application.add_handler(CommandHandler("backtest", backtest_command))
     application.add_handler(CommandHandler("report", report_now))
     application.add_handler(CommandHandler("open", open_trades_command))
     application.add_handler(CommandHandler("close", close_command))
 
+    # ---- Repeating jobs ----
     application.job_queue.run_repeating(
-        track_open_trades, interval=TRACKER_INTERVAL, first=TRACKER_INTERVAL,
+        track_open_trades,
+        interval=TRACKER_INTERVAL,
+        first=TRACKER_INTERVAL,
         job_kwargs={"max_instances": 1, "coalesce": True},
     )
+    logger.info("Trade tracker scheduled every %s seconds", TRACKER_INTERVAL)
+
     application.job_queue.run_repeating(
-        auto_signal, interval=AUTO_INTERVAL, first=60,
+        auto_signal,
+        interval=AUTO_INTERVAL,
+        first=60,
         job_kwargs={"max_instances": 1, "coalesce": True},
     )
+    logger.info("Automatic signal scanner scheduled every %s seconds", AUTO_INTERVAL)
+
     application.job_queue.run_repeating(
-        check_btc_trend_changes, interval=300, first=120,
+        check_btc_trend_changes,
+        interval=300,
+        first=120,
         job_kwargs={"max_instances": 1, "coalesce": True},
     )
+    logger.info("BTC trend change alert scheduled every 300 seconds")
+
     if TIMEOUT_ENABLED:
         application.job_queue.run_repeating(
-            check_signal_timeouts, interval=TIMEOUT_CHECK_INTERVAL, first=240,
+            check_signal_timeouts,
+            interval=TIMEOUT_CHECK_INTERVAL,
+            first=240,
             job_kwargs={"max_instances": 1, "coalesce": True},
         )
+        logger.info(
+            "Signal timeout checker scheduled every %s seconds (timeout=%sh)",
+            TIMEOUT_CHECK_INTERVAL, SIGNAL_TIMEOUT_HOURS,
+        )
+
     application.job_queue.run_daily(
         daily_strategy_report,
         time=dt_time(hour=20, minute=30, tzinfo=timezone.utc),
+        name="daily_strategy_report",
     )
+    logger.info("Daily strategy report scheduled at 20:30 UTC (00:00 Tehran)")
 
-    logger.info("CryptoBot started.")
+    logger.info("CryptoBot started successfully.")
     application.run_polling(drop_pending_updates=True)
 
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
 
 if __name__ == "__main__":
     main()
