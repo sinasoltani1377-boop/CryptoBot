@@ -13,7 +13,7 @@ from news import get_latest_news, news_diagnostics
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-from analysis import generate_signal
+from analysis import generate_signal, get_sr_levels, atr, candle_values
 from btc_context import fetch_btc_context
 from watchlist import get_symbols
 from market import get_futures_symbols
@@ -1481,8 +1481,100 @@ async def check_btc_trend_changes(context: ContextTypes.DEFAULT_TYPE):
             )
     
     except Exception:
-        logger.exception("BTC trend change check error")
+ 
+    logger.exception("BTC trend change check error")
+# ============================================================
+# BTC SUPPORT/RESISTANCE ALERTS (v28 NEW)
+# ============================================================
 
+async def check_btc_sr_alerts(context: ContextTypes.DEFAULT_TYPE):
+    """Alert when BTC price approaches 4H or Daily support/resistance levels."""
+    try:
+        chat_ids = context.application.bot_data.get("chat_ids", set())
+        if not chat_ids:
+            return
+
+        # Get BTC 4H and Daily candles
+        btc_4h = await asyncio.to_thread(get_klines, "BTC-SWAP-USDT", "4h", 200)
+        btc_1d = await asyncio.to_thread(get_klines, "BTC-SWAP-USDT", "1d", 200)
+        if not btc_4h or not btc_1d:
+            logger.warning("BTC_SR_ALERT | candles unavailable")
+            return
+
+        current_price = await asyncio.to_thread(get_price, "BTC-SWAP-USDT")
+        if current_price is None:
+            return
+
+        levels_4h = get_sr_levels(btc_4h, lookback=150, num_levels=6)
+        levels_1d = get_sr_levels(btc_1d, lookback=150, num_levels=6)
+
+        atr_4h = atr(btc_4h, 14)
+        if atr_4h <= 0:
+            return
+        tolerance = atr_4h * 0.4
+
+        alerted = context.application.bot_data.setdefault("btc_sr_alerted", {})
+        now_ts = time.time()
+        # Cleanup: 4-hour cooldown
+        alerted = {k: v for k, v in alerted.items() if now_ts - v < 4 * 3600}
+        context.application.bot_data["btc_sr_alerted"] = alerted
+
+        for timeframe, levels in [("4H", levels_4h), ("DAILY", levels_1d)]:
+            for lvl in levels:
+                level_price = lvl["price"]
+                level_type = lvl["type"]
+                strength = lvl["strength"]
+
+                if abs(current_price - level_price) > tolerance:
+                    continue
+
+                level_key = f"{timeframe}_{round(level_price, 0)}_{level_type}"
+                if level_key in alerted:
+                    continue
+                alerted[level_key] = now_ts
+
+                if level_type == "SUPPORT":
+                    emoji = "🟢"
+                    potential = "احتمال برگشت صعودی (LONG)"
+                elif level_type == "RESISTANCE":
+                    emoji = "🔴"
+                    potential = "احتمال برگشت نزولی (SHORT)"
+                else:
+                    emoji = "⚪"
+                    potential = "سطح مختلط"
+
+                distance = abs(current_price - level_price)
+                distance_pct = (distance / current_price) * 100 if current_price else 0
+
+                message = (
+                    f"⚠️ <b>هشدار رسیدن بیت‌کوین به حمایت/مقاومت</b>\n\n"
+                    f"₿ <b>BTC/USDT</b>\n"
+                    f"📊 تایم‌فریم: <b>{timeframe}</b>\n"
+                    f"{emoji} نوع سطح: <b>{level_type}</b>\n"
+                    f"💪 قدرت سطح: <b>{strength} برخورد</b>\n\n"
+                    f"💰 قیمت فعلی: <b>{current_price:,.2f}</b>\n"
+                    f"🎯 سطح: <b>{level_price:,.2f}</b>\n"
+                    f"📏 فاصله: {distance:,.2f} ({distance_pct:.2f}%)\n\n"
+                    f"{emoji} {potential}\n\n"
+                    f"💡 مراقب رفتار قیمت در این سطح باشید.\n"
+                    f"اگر سطح شکسته شد یا برگشت کرد، سیگنال ممکن است صادر شود."
+                )
+
+                for chat_id in list(chat_ids):
+                    try:
+                        await context.bot.send_message(
+                            chat_id=chat_id, text=message, parse_mode="HTML"
+                        )
+                    except Exception:
+                        logger.exception("BTC SR alert send error for chat %s", chat_id)
+
+                logger.warning(
+                    "BTC_SR_ALERT | %s | Level=%s | Type=%s | Strength=%s | Price=%s",
+                    timeframe, level_price, level_type, strength, current_price,
+                )
+
+    except Exception:
+        logger.exception("BTC SR alert check error")
 # ============================================================
 # SIGNAL TIMEOUT CHECKER
 # ============================================================
