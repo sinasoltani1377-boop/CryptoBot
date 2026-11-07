@@ -1,10 +1,8 @@
 # ============================================================
-# CryptoBot - Analysis Engine v28
+# CryptoBot - Analysis Engine v29
 #
-# v25: PROVEN WINNERS ONLY
-# v26: BTC 1H filter, 15M breakout confirmation
-# v27: FAST_TREND strategy
-# v28: SR_BREAKOUT + SR_REJECTION (Support/Resistance)  ← NEW
+# v28: SR_BREAKOUT + SR_REJECTION
+# v29: LIQUIDITY_SWEEP (King Liquidity / Stop Hunt / Fake Breakout)  ← NEW
 # ============================================================
 
 from __future__ import annotations
@@ -959,11 +957,10 @@ def _mtf_basic(m15, direction):
 
 
 # ============================================================
-# ⭐ v28 NEW: SUPPORT / RESISTANCE DETECTION
+# SUPPORT / RESISTANCE DETECTION (v28)
 # ============================================================
 
 def find_swing_points(candles: List[Any], strength: int = 2):
-    """Find swing highs/lows in given candles."""
     if len(candles) < strength * 2 + 1:
         return []
     hs = highs(candles)
@@ -984,7 +981,6 @@ def find_swing_points(candles: List[Any], strength: int = 2):
 
 
 def cluster_sr_points(points, tolerance_pct: float = 0.6):
-    """Cluster nearby swing points into unified S/R levels."""
     if not points:
         return []
     points = sorted(points, key=lambda x: x[0])
@@ -1012,7 +1008,6 @@ def cluster_sr_points(points, tolerance_pct: float = 0.6):
 
 def get_sr_levels(candles: List[Any], lookback: int = 150,
                   num_levels: int = 6, tolerance_pct: float = 0.6):
-    """Detect top S/R levels from candles."""
     arr = candles[-lookback:] if len(candles) > lookback else candles
     if len(arr) < 20:
         return []
@@ -1024,7 +1019,6 @@ def get_sr_levels(candles: List[Any], lookback: int = 150,
 
 
 def detect_real_breakout(candles, sr_levels, direction):
-    """Detect a REAL breakout (not a fake liquidity grab)."""
     if len(candles) < 5 or not sr_levels:
         return None
     atr_val = atr(candles, 14)
@@ -1074,7 +1068,6 @@ def detect_real_breakout(candles, sr_levels, direction):
 
 
 def detect_fake_breakout(candles, sr_levels, direction):
-    """Detect fake breakout / liquidity grab on recent candles."""
     if len(candles) < 3 or not sr_levels:
         return False
     last = candles[-1]
@@ -1097,7 +1090,6 @@ def detect_fake_breakout(candles, sr_levels, direction):
 
 
 def find_rejection_at_sr(candles, sr_levels, direction):
-    """Find a rejection/bounce off S/R level."""
     if len(candles) < 5 or not sr_levels:
         return None
     atr_val = atr(candles, 14)
@@ -1393,80 +1385,129 @@ def detect_bb_reversion(h1, m15, m5, direction):
             "bb_upper": upper, "bb_mid": mid, "bb_lower": lower}
 
 
-# ⭐ v28 NEW: SR_BREAKOUT strategy
 def detect_sr_breakout(h1, m15, m5, direction):
-    """Real breakout through S/R level with volume + confirmation."""
     sr_h1 = get_sr_levels(h1, 120, 6)
     sr_m15 = get_sr_levels(m15, 120, 6)
     if not sr_h1 and not sr_m15:
         return {"valid": False, "reason": "NO_SR_LEVELS"}
     if atr(h1, 14) <= 0:
         return {"valid": False, "reason": "NO_ATR"}
-
-    # Filter fake breakouts FIRST
     if detect_fake_breakout(m15, sr_m15, direction) or \
        detect_fake_breakout(h1, sr_h1, direction):
         return {"valid": False, "reason": "FAKE_BREAKOUT"}
-
     brk_15 = detect_real_breakout(m15, sr_m15, direction)
     brk_1h = detect_real_breakout(h1, sr_h1, direction)
     if not brk_15 and not brk_1h:
         return {"valid": False, "reason": "NO_REAL_BREAKOUT"}
-
     if not entry_trigger_5m(m5, direction):
         return {"valid": False, "reason": "5M_TRIGGER"}
     if not _mtf_basic(m15, direction):
         return {"valid": False, "reason": "NO_15M_CONFIRMATION"}
-
     adx_1h = adx(h1)
     if adx_1h < 20:
         return {"valid": False, "reason": "ADX_TOO_LOW"}
-
     score = 7
     if brk_1h: score += 2
     if brk_15: score += 1
     if adx_1h >= 25: score += 1
     if volume_spike(m15, 1.5, 20): score += 1
-
     best = brk_1h or brk_15
     return {"valid": True, "reason": "VALID", "score": score, "mtf": True,
             "sr_level": best["level"], "sr_type": best["type"],
             "sr_strength": best["strength"]}
 
 
-# ⭐ v28 NEW: SR_REJECTION strategy
 def detect_sr_rejection(h1, m15, m5, direction):
-    """Bounce off S/R level (no break)."""
     sr_h1 = get_sr_levels(h1, 120, 6)
     sr_m15 = get_sr_levels(m15, 120, 6)
     if not sr_h1 and not sr_m15:
         return {"valid": False, "reason": "NO_SR_LEVELS"}
     if atr(h1, 14) <= 0:
         return {"valid": False, "reason": "NO_ATR"}
-
-    # Reject fake breakouts
     if detect_fake_breakout(m15, sr_m15, direction):
         return {"valid": False, "reason": "FAKE_BREAKOUT"}
-
     rej_15 = find_rejection_at_sr(m15, sr_m15, direction)
     rej_1h = find_rejection_at_sr(h1, sr_h1, direction)
     if not rej_15 and not rej_1h:
         return {"valid": False, "reason": "NO_REJECTION"}
-
     if not entry_trigger_5m(m5, direction):
         return {"valid": False, "reason": "5M_TRIGGER"}
     if not _mtf_basic(m15, direction):
         return {"valid": False, "reason": "NO_15M_CONFIRMATION"}
-
     score = 7
     if rej_1h: score += 2
     if rej_15: score += 1
     if rej_1h and rej_1h.get("strength", 0) >= 3: score += 1
-
     best = rej_1h or rej_15
     return {"valid": True, "reason": "VALID", "score": score, "mtf": True,
             "sr_level": best["level"], "sr_type": best["type"],
             "sr_strength": best["strength"]}
+
+
+# ⭐ v29 NEW: LIQUIDITY_SWEEP (King Liquidity)
+def detect_liquidity_sweep(h1, m15, m5, direction):
+    """
+    Liquidity Sweep / Fake Breakout / Stop Hunt.
+    Price sweeps a recent high/low, traps traders, and reverses.
+    """
+    if len(m15) < 30 or len(m5) < 10:
+        return {"valid": False, "reason": "INSUFFICIENT_DATA"}
+    
+    lookback = 20
+    recent = m15[-lookback-1:-1]
+    last = m15[-1]
+    
+    recent_high = max(highs(recent))
+    recent_low = min(lows(recent))
+    
+    _, lh, ll, lc, lv = candle_values(last)
+    rng = lh - ll
+    if rng <= 0:
+        return {"valid": False, "reason": "ZERO_RANGE"}
+    
+    if direction == "LONG":
+        # Must sweep recent low
+        if ll >= recent_low:
+            return {"valid": False, "reason": "NO_SWEEP"}
+        # Must close back inside (above recent_low)
+        if lc <= recent_low:
+            return {"valid": False, "reason": "NO_RECLAIM"}
+        # Must be a strong rejection (long lower wick)
+        if lower_wick(last) / rng < 0.35:
+            return {"valid": False, "reason": "WEAK_WICK"}
+        # Must have 5M structure shift
+        if not structure_shift_5m(m5, direction):
+            return {"valid": False, "reason": "NO_5M_SHIFT"}
+        
+        vol_spike = volume_spike(m15, 1.2, 20)
+        score = 8
+        if vol_spike: score += 1
+        if _mtf_basic(m15, direction): score += 1
+        
+        return {"valid": True, "reason": "VALID", "score": score, "mtf": True, "swept_level": recent_low}
+
+    elif direction == "SHORT":
+        # Must sweep recent high
+        if lh <= recent_high:
+            return {"valid": False, "reason": "NO_SWEEP"}
+        # Must close back inside (below recent_high)
+        if lc >= recent_high:
+            return {"valid": False, "reason": "NO_RECLAIM"}
+        # Must be a strong rejection (long upper wick)
+        if upper_wick(last) / rng < 0.35:
+            return {"valid": False, "reason": "WEAK_WICK"}
+        # Must have 5M structure shift
+        if not structure_shift_5m(m5, direction):
+            return {"valid": False, "reason": "NO_5M_SHIFT"}
+        
+        vol_spike = volume_spike(m15, 1.2, 20)
+        score = 8
+        if vol_spike: score += 1
+        if _mtf_basic(m15, direction): score += 1
+        
+        return {"valid": True, "reason": "VALID", "score": score, "mtf": True, "swept_level": recent_high}
+        
+    return {"valid": False, "reason": "INVALID_DIRECTION"}
 
 
 # ============================================================
@@ -1480,7 +1521,7 @@ def context_allows(strategy, daily, h4, direction, h4_adx):
     daily_opp = daily in ("BULLISH", "BEARISH") and daily != expected
     h4_opp = h4 in ("BULLISH", "BEARISH") and h4 != expected
 
-    if strategy in ("RANGE_TRADING", "BB_REVERSION", "SR_REJECTION"):
+    if strategy in ("RANGE_TRADING", "BB_REVERSION", "SR_REJECTION", "LIQUIDITY_SWEEP"):
         if daily_opp and h4_opp and h4_adx >= 30:
             return False
         return True
@@ -1533,7 +1574,7 @@ def btc_filter(direction, btc_context, strategy=""):
     if opp_h1 and btc_adx_h1 >= 22:
         return "BLOCK"
 
-    if strategy in ("RANGE_TRADING", "BB_REVERSION", "SR_REJECTION"):
+    if strategy in ("RANGE_TRADING", "BB_REVERSION", "SR_REJECTION", "LIQUIDITY_SWEEP"):
         if opp_h4 and btc_adx_h4 >= 35:
             return "BLOCK"
         return "ALLOW"
@@ -1565,6 +1606,8 @@ def calculate_trade_levels(h1, m5, direction, strategy="DEFAULT"):
         return _calc_bb_reversion_levels(h1, m5, direction, entry)
     if strategy == "FAST_TREND":
         return _calc_fast_trend_levels(h1, m5, direction, entry)
+    if strategy == "LIQUIDITY_SWEEP":
+        return _calc_sweep_levels(h1, m5, direction, entry)
     return _calc_trend_levels(h1, m5, direction, entry)
 
 
@@ -1661,6 +1704,33 @@ def _calc_trend_levels(h1, m5, direction, entry):
         "breakeven_at_tp1": True,
         "sl_source": "swing" if sl_swing else "atr",
         "tp_source": "pivot" if cands else "r_multiple",
+    }
+
+
+# ⭐ v29 NEW: LIQUIDITY_SWEEP levels (Tight SL behind sweep, TP = recent range)
+def _calc_sweep_levels(h1, m5, direction, entry):
+    base = _calc_trend_levels(h1, m5, direction, entry)
+    if not base:
+        return None
+    risk = base["risk"]
+    sl = base["sl"]
+    
+    # For sweep, we want a tighter SL and TP based on the reversion
+    if direction == "LONG":
+        tp1 = entry + risk * 1.5
+        tp2 = entry + risk * 2.5
+        tp3 = entry + risk * 3.5
+        if not (sl < entry < tp1 < tp2 < tp3): return None
+    else:
+        tp1 = entry - risk * 1.5
+        tp2 = entry - risk * 2.5
+        tp3 = entry - risk * 3.5
+        if not (sl > entry > tp1 > tp2 > tp3): return None
+        
+    return {
+        **base,
+        "tp1": tp1, "tp2": tp2, "tp3": tp3,
+        "rr": "1:1.5/1:2.5/1:3.5",
     }
 
 
@@ -1816,11 +1886,12 @@ def run_strategy(name, h1, m15, m5, direction):
     if name == "FAST_TREND": return detect_fast_trend(h1, m15, m5, direction)
     if name == "SR_BREAKOUT": return detect_sr_breakout(h1, m15, m5, direction)
     if name == "SR_REJECTION": return detect_sr_rejection(h1, m15, m5, direction)
+    if name == "LIQUIDITY_SWEEP": return detect_liquidity_sweep(h1, m15, m5, direction)
     return {"valid": False, "reason": "UNKNOWN_STRATEGY"}
 
 
 # ============================================================
-# MAIN ENGINE (v28 - adds SR_BREAKOUT + SR_REJECTION)
+# MAIN ENGINE (v29 - adds LIQUIDITY_SWEEP)
 # ============================================================
 
 def generate_signal(daily, h4, h1, m15, m5,
@@ -1846,14 +1917,14 @@ def generate_signal(daily, h4, h1, m15, m5,
     h4_adx = adx(h4c)
     vol = volume_spike(m15c, 1.50, 20)
 
-    # ⭐ v28: add SR strategies to both regimes
+    # ⭐ v29: Add LIQUIDITY_SWEEP to both regimes
     if adx1 < 22:
         strategy_names = ["BB_REVERSION", "RANGE_TRADING", "REVERSAL",
-                          "FAST_TREND", "SR_REJECTION", "SR_BREAKOUT"]
+                          "FAST_TREND", "SR_REJECTION", "SR_BREAKOUT", "LIQUIDITY_SWEEP"]
         logger.info("REGIME_SWITCH | MARKET | RANGING (ADX=%.1f)", adx1)
     else:
         strategy_names = ["BREAKOUT", "REVERSAL", "FAST_TREND",
-                          "SR_BREAKOUT", "SR_REJECTION"]
+                          "SR_BREAKOUT", "SR_REJECTION", "LIQUIDITY_SWEEP"]
         logger.info("REGIME_SWITCH | MARKET | TRENDING (ADX=%.1f)", adx1)
 
     diagnostics = {}
@@ -1906,9 +1977,10 @@ def generate_signal(daily, h4, h1, m15, m5,
         return no_trade("NO_VALID_STRATEGY", daily_dir, h4_dir, h1_dir,
                         None, diagnostics, metrics, btc=btc_context)
 
-    # ⭐ v28 priority: SR_BREAKOUT highest
-    priority = {"SR_BREAKOUT": 7, "BREAKOUT": 6, "SR_REJECTION": 5,
-                "BB_REVERSION": 5, "FAST_TREND": 4, "RANGE_TRADING": 3, "REVERSAL": 2}
+    # ⭐ v29 priority: LIQUIDITY_SWEEP is very strong
+    priority = {"SR_BREAKOUT": 7, "LIQUIDITY_SWEEP": 7, "BREAKOUT": 6,
+                "SR_REJECTION": 5, "BB_REVERSION": 5, "FAST_TREND": 4,
+                "RANGE_TRADING": 3, "REVERSAL": 2}
     high_candidates = []
     rejection_reasons = []
 
@@ -1944,10 +2016,11 @@ def generate_signal(daily, h4, h1, m15, m5,
             high = score >= 8 and cm["confirmation"]
         elif sn == "FAST_TREND":
             high = score >= 10 and _mtf_basic(m15c, direction)
-        # ⭐ v28: SR strategies HIGH check
         elif sn == "SR_BREAKOUT":
             high = score >= 9 and cm["confirmation"] and _mtf_basic(m15c, direction)
         elif sn == "SR_REJECTION":
+            high = score >= 9 and cm["confirmation"]
+        elif sn == "LIQUIDITY_SWEEP":
             high = score >= 9 and cm["confirmation"]
         else:
             high = False
@@ -1956,7 +2029,7 @@ def generate_signal(daily, h4, h1, m15, m5,
             failed = []
             min_score = {"BREAKOUT": 9, "REVERSAL": 9, "RANGE_TRADING": 8,
                          "BB_REVERSION": 8, "FAST_TREND": 10,
-                         "SR_BREAKOUT": 9, "SR_REJECTION": 9}.get(sn, 999)
+                         "SR_BREAKOUT": 9, "SR_REJECTION": 9, "LIQUIDITY_SWEEP": 9}.get(sn, 999)
             if score < min_score: failed.append(f"SCORE={score}<{min_score}")
             if not cm["confirmation"]: failed.append("NO_5M_CONFIRMATION")
             if sn == "BREAKOUT":
