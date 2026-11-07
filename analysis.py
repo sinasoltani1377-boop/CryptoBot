@@ -1,8 +1,9 @@
 # ============================================================
-# CryptoBot - Analysis Engine v29
+# CryptoBot - Analysis Engine v30
 #
 # v28: SR_BREAKOUT + SR_REJECTION
-# v29: LIQUIDITY_SWEEP (King Liquidity / Stop Hunt / Fake Breakout)  ← NEW
+# v29: LIQUIDITY_SWEEP (King Liquidity / Stop Hunt)
+# v30: AMD_STRATEGY (Accumulation -> Manipulation -> Distribution)  ← NEW
 # ============================================================
 
 from __future__ import annotations
@@ -957,7 +958,7 @@ def _mtf_basic(m15, direction):
 
 
 # ============================================================
-# SUPPORT / RESISTANCE DETECTION (v28)
+# SUPPORT / RESISTANCE DETECTION
 # ============================================================
 
 def find_swing_points(candles: List[Any], strength: int = 2):
@@ -1444,70 +1445,101 @@ def detect_sr_rejection(h1, m15, m5, direction):
             "sr_strength": best["strength"]}
 
 
-# ⭐ v29 NEW: LIQUIDITY_SWEEP (King Liquidity)
 def detect_liquidity_sweep(h1, m15, m5, direction):
-    """
-    Liquidity Sweep / Fake Breakout / Stop Hunt.
-    Price sweeps a recent high/low, traps traders, and reverses.
-    """
     if len(m15) < 30 or len(m5) < 10:
         return {"valid": False, "reason": "INSUFFICIENT_DATA"}
-    
     lookback = 20
     recent = m15[-lookback-1:-1]
     last = m15[-1]
-    
     recent_high = max(highs(recent))
     recent_low = min(lows(recent))
-    
     _, lh, ll, lc, lv = candle_values(last)
     rng = lh - ll
     if rng <= 0:
         return {"valid": False, "reason": "ZERO_RANGE"}
-    
     if direction == "LONG":
-        # Must sweep recent low
         if ll >= recent_low:
             return {"valid": False, "reason": "NO_SWEEP"}
-        # Must close back inside (above recent_low)
         if lc <= recent_low:
             return {"valid": False, "reason": "NO_RECLAIM"}
-        # Must be a strong rejection (long lower wick)
         if lower_wick(last) / rng < 0.35:
             return {"valid": False, "reason": "WEAK_WICK"}
-        # Must have 5M structure shift
         if not structure_shift_5m(m5, direction):
             return {"valid": False, "reason": "NO_5M_SHIFT"}
-        
         vol_spike = volume_spike(m15, 1.2, 20)
         score = 8
         if vol_spike: score += 1
         if _mtf_basic(m15, direction): score += 1
-        
         return {"valid": True, "reason": "VALID", "score": score, "mtf": True, "swept_level": recent_low}
-
     elif direction == "SHORT":
-        # Must sweep recent high
         if lh <= recent_high:
             return {"valid": False, "reason": "NO_SWEEP"}
-        # Must close back inside (below recent_high)
         if lc >= recent_high:
             return {"valid": False, "reason": "NO_RECLAIM"}
-        # Must be a strong rejection (long upper wick)
         if upper_wick(last) / rng < 0.35:
             return {"valid": False, "reason": "WEAK_WICK"}
-        # Must have 5M structure shift
         if not structure_shift_5m(m5, direction):
             return {"valid": False, "reason": "NO_5M_SHIFT"}
-        
         vol_spike = volume_spike(m15, 1.2, 20)
         score = 8
         if vol_spike: score += 1
         if _mtf_basic(m15, direction): score += 1
-        
         return {"valid": True, "reason": "VALID", "score": score, "mtf": True, "swept_level": recent_high}
-        
     return {"valid": False, "reason": "INVALID_DIRECTION"}
+
+
+# ⭐ v30 NEW: AMD_STRATEGY (Accumulation, Manipulation, Distribution)
+def detect_amd(h1, m15, m5, direction):
+    if len(m15) < 30 or len(m5) < 10:
+        return {"valid": False, "reason": "INSUFFICIENT_DATA"}
+    
+    lookback = 15
+    acc_candles = m15[-lookback-1:-1]
+    if len(acc_candles) < 10:
+        return {"valid": False, "reason": "NO_ACCUMULATION_DATA"}
+        
+    acc_high = max(highs(acc_candles))
+    acc_low = min(lows(acc_candles))
+    acc_range = acc_high - acc_low
+    atr15 = atr(m15, 14)
+    
+    # 1. Accumulation Phase: Range must be tight
+    if atr15 <= 0 or acc_range > atr15 * 2.5:
+        return {"valid": False, "reason": "NO_TIGHT_ACCUMULATION"}
+        
+    last = m15[-1]
+    _, lh, ll, lc, _ = candle_values(last)
+    rng = lh - ll
+    if rng <= 0:
+        return {"valid": False, "reason": "ZERO_RANGE"}
+        
+    # 2. Manipulation & 3. Distribution
+    if direction == "LONG":
+        # Sweeps accumulation low
+        if ll >= acc_low: return {"valid": False, "reason": "NO_SWEEP_LOW"}
+        # Reclaims (closes back in range)
+        if lc <= acc_low: return {"valid": False, "reason": "NO_RECLAIM"}
+        # Strong rejection wick
+        if lower_wick(last) / rng < 0.40: return {"valid": False, "reason": "WEAK_REJECTION_WICK"}
+        # Distribution confirmation (5M structure shift)
+        if not structure_shift_5m(m5, direction): return {"valid": False, "reason": "NO_DISTRIBUTION_SHIFT"}
+        
+    elif direction == "SHORT":
+        # Sweeps accumulation high
+        if lh <= acc_high: return {"valid": False, "reason": "NO_SWEEP_HIGH"}
+        # Reclaims
+        if lc >= acc_high: return {"valid": False, "reason": "NO_RECLAIM"}
+        # Strong rejection wick
+        if upper_wick(last) / rng < 0.40: return {"valid": False, "reason": "WEAK_REJECTION_WICK"}
+        # Distribution confirmation
+        if not structure_shift_5m(m5, direction): return {"valid": False, "reason": "NO_DISTRIBUTION_SHIFT"}
+        
+    else:
+        return {"valid": False, "reason": "INVALID_DIRECTION"}
+        
+    score = 9
+    if volume_spike(m15, 1.3, 20): score += 1
+    return {"valid": True, "reason": "VALID", "score": score, "mtf": True, "acc_high": acc_high, "acc_low": acc_low}
 
 
 # ============================================================
@@ -1515,13 +1547,13 @@ def detect_liquidity_sweep(h1, m15, m5, direction):
 # ============================================================
 
 def context_allows(strategy, daily, h4, direction, h4_adx):
-    if strategy == "FAST_TREND":
+    if strategy in ("FAST_TREND", "LIQUIDITY_SWEEP", "AMD_STRATEGY"):
         return True
     expected = "BULLISH" if direction == "LONG" else "BEARISH"
     daily_opp = daily in ("BULLISH", "BEARISH") and daily != expected
     h4_opp = h4 in ("BULLISH", "BEARISH") and h4 != expected
 
-    if strategy in ("RANGE_TRADING", "BB_REVERSION", "SR_REJECTION", "LIQUIDITY_SWEEP"):
+    if strategy in ("RANGE_TRADING", "BB_REVERSION", "SR_REJECTION"):
         if daily_opp and h4_opp and h4_adx >= 30:
             return False
         return True
@@ -1554,7 +1586,7 @@ def btc_filter(direction, btc_context, strategy=""):
         return "ALLOW"
     expected = "BULLISH" if direction == "LONG" else "BEARISH"
 
-    if strategy == "FAST_TREND":
+    if strategy in ("FAST_TREND", "LIQUIDITY_SWEEP", "AMD_STRATEGY"):
         btc_m15 = btc_context.get("m15") or "RANGE"
         if btc_m15 in ("BULLISH", "BEARISH") and btc_m15 != expected:
             return "BLOCK"
@@ -1574,7 +1606,7 @@ def btc_filter(direction, btc_context, strategy=""):
     if opp_h1 and btc_adx_h1 >= 22:
         return "BLOCK"
 
-    if strategy in ("RANGE_TRADING", "BB_REVERSION", "SR_REJECTION", "LIQUIDITY_SWEEP"):
+    if strategy in ("RANGE_TRADING", "BB_REVERSION", "SR_REJECTION"):
         if opp_h4 and btc_adx_h4 >= 35:
             return "BLOCK"
         return "ALLOW"
@@ -1608,6 +1640,8 @@ def calculate_trade_levels(h1, m5, direction, strategy="DEFAULT"):
         return _calc_fast_trend_levels(h1, m5, direction, entry)
     if strategy == "LIQUIDITY_SWEEP":
         return _calc_sweep_levels(h1, m5, direction, entry)
+    if strategy == "AMD_STRATEGY":
+        return _calc_amd_levels(h1, m5, direction, entry)
     return _calc_trend_levels(h1, m5, direction, entry)
 
 
@@ -1707,15 +1741,12 @@ def _calc_trend_levels(h1, m5, direction, entry):
     }
 
 
-# ⭐ v29 NEW: LIQUIDITY_SWEEP levels (Tight SL behind sweep, TP = recent range)
 def _calc_sweep_levels(h1, m5, direction, entry):
     base = _calc_trend_levels(h1, m5, direction, entry)
     if not base:
         return None
     risk = base["risk"]
     sl = base["sl"]
-    
-    # For sweep, we want a tighter SL and TP based on the reversion
     if direction == "LONG":
         tp1 = entry + risk * 1.5
         tp2 = entry + risk * 2.5
@@ -1726,12 +1757,27 @@ def _calc_sweep_levels(h1, m5, direction, entry):
         tp2 = entry - risk * 2.5
         tp3 = entry - risk * 3.5
         if not (sl > entry > tp1 > tp2 > tp3): return None
-        
-    return {
-        **base,
-        "tp1": tp1, "tp2": tp2, "tp3": tp3,
-        "rr": "1:1.5/1:2.5/1:3.5",
-    }
+    return {**base, "tp1": tp1, "tp2": tp2, "tp3": tp3, "rr": "1:1.5/1:2.5/1:3.5"}
+
+
+# ⭐ v30 NEW: AMD levels (SL above/below sweep wick, TP based on RR)
+def _calc_amd_levels(h1, m5, direction, entry):
+    base = _calc_trend_levels(h1, m5, direction, entry)
+    if not base:
+        return None
+    risk = base["risk"]
+    sl = base["sl"]
+    if direction == "LONG":
+        tp1 = entry + risk * 2.0
+        tp2 = entry + risk * 3.0
+        tp3 = entry + risk * 4.0
+        if not (sl < entry < tp1 < tp2 < tp3): return None
+    else:
+        tp1 = entry - risk * 2.0
+        tp2 = entry - risk * 3.0
+        tp3 = entry - risk * 4.0
+        if not (sl > entry > tp1 > tp2 > tp3): return None
+    return {**base, "tp1": tp1, "tp2": tp2, "tp3": tp3, "rr": "1:2/1:3/1:4"}
 
 
 def _calc_range_levels(h1, m5, direction, entry):
@@ -1887,11 +1933,12 @@ def run_strategy(name, h1, m15, m5, direction):
     if name == "SR_BREAKOUT": return detect_sr_breakout(h1, m15, m5, direction)
     if name == "SR_REJECTION": return detect_sr_rejection(h1, m15, m5, direction)
     if name == "LIQUIDITY_SWEEP": return detect_liquidity_sweep(h1, m15, m5, direction)
+    if name == "AMD_STRATEGY": return detect_amd(h1, m15, m5, direction)
     return {"valid": False, "reason": "UNKNOWN_STRATEGY"}
 
 
 # ============================================================
-# MAIN ENGINE (v29 - adds LIQUIDITY_SWEEP)
+# MAIN ENGINE (v30 - adds AMD_STRATEGY)
 # ============================================================
 
 def generate_signal(daily, h4, h1, m15, m5,
@@ -1917,14 +1964,14 @@ def generate_signal(daily, h4, h1, m15, m5,
     h4_adx = adx(h4c)
     vol = volume_spike(m15c, 1.50, 20)
 
-    # ⭐ v29: Add LIQUIDITY_SWEEP to both regimes
     if adx1 < 22:
         strategy_names = ["BB_REVERSION", "RANGE_TRADING", "REVERSAL",
-                          "FAST_TREND", "SR_REJECTION", "SR_BREAKOUT", "LIQUIDITY_SWEEP"]
+                          "FAST_TREND", "SR_REJECTION", "SR_BREAKOUT", 
+                          "LIQUIDITY_SWEEP", "AMD_STRATEGY"]
         logger.info("REGIME_SWITCH | MARKET | RANGING (ADX=%.1f)", adx1)
     else:
         strategy_names = ["BREAKOUT", "REVERSAL", "FAST_TREND",
-                          "SR_BREAKOUT", "SR_REJECTION", "LIQUIDITY_SWEEP"]
+                          "SR_BREAKOUT", "SR_REJECTION", "LIQUIDITY_SWEEP", "AMD_STRATEGY"]
         logger.info("REGIME_SWITCH | MARKET | TRENDING (ADX=%.1f)", adx1)
 
     diagnostics = {}
@@ -1977,10 +2024,10 @@ def generate_signal(daily, h4, h1, m15, m5,
         return no_trade("NO_VALID_STRATEGY", daily_dir, h4_dir, h1_dir,
                         None, diagnostics, metrics, btc=btc_context)
 
-    # ⭐ v29 priority: LIQUIDITY_SWEEP is very strong
-    priority = {"SR_BREAKOUT": 7, "LIQUIDITY_SWEEP": 7, "BREAKOUT": 6,
-                "SR_REJECTION": 5, "BB_REVERSION": 5, "FAST_TREND": 4,
-                "RANGE_TRADING": 3, "REVERSAL": 2}
+    # Priority: AMD is highest, then SR and LIQUIDITY
+    priority = {"AMD_STRATEGY": 8, "SR_BREAKOUT": 7, "LIQUIDITY_SWEEP": 7, 
+                "BREAKOUT": 6, "SR_REJECTION": 5, "BB_REVERSION": 5, 
+                "FAST_TREND": 4, "RANGE_TRADING": 3, "REVERSAL": 2}
     high_candidates = []
     rejection_reasons = []
 
@@ -2022,6 +2069,8 @@ def generate_signal(daily, h4, h1, m15, m5,
             high = score >= 9 and cm["confirmation"]
         elif sn == "LIQUIDITY_SWEEP":
             high = score >= 9 and cm["confirmation"]
+        elif sn == "AMD_STRATEGY":
+            high = score >= 9 and cm["confirmation"]
         else:
             high = False
 
@@ -2029,7 +2078,7 @@ def generate_signal(daily, h4, h1, m15, m5,
             failed = []
             min_score = {"BREAKOUT": 9, "REVERSAL": 9, "RANGE_TRADING": 8,
                          "BB_REVERSION": 8, "FAST_TREND": 10,
-                         "SR_BREAKOUT": 9, "SR_REJECTION": 9, "LIQUIDITY_SWEEP": 9}.get(sn, 999)
+                         "SR_BREAKOUT": 9, "SR_REJECTION": 9, "LIQUIDITY_SWEEP": 9, "AMD_STRATEGY": 9}.get(sn, 999)
             if score < min_score: failed.append(f"SCORE={score}<{min_score}")
             if not cm["confirmation"]: failed.append("NO_5M_CONFIRMATION")
             if sn == "BREAKOUT":
