@@ -457,7 +457,7 @@ def already_tracking(symbol, direction):
     try:
         open_trades = get_open_trades()
         
-        if len(open_trades) >= 40:
+        if len(open_trades) >= 8:
             logger.warning(
                 "MAX_OPEN_TRADES_REACHED | %s | Existing=%d",
                 symbol, len(open_trades),
@@ -468,7 +468,7 @@ def already_tracking(symbol, direction):
             1 for t in open_trades
             if str(t.get("direction", "")).upper() == direction
         )
-        if same_dir_count >= 2:
+        if same_dir_count >= 4:
             logger.warning(
                 "MAX_SAME_DIRECTION | %s | %s count=%d",
                 symbol, direction, same_dir_count,
@@ -563,8 +563,8 @@ def log_strategy_details(symbol, result):
         parts = []
         for strategy in ("TREND_FOLLOWING", "PULLBACK", "BREAKOUT", 
                          "REVERSAL", "RANGE_TRADING", "BB_REVERSION", "FAST_TREND", 
-                         "SR_BREAKOUT", "SR_REJECTION", "LIQUIDITY_SWEEP", 
-                         "AMD_STRATEGY", "SESSION_LIQUIDITY"):
+                         "SR_BREAKOUT", "SR_REJECTION", 
+                         "AMD_STRATEGY"):
             value = diagnostics.get(strategy)
             if value is None:
                 parts.append(f"{strategy}=NO_DATA")
