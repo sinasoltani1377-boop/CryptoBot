@@ -1,9 +1,9 @@
 # ============================================================
-# CryptoBot - Analysis Engine v31
+# CryptoBot - Analysis Engine v32
 #
-# v29: LIQUIDITY_SWEEP
 # v30: AMD_STRATEGY
-# v31: SESSION_LIQUIDITY (Asian Range Sweep by London/NY)  ← NEW
+# v31: SESSION_LIQUIDITY
+# v32: REMOVED SESSION_LIQUIDITY & LIQUIDITY_SWEEP (per user request)
 # ============================================================
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
-# BASIC HELPERS & TIME UTILS
+# BASIC HELPERS
 # ============================================================
 
 def safe_float(value: Any, default: float = 0.0) -> float:
@@ -47,29 +47,6 @@ def candle_values(c: Any) -> Tuple[float, float, float, float, float]:
             return (safe_float(c[0]), safe_float(c[1]), safe_float(c[2]),
                     safe_float(c[3]), safe_float(c[4]))
     return 0.0, 0.0, 0.0, 0.0, 0.0
-
-
-# ⭐ v31 NEW: Get UTC hour from candle
-def get_utc_hour(c: Any) -> Optional[int]:
-    try:
-        ts = None
-        if isinstance(c, dict):
-            ts = c.get("timestamp") or c.get("time") or c.get("t")
-        elif isinstance(c, (list, tuple)):
-            ts = c[0]
-            
-        if ts is None:
-            return None
-            
-        ts = float(ts)
-        # Convert ms to sec if needed
-        if ts > 1e11:
-            ts = ts / 1000.0
-            
-        dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-        return dt.hour
-    except Exception:
-        return None
 
 
 def normalize_candles(candles: Any) -> List[Any]:
@@ -1469,49 +1446,6 @@ def detect_sr_rejection(h1, m15, m5, direction):
             "sr_strength": best["strength"]}
 
 
-def detect_liquidity_sweep(h1, m15, m5, direction):
-    if len(m15) < 30 or len(m5) < 10:
-        return {"valid": False, "reason": "INSUFFICIENT_DATA"}
-    lookback = 20
-    recent = m15[-lookback-1:-1]
-    last = m15[-1]
-    recent_high = max(highs(recent))
-    recent_low = min(lows(recent))
-    _, lh, ll, lc, lv = candle_values(last)
-    rng = lh - ll
-    if rng <= 0:
-        return {"valid": False, "reason": "ZERO_RANGE"}
-    if direction == "LONG":
-        if ll >= recent_low:
-            return {"valid": False, "reason": "NO_SWEEP"}
-        if lc <= recent_low:
-            return {"valid": False, "reason": "NO_RECLAIM"}
-        if lower_wick(last) / rng < 0.35:
-            return {"valid": False, "reason": "WEAK_WICK"}
-        if not structure_shift_5m(m5, direction):
-            return {"valid": False, "reason": "NO_5M_SHIFT"}
-        vol_spike = volume_spike(m15, 1.2, 20)
-        score = 8
-        if vol_spike: score += 1
-        if _mtf_basic(m15, direction): score += 1
-        return {"valid": True, "reason": "VALID", "score": score, "mtf": True, "swept_level": recent_low}
-    elif direction == "SHORT":
-        if lh <= recent_high:
-            return {"valid": False, "reason": "NO_SWEEP"}
-        if lc >= recent_high:
-            return {"valid": False, "reason": "NO_RECLAIM"}
-        if upper_wick(last) / rng < 0.35:
-            return {"valid": False, "reason": "WEAK_WICK"}
-        if not structure_shift_5m(m5, direction):
-            return {"valid": False, "reason": "NO_5M_SHIFT"}
-        vol_spike = volume_spike(m15, 1.2, 20)
-        score = 8
-        if vol_spike: score += 1
-        if _mtf_basic(m15, direction): score += 1
-        return {"valid": True, "reason": "VALID", "score": score, "mtf": True, "swept_level": recent_high}
-    return {"valid": False, "reason": "INVALID_DIRECTION"}
-
-
 def detect_amd(h1, m15, m5, direction):
     if len(m15) < 30 or len(m5) < 10:
         return {"valid": False, "reason": "INSUFFICIENT_DATA"}
@@ -1547,82 +1481,12 @@ def detect_amd(h1, m15, m5, direction):
     return {"valid": True, "reason": "VALID", "score": score, "mtf": True, "acc_high": acc_high, "acc_low": acc_low}
 
 
-# ⭐ v31 NEW: SESSION_LIQUIDITY (Asian Range Sweep by London/NY)
-def detect_session_liquidity(h1, m15, m5, direction):
-    if len(m15) < 96 or len(m5) < 10:
-        return {"valid": False, "reason": "INSUFFICIENT_DATA"}
-    
-    # Use last 24 hours of 15m candles (96 candles)
-    current_hour = get_utc_hour(m15[-1])
-    if current_hour is None:
-        return {"valid": False, "reason": "NO_TIME_DATA"}
-        
-    # Identify current session
-    # Asia: 00:00 - 06:59 UTC
-    # London: 07:00 - 11:59 UTC
-    # NY: 12:00 - 20:59 UTC
-    # Off hours: 21:00 - 23:59 UTC
-    
-    is_london = 7 <= current_hour < 12
-    is_ny = 12 <= current_hour < 21
-    
-    # We only trade during London or NY sessions
-    if not (is_london or is_ny):
-        return {"valid": False, "reason": "NOT_IN_ACTIVE_SESSION"}
-        
-    # Find Asian Session High/Low for TODAY (00:00 to 07:00)
-    asia_high = 0.0
-    asia_low = 999999.0
-    asia_found = False
-    
-    for c in m15[-96:]: # Look back 24 hours
-        h = get_utc_hour(c)
-        if h is not None and 0 <= h < 7:
-            _, ch, cl, _, _ = candle_values(c)
-            if ch > asia_high: asia_high = ch
-            if cl < asia_low: asia_low = cl
-            asia_found = True
-            
-    if not asia_found or asia_high == 0.0:
-        return {"valid": False, "reason": "NO_ASIA_RANGE"}
-        
-    # Check last 4 candles of m15 for a sweep
-    last_candles = m15[-4:]
-    swept = False
-    
-    for c in last_candles:
-        _, ch, cl, cc, _ = candle_values(c)
-        if direction == "LONG":
-            # Swept Asian Low and closed above
-            if cl < asia_low and cc > asia_low:
-                swept = True
-                break
-        elif direction == "SHORT":
-            # Swept Asian High and closed below
-            if ch > asia_high and cc < asia_high:
-                swept = True
-                break
-                
-    if not swept:
-        return {"valid": False, "reason": "NO_SESSION_SWEEP"}
-        
-    # Confirm with 5M structure shift
-    if not structure_shift_5m(m5, direction):
-        return {"valid": False, "reason": "NO_5M_SHIFT"}
-        
-    score = 9
-    if volume_spike(m15, 1.3, 20): score += 1
-    if _mtf_basic(m15, direction): score += 1
-    
-    return {"valid": True, "reason": "VALID", "score": score, "mtf": True, "asia_high": asia_high, "asia_low": asia_low}
-
-
 # ============================================================
 # HTF CONTEXT
 # ============================================================
 
 def context_allows(strategy, daily, h4, direction, h4_adx):
-    if strategy in ("FAST_TREND", "LIQUIDITY_SWEEP", "AMD_STRATEGY", "SESSION_LIQUIDITY"):
+    if strategy in ("FAST_TREND", "AMD_STRATEGY"):
         return True
     expected = "BULLISH" if direction == "LONG" else "BEARISH"
     daily_opp = daily in ("BULLISH", "BEARISH") and daily != expected
@@ -1661,7 +1525,7 @@ def btc_filter(direction, btc_context, strategy=""):
         return "ALLOW"
     expected = "BULLISH" if direction == "LONG" else "BEARISH"
 
-    if strategy in ("FAST_TREND", "LIQUIDITY_SWEEP", "AMD_STRATEGY", "SESSION_LIQUIDITY"):
+    if strategy in ("FAST_TREND", "AMD_STRATEGY"):
         btc_m15 = btc_context.get("m15") or "RANGE"
         if btc_m15 in ("BULLISH", "BEARISH") and btc_m15 != expected:
             return "BLOCK"
@@ -1698,7 +1562,7 @@ def btc_filter(direction, btc_context, strategy=""):
 
 
 # ============================================================
-# TRADE LEVELS (Default implementations)
+# TRADE LEVELS
 # ============================================================
 
 def calculate_trade_levels(h1, m5, direction, strategy="DEFAULT"):
@@ -1713,8 +1577,6 @@ def calculate_trade_levels(h1, m5, direction, strategy="DEFAULT"):
         return _calc_bb_reversion_levels(h1, m5, direction, entry)
     if strategy == "FAST_TREND":
         return _calc_fast_trend_levels(h1, m5, direction, entry)
-    if strategy == "LIQUIDITY_SWEEP":
-        return _calc_sweep_levels(h1, m5, direction, entry)
     if strategy == "AMD_STRATEGY":
         return _calc_amd_levels(h1, m5, direction, entry)
     return _calc_trend_levels(h1, m5, direction, entry)
@@ -1814,25 +1676,6 @@ def _calc_trend_levels(h1, m5, direction, entry):
         "sl_source": "swing" if sl_swing else "atr",
         "tp_source": "pivot" if cands else "r_multiple",
     }
-
-
-def _calc_sweep_levels(h1, m5, direction, entry):
-    base = _calc_trend_levels(h1, m5, direction, entry)
-    if not base:
-        return None
-    risk = base["risk"]
-    sl = base["sl"]
-    if direction == "LONG":
-        tp1 = entry + risk * 1.5
-        tp2 = entry + risk * 2.5
-        tp3 = entry + risk * 3.5
-        if not (sl < entry < tp1 < tp2 < tp3): return None
-    else:
-        tp1 = entry - risk * 1.5
-        tp2 = entry - risk * 2.5
-        tp3 = entry - risk * 3.5
-        if not (sl > entry > tp1 > tp2 > tp3): return None
-    return {**base, "tp1": tp1, "tp2": tp2, "tp3": tp3, "rr": "1:1.5/1:2.5/1:3.5"}
 
 
 def _calc_amd_levels(h1, m5, direction, entry):
@@ -2006,14 +1849,12 @@ def run_strategy(name, h1, m15, m5, direction):
     if name == "FAST_TREND": return detect_fast_trend(h1, m15, m5, direction)
     if name == "SR_BREAKOUT": return detect_sr_breakout(h1, m15, m5, direction)
     if name == "SR_REJECTION": return detect_sr_rejection(h1, m15, m5, direction)
-    if name == "LIQUIDITY_SWEEP": return detect_liquidity_sweep(h1, m15, m5, direction)
     if name == "AMD_STRATEGY": return detect_amd(h1, m15, m5, direction)
-    if name == "SESSION_LIQUIDITY": return detect_session_liquidity(h1, m15, m5, direction)
     return {"valid": False, "reason": "UNKNOWN_STRATEGY"}
 
 
 # ============================================================
-# MAIN ENGINE (v31 - adds SESSION_LIQUIDITY)
+# MAIN ENGINE (v32 - Removed SESSION_LIQUIDITY & LIQUIDITY_SWEEP)
 # ============================================================
 
 def generate_signal(daily, h4, h1, m15, m5,
@@ -2041,13 +1882,11 @@ def generate_signal(daily, h4, h1, m15, m5,
 
     if adx1 < 22:
         strategy_names = ["BB_REVERSION", "RANGE_TRADING", "REVERSAL",
-                          "FAST_TREND", "SR_REJECTION", "SR_BREAKOUT", 
-                          "LIQUIDITY_SWEEP", "AMD_STRATEGY", "SESSION_LIQUIDITY"]
+                          "FAST_TREND", "SR_REJECTION", "SR_BREAKOUT", "AMD_STRATEGY"]
         logger.info("REGIME_SWITCH | MARKET | RANGING (ADX=%.1f)", adx1)
     else:
         strategy_names = ["BREAKOUT", "REVERSAL", "FAST_TREND",
-                          "SR_BREAKOUT", "SR_REJECTION", "LIQUIDITY_SWEEP", 
-                          "AMD_STRATEGY", "SESSION_LIQUIDITY"]
+                          "SR_BREAKOUT", "SR_REJECTION", "AMD_STRATEGY"]
         logger.info("REGIME_SWITCH | MARKET | TRENDING (ADX=%.1f)", adx1)
 
     diagnostics = {}
@@ -2100,9 +1939,8 @@ def generate_signal(daily, h4, h1, m15, m5,
         return no_trade("NO_VALID_STRATEGY", daily_dir, h4_dir, h1_dir,
                         None, diagnostics, metrics, btc=btc_context)
 
-    # Priority: AMD and Session Liquidity are top
-    priority = {"AMD_STRATEGY": 8, "SESSION_LIQUIDITY": 8, "SR_BREAKOUT": 7, 
-                "LIQUIDITY_SWEEP": 7, "BREAKOUT": 6, "SR_REJECTION": 5, 
+    priority = {"AMD_STRATEGY": 8, "SR_BREAKOUT": 7, 
+                "BREAKOUT": 6, "SR_REJECTION": 5, 
                 "BB_REVERSION": 5, "FAST_TREND": 4, "RANGE_TRADING": 3, "REVERSAL": 2}
     high_candidates = []
     rejection_reasons = []
@@ -2143,11 +1981,7 @@ def generate_signal(daily, h4, h1, m15, m5,
             high = score >= 9 and cm["confirmation"] and _mtf_basic(m15c, direction)
         elif sn == "SR_REJECTION":
             high = score >= 9 and cm["confirmation"]
-        elif sn == "LIQUIDITY_SWEEP":
-            high = score >= 9 and cm["confirmation"]
         elif sn == "AMD_STRATEGY":
-            high = score >= 9 and cm["confirmation"]
-        elif sn == "SESSION_LIQUIDITY":
             high = score >= 9 and cm["confirmation"]
         else:
             high = False
@@ -2156,8 +1990,7 @@ def generate_signal(daily, h4, h1, m15, m5,
             failed = []
             min_score = {"BREAKOUT": 9, "REVERSAL": 9, "RANGE_TRADING": 8,
                          "BB_REVERSION": 8, "FAST_TREND": 10,
-                         "SR_BREAKOUT": 9, "SR_REJECTION": 9, "LIQUIDITY_SWEEP": 9, 
-                         "AMD_STRATEGY": 9, "SESSION_LIQUIDITY": 9}.get(sn, 999)
+                         "SR_BREAKOUT": 9, "SR_REJECTION": 9, "AMD_STRATEGY": 9}.get(sn, 999)
             if score < min_score: failed.append(f"SCORE={score}<{min_score}")
             if not cm["confirmation"]: failed.append("NO_5M_CONFIRMATION")
             if sn == "BREAKOUT":
