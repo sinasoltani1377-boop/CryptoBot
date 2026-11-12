@@ -2,3 +2,5 @@ python-telegram-bot[job-queue]
 requests
 pandas
 numpy
+scikit-learn
+joblib
