@@ -17,6 +17,7 @@ from analysis import generate_signal, get_sr_levels, atr, candle_values
 from btc_context import fetch_btc_context
 from watchlist import get_symbols
 from market import get_futures_symbols
+from ai_engine import ai_brain  # ⭐ اضافه شدن موتور هوش مصنوعی
 from tracker import (
     register_signal,
     check_all_trades,
@@ -561,7 +562,9 @@ def log_strategy_details(symbol, result):
     if isinstance(diagnostics, dict):
         parts = []
         for strategy in ("TREND_FOLLOWING", "PULLBACK", "BREAKOUT", 
-                         "REVERSAL", "RANGE_TRADING", "BB_REVERSION", "FAST_TREND", "SR_BREAKOUT", "SR_REJECTION"):
+                         "REVERSAL", "RANGE_TRADING", "BB_REVERSION", "FAST_TREND", 
+                         "SR_BREAKOUT", "SR_REJECTION", "LIQUIDITY_SWEEP", 
+                         "AMD_STRATEGY", "SESSION_LIQUIDITY"):
             value = diagnostics.get(strategy)
             if value is None:
                 parts.append(f"{strategy}=NO_DATA")
@@ -617,6 +620,7 @@ def signal_text(symbol, result):
     strategy_text = ", ".join(str(item) for item in strategies) if strategies else "NONE"
     roi = result.get("leverage_roi") or {}
     news_note = result.get("_news_note", "بررسی نشده")
+    ai_conf = result.get("_ai_confidence", "N/A")
 
     btc_dir = result.get("btc_dir", "UNKNOWN")
     btc_relation = result.get("btc_relation", "NEUTRAL")
@@ -636,7 +640,8 @@ def signal_text(symbol, result):
         f"{emoji} <b>{safe_text(symbol)}</b>\n\n"
         f"🎯 Signal: <b>{safe_text(direction)}</b>\n"
         f"⭐ Quality: <b>{safe_text(result.get('quality'))}</b>\n"
-        f"📊 Score: <b>{safe_text(result.get('score'))}</b>\n\n"
+        f"📊 Score: <b>{safe_text(result.get('score'))}</b>\n"
+        f"🤖 AI Confidence: <b>{safe_text(ai_conf)}</b>\n\n"
         f"📅 Daily: {safe_text(result.get('daily'))}\n"
         f"⏱ 4H: {safe_text(result.get('4h'))}\n"
         f"🕐 1H: {safe_text(result.get('1h'))}\n"
@@ -690,7 +695,7 @@ def analyze_symbol_raw(symbol, btc_context):
     return result
 
 # ============================================================
-# COMMON SIGNAL PREPARATION (With BTC Context)
+# COMMON SIGNAL PREPARATION (With BTC Context & AI)
 # ============================================================
 
 async def prepare_signal(symbol, btc_context):
@@ -703,11 +708,23 @@ async def prepare_signal(symbol, btc_context):
     if not is_valid_high_signal(result):
         return result, False, "Not a valid HIGH signal"
 
+    # ⭐ AI FILTER START
+    features = ai_brain.extract_features(result, btc_context)
+    ai_confidence = ai_brain.predict_confidence(features)
+    
+    logger.info("AI_EVALUATION | %s | Strategy=%s | AI Confidence: %.1f%%", symbol, result.get("strategy"), ai_confidence)
+    
+    if ai_confidence < 75.0:
+        logger.warning("AI_REJECTED | %s | Confidence %.1f%% < 75%%", symbol, ai_confidence)
+        return result, True, f"🤖 هوش مصنوعی این سیگنال را رد کرد (اطمینان: {ai_confidence:.1f}%)"
+    # ⭐ AI FILTER END
+
     blocked, news_note = await check_critical_news(symbol, result.get("direction"))
     if blocked:
         return result, True, news_note
 
     result["_news_note"] = news_note
+    result["_ai_confidence"] = f"{ai_confidence:.1f}%"
     result = await asyncio.to_thread(add_signal_context, result)
 
     return result, False, news_note
@@ -725,7 +742,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else "⏱ تایم‌اوت بستن خودکار: غیرفعال"
     )
     await update.effective_message.reply_text(
-        f"🤖 CryptoBot فعال است.\n"
+        f"🤖 CryptoBot فعال است (نسخه AI).\n"
         f"📊 تعداد ارزهای در حال اسکن: {len(SYMBOLS)}\n"
         f"{timeout_status}\n\n"
         "دستورات:\n"
@@ -771,6 +788,7 @@ async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Daily → 4H → 1H → 15M → 5M\n\n"
         "فقط سیگنال‌های HIGH با امتیاز بالا.\n"
         "خبرهای بحرانی و روند بیت‌کوین بررسی می‌شوند.\n"
+        "هوش مصنوعی سیگنال‌ها را فیلتر می‌کند.\n"
         "این کار ممکن است چند دقیقه طول بکشد."
     )
 
@@ -809,8 +827,8 @@ async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(
             f"⏳ هیچ سیگنال HIGH جدیدی برای ارسال پیدا نشد.\n"
             f"🔍 تعداد ارزهای بررسی‌شده: {len(SYMBOLS)}\n"
-            f"⛔ مسدودشده توسط خبر: {blocked_by_news}\n"
-            f"📌 ثبت ناموفق یا معامله تکراری: {registration_failed}\n\n"
+            f"⛔ مسدودشده (AI/خبر/تکراری): {blocked_by_news}\n"
+            f"📌 ثبت ناموفق: {registration_failed}\n\n"
             "جزئیات تشخیص در لاگ Belmo ثبت شد."
         )
 
@@ -839,7 +857,7 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
                     continue
                 if blocked:
                     blocked_by_news += 1
-                    logger.warning("AUTO_SIGNAL_BLOCKED_BY_NEWS | %s", symbol)
+                    logger.warning("AUTO_SIGNAL_BLOCKED | %s | Reason=%s", symbol, note)
                     continue
                 if not is_valid_high_signal(result):
                     continue
@@ -849,8 +867,8 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
                     continue
 
                 found += 1
-                logger.info("NEW HIGH SIGNAL | %s | %s | Score=%s | Strategy=%s",
-                    symbol, result.get("direction"), result.get("score"), result.get("strategy"))
+                logger.info("NEW HIGH SIGNAL | %s | %s | Score=%s | Strategy=%s | AI=%s",
+                    symbol, result.get("direction"), result.get("score"), result.get("strategy"), result.get("_ai_confidence"))
 
                 chat_ids = context.application.bot_data.get("chat_ids", set())
                 for chat_id in list(chat_ids):
@@ -865,7 +883,7 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 logger.exception("Auto scan error %s", symbol)
 
-        logger.info("Automatic scan completed. New signals=%s | Blocked by news=%s", found, blocked_by_news)
+        logger.info("Automatic scan completed. New signals=%s | Blocked=%s", found, blocked_by_news)
 
 # ============================================================
 # TRACK OPEN TRADES
@@ -1635,7 +1653,7 @@ async def check_btc_trend_changes(context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# BTC SUPPORT/RESISTANCE ALERTS (v28 NEW)
+# BTC SUPPORT/RESISTANCE ALERTS
 # ============================================================
 
 async def check_btc_sr_alerts(context: ContextTypes.DEFAULT_TYPE):
@@ -1772,7 +1790,6 @@ async def close_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ID is a string like "BTC-SWAP-USDT_LONG_1730000000.123"
     trade_id = str(context.args[0]).strip().lstrip("#")
 
     open_trades = await asyncio.to_thread(get_open_trades)
@@ -1860,7 +1877,7 @@ def main():
         raise RuntimeError("BOT_TOKEN environment variable is missing.")
 
     logger.info("=" * 60)
-    logger.info("CryptoBot starting...")
+    logger.info("CryptoBot starting... [AI ENABLED]")
     logger.info("Symbols to scan: %s", len(SYMBOLS))
     logger.info("Automatic scan interval: %s seconds", AUTO_INTERVAL)
     logger.info("Tracker interval: %s seconds", TRACKER_INTERVAL)
@@ -1919,7 +1936,7 @@ def main():
 
     application.job_queue.run_repeating(
         check_btc_sr_alerts,
-        interval=180,  # هر 3 دقیقه
+        interval=180,
         first=180,
         job_kwargs={"max_instances": 1, "coalesce": True},
     )
